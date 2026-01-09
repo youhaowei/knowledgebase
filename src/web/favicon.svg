@@ -1,0 +1,29 @@
+<svg width="32" height="32" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f5d4"/>
+      <stop offset="100%" stop-color="#00d4aa"/>
+    </linearGradient>
+    <linearGradient id="cyanMuted" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f5d4" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#00d4aa" stop-opacity="0.4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Connection lines -->
+  <g stroke="#00f5d4" stroke-width="12" stroke-opacity="0.25" stroke-linecap="round">
+    <line x1="256" y1="256" x2="152" y2="152"/>
+    <line x1="256" y1="256" x2="360" y2="152"/>
+    <line x1="256" y1="256" x2="152" y2="360"/>
+    <line x1="256" y1="256" x2="360" y2="360"/>
+  </g>
+
+  <!-- Corner nodes -->
+  <circle cx="152" cy="152" r="40" fill="url(#cyanMuted)"/>
+  <circle cx="360" cy="152" r="40" fill="url(#cyanMuted)"/>
+  <circle cx="152" cy="360" r="40" fill="url(#cyanMuted)"/>
+  <circle cx="360" cy="360" r="40" fill="url(#cyanMuted)"/>
+
+  <!-- Center node -->
+  <circle cx="256" cy="256" r="64" fill="url(#cyan)"/>
+</svg>

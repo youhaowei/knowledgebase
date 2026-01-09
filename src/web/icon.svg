@@ -1,0 +1,61 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Primary cyan gradient -->
+    <linearGradient id="cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f5d4"/>
+      <stop offset="100%" stop-color="#00d4aa"/>
+    </linearGradient>
+
+    <!-- Muted variant for depth -->
+    <linearGradient id="cyanMuted" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f5d4" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#00d4aa" stop-opacity="0.4"/>
+    </linearGradient>
+
+    <!-- Glow filter -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Connection lines - subtle -->
+  <g stroke="#00f5d4" stroke-width="2.5" stroke-opacity="0.25" stroke-linecap="round">
+    <line x1="256" y1="256" x2="152" y2="152"/>
+    <line x1="256" y1="256" x2="360" y2="152"/>
+    <line x1="256" y1="256" x2="152" y2="360"/>
+    <line x1="256" y1="256" x2="360" y2="360"/>
+    <line x1="256" y1="256" x2="256" y2="108"/>
+    <line x1="256" y1="256" x2="256" y2="404"/>
+    <line x1="256" y1="256" x2="108" y2="256"/>
+    <line x1="256" y1="256" x2="404" y2="256"/>
+
+    <!-- Outer ring connections -->
+    <line x1="152" y1="152" x2="256" y2="108"/>
+    <line x1="360" y1="152" x2="256" y2="108"/>
+    <line x1="152" y1="152" x2="108" y2="256"/>
+    <line x1="360" y1="152" x2="404" y2="256"/>
+    <line x1="152" y1="360" x2="108" y2="256"/>
+    <line x1="360" y1="360" x2="404" y2="256"/>
+    <line x1="152" y1="360" x2="256" y2="404"/>
+    <line x1="360" y1="360" x2="256" y2="404"/>
+  </g>
+
+  <!-- Outer nodes - smaller, muted -->
+  <circle cx="256" cy="108" r="16" fill="url(#cyanMuted)"/>
+  <circle cx="256" cy="404" r="16" fill="url(#cyanMuted)"/>
+  <circle cx="108" cy="256" r="16" fill="url(#cyanMuted)"/>
+  <circle cx="404" cy="256" r="16" fill="url(#cyanMuted)"/>
+
+  <!-- Mid nodes -->
+  <circle cx="152" cy="152" r="22" fill="url(#cyanMuted)"/>
+  <circle cx="360" cy="152" r="22" fill="url(#cyanMuted)"/>
+  <circle cx="152" cy="360" r="22" fill="url(#cyanMuted)"/>
+  <circle cx="360" cy="360" r="22" fill="url(#cyanMuted)"/>
+
+  <!-- Center node - hero element with glow -->
+  <circle cx="256" cy="256" r="48" fill="url(#cyan)" filter="url(#glow)"/>
+</svg>

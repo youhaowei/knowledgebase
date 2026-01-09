@@ -1,0 +1,58 @@
+{
+  "name": "knowledgebase",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "start:api": "bun --hot run src/api-server.ts",
+    "db:init": "bun run src/lib/init-db.ts",
+    "db:reembed": "bun run src/lib/reembed.ts",
+    "db:reextract": "bun run src/lib/reextract.ts",
+    "test": "bun test",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/bun": "latest",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/vega": "^3.2.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.2",
+    "@typescript-eslint/parser": "^8.18.2",
+    "autoprefixer": "^10.4.23",
+    "eslint": "^9.18.0",
+    "eslint-plugin-sonarjs": "^3.0.5",
+    "prettier": "3.7.4",
+    "tailwindcss": "^4.1.18",
+    "typescript-eslint": "^8.18.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tailwindcss/vite": "^4.1.18",
+    "@tanstack/react-router": "^1.146.0",
+    "@tanstack/react-start": "^1.146.0",
+    "@vitejs/plugin-react": "^5.1.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.562.0",
+    "neo4j-driver": "^6.0.1",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-force-graph-2d": "^1.29.0",
+    "tailwind-merge": "^3.4.0",
+    "vega": "^6.2.0",
+    "vega-embed": "^7.1.0",
+    "vinxi": "^0.5.10",
+    "vite": "^7.3.1",
+    "vite-tsconfig-paths": "^6.0.3",
+    "zod": "^4.3.5",
+    "zod-to-json-schema": "^3.25.1"
+  }
+}
