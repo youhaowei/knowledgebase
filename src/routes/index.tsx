@@ -1,29 +1,28 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect, useCallback } from "react";
-import { Graph } from "@/web/components/Graph";
+import { GraphClient } from "@/web/components/GraphClient";
 import { CommandPalette } from "@/web/components/CommandPalette";
 import { StatsOverlay } from "@/web/components/StatsOverlay";
 import { ParticleBackground } from "@/web/components/ParticleBackground";
 import { getGraphData, getStats } from "@/server/functions";
 import type { GraphNode, GraphLink, Stats } from "@/web/components/types";
 
-// Type for raw graph data from server (with metrics)
+// Type for raw graph data from server (edge-as-fact model)
 interface RawGraphData {
   nodes: Array<{
     id: string;
     name: string;
     type: string;
-    itemType: string | null;
-    namespace: string;
-    degree: number;
-    referenceCount: number;
+    description?: string;
+    summary?: string;
   }>;
   edges: Array<{
     source: string;
     target: string;
-    relation: string;
-    namespace: string;
-    frequency: number;
+    relationType: string;
+    fact: string;
+    sentiment: number;
+    edgeId: string;
   }>;
 }
 
@@ -38,63 +37,64 @@ function normalize(value: number, min: number, max: number): number {
 
 /**
  * Helper to process raw graph data into UI-friendly format
- * Computes normalized importance (0-1) from degree + referenceCount
- * Computes normalized strength (0-1) from frequency
+ * Computes node importance from edge count
+ * Maps edge sentiment to visual strength
  * Filters out orphan nodes (nodes with no connections)
  */
 function processGraphData(graphData: RawGraphData) {
-  // Filter to only Item nodes
-  const rawNodes = graphData.nodes.filter((n) => n.type === "Item");
-
   // Build set of nodes that have at least one connection
   const connectedNodeNames = new Set<string>();
+  const nodeEdgeCount = new Map<string, number>();
+
   for (const edge of graphData.edges) {
     connectedNodeNames.add(edge.source);
     connectedNodeNames.add(edge.target);
+    nodeEdgeCount.set(edge.source, (nodeEdgeCount.get(edge.source) ?? 0) + 1);
+    nodeEdgeCount.set(edge.target, (nodeEdgeCount.get(edge.target) ?? 0) + 1);
   }
 
-  // Filter out orphan nodes (nodes with degree 0 or not in any edge)
-  const connectedNodes = rawNodes.filter(
-    (n) => n.degree > 0 || connectedNodeNames.has(n.name),
+  // Filter out orphan nodes (nodes not in any edge)
+  const connectedNodes = graphData.nodes.filter((n) =>
+    connectedNodeNames.has(n.name),
   );
 
-  // Compute combined importance score (degree weighted more than references)
-  const importanceScores = connectedNodes.map(
-    (n) => n.degree * 2 + n.referenceCount,
-  );
-  const minImportance = Math.min(...importanceScores, 0);
-  const maxImportance = Math.max(...importanceScores, 1);
+  // Compute importance from edge count (how many edges involve this entity)
+  const edgeCounts = connectedNodes.map((n) => nodeEdgeCount.get(n.name) ?? 0);
+  const minImportance = Math.min(...edgeCounts, 0);
+  const maxImportance = Math.max(...edgeCounts, 1);
 
-  const itemNodes: GraphNode[] = connectedNodes.map((n, i) => ({
+  const entityNodes: GraphNode[] = connectedNodes.map((n, i) => ({
     id: n.id || n.name,
     name: n.name,
-    type: n.type,
-    itemType: n.itemType ?? undefined,
-    namespace: n.namespace,
-    degree: n.degree,
-    referenceCount: n.referenceCount,
-    importance: normalize(importanceScores[i]!, minImportance, maxImportance),
+    type: "Entity",
+    itemType: n.type, // Entity type (person, technology, etc.)
+    description: n.description,
+    summary: n.summary,
+    degree: edgeCounts[i],
+    importance: normalize(edgeCounts[i]!, minImportance, maxImportance),
   }));
 
-  const nodeNames = new Set(itemNodes.map((n) => n.name));
+  const nodeNames = new Set(entityNodes.map((n) => n.name));
 
-  // Filter valid edges and compute strength
+  // Filter valid edges and map to GraphLink format
   const validEdges = graphData.edges.filter(
     (e) => nodeNames.has(e.source) && nodeNames.has(e.target),
   );
-  const frequencies = validEdges.map((e) => e.frequency);
-  const minFreq = Math.min(...frequencies, 1);
-  const maxFreq = Math.max(...frequencies, 1);
 
   const validLinks: GraphLink[] = validEdges.map((e) => ({
     source: e.source,
     target: e.target,
-    relation: e.relation,
-    frequency: e.frequency,
-    strength: normalize(e.frequency, minFreq, maxFreq),
+    relationType: e.relationType,
+    fact: e.fact,
+    sentiment: e.sentiment,
+    edgeId: e.edgeId,
+    // Legacy support - relation as readable label
+    relation: e.relationType,
+    // Map sentiment to strength (0-1 range)
+    strength: (e.sentiment + 1) / 2, // -1..1 → 0..1
   }));
 
-  return { itemNodes, validLinks };
+  return { itemNodes: entityNodes, validLinks };
 }
 
 /**
@@ -166,8 +166,8 @@ function Home() {
       <ParticleBackground />
 
       <div className="h-screen overflow-hidden relative z-[2]">
-        {/* Full-screen graph as the primary visual */}
-        <Graph nodes={nodes} links={links} />
+        {/* Full-screen graph as the primary visual - client-only to avoid SSR issues */}
+        <GraphClient nodes={nodes} links={links} />
 
         {/* Stats overlay in top-left corner */}
         <StatsOverlay stats={stats} nodeCount={nodes.length} />

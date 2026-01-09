@@ -14,15 +14,20 @@ import {
   ArrowRight,
   X,
   Command,
+  FileText,
+  Tag,
 } from "lucide-react";
-import { searchMemories, addMemory, streamingSearch } from "@/server/functions";
-import type { Memory } from "./types";
+import { searchMemories, addMemory, askLLM } from "@/server/functions";
+
+// Result types for the unified search
+type ResultType = "memory" | "edge" | "entity" | "llm";
 
 interface SearchResult {
   id: string;
-  name: string;
-  summary?: string;
-  createdAt?: Date;
+  type: ResultType;
+  title: string;
+  subtitle?: string;
+  meta?: string;
 }
 
 type PaletteMode = "search" | "add";
@@ -105,7 +110,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
     }
   }, [isOpen, mode]);
 
-  // Search with streaming
+  // Search - returns memories, facts, and entities; falls back to LLM if empty
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) {
       setResults([]);
@@ -117,52 +122,70 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
     setSelectedIndex(0);
 
     try {
-      // Use streaming search for progressive results
-      const stream = await streamingSearch({
+      const result = await searchMemories({
         data: { query: searchQuery, limit: 10 },
       });
-      const streamedResults: SearchResult[] = [];
 
-      for await (const item of stream) {
-        if (item.type === "memory") {
-          streamedResults.push({
-            id: item.data.id,
-            name: item.data.name,
-            summary: item.data.summary,
-            createdAt: item.data.createdAt,
+      const allResults: SearchResult[] = [];
+
+      // Add memories
+      for (const m of result.memories) {
+        allResults.push({
+          id: m.id,
+          type: "memory",
+          title: m.name || "Untitled Memory",
+          subtitle: m.summary ?? undefined,
+          meta: m.createdAt
+            ? new Date(m.createdAt).toLocaleDateString()
+            : undefined,
+        });
+      }
+
+      // Add edges (facts as relationships)
+      for (const e of result.edges) {
+        allResults.push({
+          id: e.id,
+          type: "edge",
+          title: e.fact,
+          subtitle: `${e.sourceEntity} → ${e.relationType} → ${e.targetEntity}`,
+          meta: e.sentiment > 0.3 ? "positive" : e.sentiment < -0.3 ? "negative" : "neutral",
+        });
+      }
+
+      // Add entities
+      for (const e of result.entities) {
+        allResults.push({
+          id: e.name, // Entities use name as ID
+          type: "entity",
+          title: e.name,
+          subtitle: e.description ?? undefined,
+          meta: e.type ?? undefined,
+        });
+      }
+
+      // If no results, ask LLM
+      if (allResults.length === 0) {
+        try {
+          const llmResult = await askLLM({
+            data: { question: searchQuery },
           });
-          setResults([...streamedResults]);
+          allResults.push({
+            id: "llm-answer",
+            type: "llm",
+            title: "AI Answer",
+            subtitle: llmResult.answer,
+            meta: llmResult.hasContext
+              ? `Based on ${llmResult.edgesUsed} edges, ${llmResult.memoriesUsed} memories`
+              : "No direct matches found",
+          });
+        } catch (llmError) {
+          console.error("LLM fallback error:", llmError);
         }
       }
+
+      setResults(allResults);
     } catch (error) {
       console.error("Search error:", error);
-      // Fallback to regular search
-      try {
-        const result = await searchMemories({
-          data: { query: searchQuery, limit: 10 },
-        });
-        setResults(
-          result.memories.map((m: Memory) => {
-            // Convert createdAt to Date if it's a string, otherwise use as-is
-            let createdAt: Date | undefined;
-            if (m.createdAt) {
-              createdAt =
-                typeof m.createdAt === "string"
-                  ? new Date(m.createdAt)
-                  : m.createdAt;
-            }
-
-            return {
-              id: m.id,
-              name: m.name,
-              summary: m.summary ?? "",
-              createdAt,
-            };
-          }),
-        );
-      } catch (fallbackError) {
-        console.error("Fallback search error:", fallbackError);
-      }
     } finally {
       setIsLoading(false);
     }
@@ -347,44 +370,89 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
                     </div>
                   )}
 
-                  {results.map((result, index) => (
-                    <div
-                      key={result.id}
-                      className={`flex items-start gap-4 px-5 py-4 cursor-pointer transition-all duration-150 ${
-                        index === selectedIndex
-                          ? "bg-glow-cyan-dim/40 border-l-2 border-l-glow-cyan"
-                          : "hover:bg-elevated/50 border-l-2 border-l-transparent"
-                      }`}
-                      onClick={() => setSelectedIndex(index)}
-                      style={{ animationDelay: `${index * 50}ms` }}
-                    >
-                      <div className="w-8 h-8 rounded-lg bg-surface border border-border flex items-center justify-center flex-shrink-0 mt-0.5">
-                        <Brain className="w-4 h-4 text-glow-cyan" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h4 className="text-sm font-medium text-text-primary truncate">
-                          {result.name || "Untitled"}
-                        </h4>
-                        {result.summary && (
-                          <p className="text-xs text-text-tertiary mt-1 line-clamp-2">
-                            {result.summary}
-                          </p>
-                        )}
-                        {result.createdAt && (
-                          <span className="inline-block mt-2 px-2 py-0.5 bg-glow-cyan-dim rounded text-[10px] font-mono text-glow-cyan">
-                            {new Date(result.createdAt).toLocaleDateString()}
-                          </span>
-                        )}
-                      </div>
-                      <ArrowRight
-                        className={`w-4 h-4 text-text-tertiary transition-all ${
+                  {results.map((result, index) => {
+                    // Icon and color based on result type
+                    const iconConfigs: Record<
+                      ResultType,
+                      {
+                        Icon: typeof Brain;
+                        color: string;
+                        bg: string;
+                      }
+                    > = {
+                      memory: {
+                        Icon: Brain,
+                        color: "text-glow-cyan",
+                        bg: "bg-glow-cyan-dim",
+                      },
+                      edge: {
+                        Icon: FileText,
+                        color: "text-glow-magenta",
+                        bg: "bg-glow-magenta/20",
+                      },
+                      entity: {
+                        Icon: Tag,
+                        color: "text-amber-400",
+                        bg: "bg-amber-400/20",
+                      },
+                      llm: {
+                        Icon: Sparkles,
+                        color: "text-purple-400",
+                        bg: "bg-purple-400/20",
+                      },
+                    };
+                    const iconConfig = iconConfigs[result.type];
+
+                    return (
+                      <div
+                        key={`${result.type}-${result.id}`}
+                        className={`flex items-start gap-4 px-5 py-4 cursor-pointer transition-all duration-150 ${
                           index === selectedIndex
-                            ? "opacity-100 translate-x-0"
-                            : "opacity-0 -translate-x-2"
+                            ? "bg-glow-cyan-dim/40 border-l-2 border-l-glow-cyan"
+                            : "hover:bg-elevated/50 border-l-2 border-l-transparent"
                         }`}
-                      />
-                    </div>
-                  ))}
+                        onClick={() => setSelectedIndex(index)}
+                        style={{ animationDelay: `${index * 50}ms` }}
+                      >
+                        <div
+                          className={`w-8 h-8 rounded-lg ${iconConfig.bg} border border-border flex items-center justify-center flex-shrink-0 mt-0.5`}
+                        >
+                          <iconConfig.Icon
+                            className={`w-4 h-4 ${iconConfig.color}`}
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-sm font-medium text-text-primary truncate">
+                              {result.title}
+                            </h4>
+                            <span
+                              className={`text-[10px] font-semibold tracking-wide uppercase px-1.5 py-0.5 rounded ${iconConfig.bg} ${iconConfig.color}`}
+                            >
+                              {result.type}
+                            </span>
+                          </div>
+                          {result.subtitle && (
+                            <p className="text-xs text-text-tertiary mt-1 line-clamp-2">
+                              {result.subtitle}
+                            </p>
+                          )}
+                          {result.meta && (
+                            <span className="inline-block mt-2 px-2 py-0.5 bg-surface rounded text-[10px] font-medium text-text-tertiary">
+                              {result.meta}
+                            </span>
+                          )}
+                        </div>
+                        <ArrowRight
+                          className={`w-4 h-4 text-text-tertiary transition-all ${
+                            index === selectedIndex
+                              ? "opacity-100 translate-x-0"
+                              : "opacity-0 -translate-x-2"
+                          }`}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -393,7 +461,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
             {mode === "add" && (
               <form onSubmit={handleAdd} className="p-5">
                 <div className="mb-4">
-                  <label className="block text-xs font-mono tracking-wider text-text-tertiary uppercase mb-2">
+                  <label className="block text-xs font-medium tracking-wide text-text-tertiary uppercase mb-2">
                     Memory Text
                   </label>
                   <textarea
@@ -406,7 +474,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
                   />
                 </div>
                 <div className="mb-5">
-                  <label className="block text-xs font-mono tracking-wider text-text-tertiary uppercase mb-2">
+                  <label className="block text-xs font-medium tracking-wide text-text-tertiary uppercase mb-2">
                     Name (optional)
                   </label>
                   <input
@@ -471,7 +539,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
                   Close
                 </span>
               </div>
-              <span className="font-mono tracking-wider uppercase opacity-60">
+              <span className="font-medium tracking-wide uppercase opacity-60">
                 Knowledgebase
               </span>
             </div>

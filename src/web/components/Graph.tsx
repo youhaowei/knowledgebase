@@ -35,29 +35,17 @@ const TYPE_COLORS: Record<string, string> = {
 };
 
 // Sentiment-based edge colors
-const EDGE_COLORS = {
-  positive: "#00f5d4", // cyan
-  neutral: "#8892a6", // gray
-  negative: "#ff8c00", // amber/orange
-};
+// Uses a gradient from negative (amber/orange) through neutral (gray) to positive (cyan)
+function getEdgeColor(sentiment: number): string {
+  if (sentiment > 0.3) return "#00f5d4"; // cyan - positive
+  if (sentiment < -0.3) return "#ff8c00"; // amber/orange - negative
+  return "#8892a6"; // gray - neutral
+}
 
-// Positive/negative relation sets for sentiment detection
-const POSITIVE_RELATIONS = new Set([
-  "uses", "prefers", "likes", "loves", "supports", "enables", "creates",
-  "builds", "improves", "enhances", "helps", "provides", "offers",
-  "recommends", "trusts", "values", "enjoys", "appreciates", "benefits", "empowers",
-]);
-
-const NEGATIVE_RELATIONS = new Set([
-  "dislikes", "hates", "avoids", "opposes", "blocks", "prevents", "restricts",
-  "conflicts_with", "contradicts", "rejects", "criticizes", "limits", "hinders",
-  "breaks", "damages", "hurts", "threatens", "undermines",
-]);
-
-function getRelationSentiment(relation: string): "positive" | "neutral" | "negative" {
-  const normalized = relation.toLowerCase().replace(/[_-]/g, "_");
-  if (POSITIVE_RELATIONS.has(normalized)) return "positive";
-  if (NEGATIVE_RELATIONS.has(normalized)) return "negative";
+// Get sentiment category from numeric value (-1 to 1)
+function getSentimentCategory(sentiment: number): "positive" | "neutral" | "negative" {
+  if (sentiment > 0.3) return "positive";
+  if (sentiment < -0.3) return "negative";
   return "neutral";
 }
 
@@ -75,16 +63,17 @@ interface ForceNode extends NodeObject {
 interface ForceLink extends LinkObject {
   source: string | ForceNode;
   target: string | ForceNode;
-  relation: string;
+  relationType: string;
+  fact: string;
+  sentiment: number; // -1 to 1
+  sentimentCategory: "positive" | "neutral" | "negative";
   strength: number;
-  sentiment: "positive" | "neutral" | "negative";
+  edgeId: string;
 }
 
-// Threshold for considering a node a "supernode" (high connectivity)
-const SUPERNODE_DEGREE_THRESHOLD = 8;
-
 export function Graph({ nodes, links }: GraphProps) {
-  const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Track hovered node for focus effect
@@ -114,9 +103,12 @@ export function Graph({ nodes, links }: GraphProps) {
       .map((l) => ({
         source: typeof l.source === "string" ? l.source : l.source.name,
         target: typeof l.target === "string" ? l.target : l.target.name,
-        relation: l.relation || "",
-        strength: l.strength ?? 0.5,
-        sentiment: getRelationSentiment(l.relation || ""),
+        relationType: l.relationType || l.relation || "",
+        fact: l.fact || "",
+        sentiment: l.sentiment ?? 0,
+        sentimentCategory: getSentimentCategory(l.sentiment ?? 0),
+        strength: l.strength ?? (0.5 + Math.abs(l.sentiment ?? 0) * 0.5), // Stronger for more opinionated
+        edgeId: l.edgeId || "",
       }));
 
     return { nodes: forceNodes, links: forceLinks };
@@ -205,8 +197,8 @@ export function Graph({ nodes, links }: GraphProps) {
     const endX = target.x - unitX * (targetSize + 8); // Leave room for arrow
     const endY = target.y - unitY * (targetSize + 8);
 
-    // Draw line
-    const edgeColor = EDGE_COLORS[link.sentiment];
+    // Draw line - use sentiment value directly for color
+    const edgeColor = getEdgeColor(link.sentiment);
     const lineWidth = 1 + link.strength * 2;
 
     ctx.beginPath();
@@ -239,7 +231,7 @@ export function Graph({ nodes, links }: GraphProps) {
     ctx.fill();
 
     // Draw label at midpoint (only if zoomed in enough)
-    if (globalScale > 0.5 && link.relation) {
+    if (globalScale > 0.5 && link.relationType) {
       const midX = (source.x + target.x) / 2;
       const midY = (source.y + target.y) / 2;
       const fontSize = Math.max(8, 9 / globalScale);
@@ -248,7 +240,7 @@ export function Graph({ nodes, links }: GraphProps) {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillStyle = "rgba(136, 146, 166, 0.9)";
-      ctx.fillText(link.relation, midX, midY - 6);
+      ctx.fillText(link.relationType, midX, midY - 6);
     }
   }, []);
 
@@ -279,16 +271,15 @@ export function Graph({ nodes, links }: GraphProps) {
       });
     }
 
-    // Trigger re-render
-    graphRef.current?.refresh();
+    // Note: The highlight sets update refs, React handles re-renders through state changes
   }, [graphData.links]);
 
   if (nodes.length === 0) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
-        <p>No items in the graph yet.</p>
+        <p>No entities in the graph yet.</p>
         <p className="font-sans not-italic opacity-50 text-sm mt-3 tracking-wide">
-          Add a memory to get started!
+          Add a memory to extract facts and entities!
         </p>
       </div>
     );

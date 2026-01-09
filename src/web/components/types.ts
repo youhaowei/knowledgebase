@@ -1,18 +1,24 @@
 /**
  * Shared TypeScript types for the frontend
+ *
+ * Updated for edge-as-fact knowledge graph model:
+ * - Entities are nodes
+ * - Facts are edges (RELATES_TO relationships between entities)
+ * - Each edge has relationType and sentiment
  */
 
 export interface GraphNode {
   id: string;
   name: string;
-  type: string;
-  itemType?: string;
-  namespace: string;
+  type: string; // "Entity"
+  itemType?: string; // Entity type: person, organization, project, technology, concept
+  namespace?: string;
+  description?: string;
+  summary?: string;
   // Importance metrics for visual encoding
-  importance: number; // 0-1, normalized score from degree + references
-  degree: number; // Connection count (in + out)
-  referenceCount: number; // How many memories reference this item
-  // Position fields (managed by Vega force simulation)
+  importance?: number; // 0-1, normalized score
+  degree?: number; // Number of edges involving this entity
+  // Position fields (managed by force simulation)
   x?: number;
   y?: number;
   fx?: number | null;
@@ -22,10 +28,14 @@ export interface GraphNode {
 export interface GraphLink {
   source: string | GraphNode;
   target: string | GraphNode;
-  relation: string;
-  // Strength metrics for visual encoding
-  strength: number; // 0-1, normalized from frequency
-  frequency: number; // How many times this relation was asserted
+  // Edge-as-Fact properties
+  relationType: string; // camelCase relation (uses, prefers, hasAdvantageOver, etc.)
+  fact: string; // Natural language description of the relationship
+  sentiment: number; // -1 (negative) to 1 (positive)
+  edgeId: string; // UUID for the edge
+  // Legacy support (can be computed from relationType)
+  relation?: string; // Alias for relationType
+  strength?: number; // Can be derived from sentiment (0-1)
 }
 
 export interface Memory {
@@ -38,6 +48,6 @@ export interface Memory {
 
 export interface Stats {
   memories: number;
-  items: number;
-  relations: number;
+  entities: number;
+  edges: number;
 }

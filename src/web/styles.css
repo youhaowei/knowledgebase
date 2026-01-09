@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 /* Tell Tailwind to scan React components */
 @source "./components/**/*.tsx";
@@ -24,34 +26,17 @@
   --color-border: rgba(255, 255, 255, 0.06);
   --color-border-glow: rgba(0, 245, 212, 0.2);
 
-  /* Typography System */
-  --font-display: "Space Grotesk", sans-serif;
-  --font-sans: "Inter", sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  /* Typography System - Geist (Vercel) */
+  --font-display: "Geist Variable", sans-serif;
+  --font-sans: "Geist Variable", sans-serif;
+  --font-mono: "Geist Mono Variable", monospace;
 
-  /* Animation System */
+  /* Custom Animations */
   --animate-fadeIn: fadeIn 0.4s ease-out backwards;
   --animate-pulseGlow: pulseGlow 3s ease-in-out infinite;
   --animate-in: animate-in 0.2s ease-out;
 
-  /* Spacing Scale */
-  --spacing-xs: 0.25rem;
-  --spacing-sm: 0.5rem;
-  --spacing-md: 1rem;
-  --spacing-lg: 1.5rem;
-  --spacing-xl: 2rem;
-  --spacing-2xl: 3rem;
-
-  /* Border Radius Scale */
-  --radius-sm: 0.5rem;
-  --radius-md: 0.75rem;
-  --radius-lg: 1rem;
-  --radius-xl: 1.5rem;
-
-  /* Shadow System */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 25px 80px -20px rgba(0, 0, 0, 0.6);
+  /* Custom shadow for glow effect (doesn't conflict with Tailwind defaults) */
   --shadow-glow: 0 0 40px rgba(0, 245, 212, 0.1);
 }
 

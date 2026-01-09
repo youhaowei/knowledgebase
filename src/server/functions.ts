@@ -1,13 +1,14 @@
 /**
  * TanStack Start Server Functions
  *
- * Replaces tRPC router with native server functions.
- * Provides the same operations plus streaming support:
- * - add: Save memories (mutation)
- * - search: Semantic search (query + streaming)
- * - get: Exact lookup (query)
- * - forget: Remove items (mutation)
- * - graph: Full graph data (query)
+ * Edge-as-Fact knowledge graph API using native server functions.
+ * Provides:
+ * - add: Save memories → extract entities + edges (mutation)
+ * - search: Semantic search on memories AND edge facts (query + streaming)
+ * - get: Exact lookup by name (query)
+ * - forget: Remove entities (mutation)
+ * - forgetEdge: Invalidate edge with reason (mutation) - creates audit trail
+ * - graph: Full graph data for visualization (query)
  * - stats: Statistics (query)
  */
 
@@ -17,7 +18,6 @@ import { Graph } from "../lib/graph.js";
 import { Queue } from "../lib/queue.js";
 import { embed } from "../lib/embedder.js";
 import { randomUUID } from "crypto";
-import type { Record as Neo4jRecord } from "neo4j-driver";
 
 // Shared instances (singleton pattern for server-side)
 const graph = new Graph();
@@ -30,92 +30,53 @@ const queue = new Queue(graph);
 /**
  * Get all graph data for visualization with computed metrics
  *
- * Computes node importance (degree centrality + reference count) and
- * edge strength (frequency of same relation) at query time for fresh data.
+ * Returns Entity nodes and RELATES_TO edges for visualization.
+ *
+ * Node types:
+ * - Entity: people, orgs, projects, technologies, concepts
+ *
+ * Edge types:
+ * - RELATES_TO: Facts as relationships between entities with relationType, sentiment
  */
 export const getGraphData = createServerFn().handler(async () => {
-  // @ts-expect-error - accessing private driver property for graph visualization
-  const session = graph.driver.session();
-  try {
-    // Get all Item nodes with degree centrality and reference count
-    const nodesResult = await session.run(`
-      MATCH (n:Item)
-      OPTIONAL MATCH (n)-[r:RELATION]-()
-      WITH n, count(DISTINCT r) as degree
-      OPTIONAL MATCH (n)-[r2:RELATION]-()
-      WITH n, degree, count(DISTINCT r2.memoryId) as referenceCount
-      RETURN
-        n.name as id,
-        n.name as name,
-        'Item' as type,
-        n.type as itemType,
-        n.namespace as namespace,
-        degree,
-        referenceCount
-    `);
-
-    const nodes = nodesResult.records.map((r: Neo4jRecord) => ({
-      id: r.get("id") || r.get("name"),
-      name: r.get("name"),
-      type: r.get("type"),
-      itemType: r.get("itemType"),
-      namespace: r.get("namespace") || "default",
-      degree: r.get("degree")?.toNumber?.() ?? r.get("degree") ?? 0,
-      referenceCount:
-        r.get("referenceCount")?.toNumber?.() ?? r.get("referenceCount") ?? 0,
-    }));
-
-    // Get all edges with frequency (how many times same source-relation-target exists)
-    const edgesResult = await session.run(`
-      MATCH (a:Item)-[r:RELATION]->(b:Item)
-      WITH a.name as source, b.name as target, r.type as relation,
-           a.namespace as namespace, count(r) as frequency
-      RETURN source, target, relation, namespace, frequency
-    `);
-
-    const edges = edgesResult.records.map((r: Neo4jRecord) => ({
-      source: r.get("source"),
-      target: r.get("target"),
-      relation: r.get("relation"),
-      namespace: r.get("namespace") || "default",
-      frequency: r.get("frequency")?.toNumber?.() ?? r.get("frequency") ?? 1,
-    }));
-
-    return { nodes, edges };
-  } finally {
-    await session.close();
-  }
+  const result = await graph.getGraphData();
+  return {
+    nodes: result.nodes,
+    edges: result.links.map((link) => ({
+      source: link.source,
+      target: link.target,
+      relationType: link.relationType,
+      fact: link.fact,
+      sentiment: link.sentiment,
+      edgeId: link.edgeId,
+    })),
+  };
 });
 
 /**
  * Get graph statistics
+ *
+ * Returns counts of:
+ * - memories: Input episodes/text
+ * - entities: Extracted named things (people, tech, etc.)
+ * - edges: Facts as relationships between entities
  */
 export const getStats = createServerFn().handler(async () => {
-  // @ts-expect-error - accessing private driver property for stats
-  const session = graph.driver.session();
-  try {
-    const memoriesResult = await session.run(
-      `MATCH (m:Memory) RETURN count(m) as count`,
-    );
-    const itemsResult = await session.run(
-      `MATCH (i:Item) RETURN count(i) as count`,
-    );
-    const relationsResult = await session.run(
-      `MATCH ()-[r:RELATION]->() RETURN count(r) as count`,
-    );
-
-    return {
-      memories: memoriesResult.records[0]?.get("count").toNumber() ?? 0,
-      items: itemsResult.records[0]?.get("count").toNumber() ?? 0,
-      relations: relationsResult.records[0]?.get("count").toNumber() ?? 0,
-    };
-  } finally {
-    await session.close();
-  }
+  const stats = await graph.stats();
+  return {
+    memories: stats.memories,
+    entities: stats.entities,
+    edges: stats.edges,
+  };
 });
 
 /**
  * Search the knowledge graph using semantic similarity
+ *
+ * Searches both memory embeddings AND edge fact text,
+ * returning relevant memories, edges, and entities.
+ *
+ * Includes guidance for agents to ask users about contradictory/outdated results.
  */
 const searchSchema = z.object({
   query: z.string().min(1, "Query is required"),
@@ -135,27 +96,32 @@ export const searchMemories = createServerFn()
         summary: m.summary,
         createdAt: m.createdAt,
       })),
-      relations: result.relations.map((r) => ({
-        from: r.from,
-        relation: r.relation,
-        to: r.to,
-        createdAt: r.createdAt,
+      edges: result.edges.map((e) => ({
+        id: e.id,
+        sourceEntity: e.sourceEntityName,
+        targetEntity: e.targetEntityName,
+        relationType: e.relationType,
+        fact: e.fact,
+        sentiment: e.sentiment,
+        validAt: e.validAt,
+        createdAt: e.createdAt,
       })),
-      conflicts: result.conflicts.map((c) => ({
-        item: c.itemName,
-        relation: c.relationType,
-        options: c.relations.map((r) => ({
-          id: r.id,
-          value: r.to,
-          createdAt: r.createdAt,
-        })),
-        resolved: c.resolution != null,
+      entities: result.entities.map((e) => ({
+        name: e.name,
+        type: e.type,
+        description: e.description,
+        summary: e.summary,
       })),
+      guidance:
+        "If any of these facts appear contradictory or outdated, please ask the user whether to invalidate them using the forget tool with a reason.",
     };
   });
 
 /**
- * Get a memory or item by exact name
+ * Get a memory or entity by exact name
+ *
+ * If name matches a Memory, returns the memory and all edges extracted from it.
+ * If name matches an Entity, returns the entity and all edges involving it.
  */
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -166,7 +132,7 @@ export const getMemory = createServerFn()
   .handler(async ({ data }) => {
     const result = await graph.get(data.name);
 
-    if (!result.memory && !result.item) {
+    if (!result.memory && !result.entity) {
       throw new Error(`Nothing found with name "${data.name}"`);
     }
 
@@ -180,23 +146,24 @@ export const getMemory = createServerFn()
             createdAt: result.memory.createdAt,
           }
         : undefined,
-      relatedItems: result.relatedItems,
-      item: result.item,
-      relations: result.relations.map((r) => ({
-        from: r.from,
-        relation: r.relation,
-        to: r.to,
-        createdAt: r.createdAt,
-      })),
-      conflicts: result.conflicts.map((c) => ({
-        item: c.itemName,
-        relation: c.relationType,
-        options: c.relations.map((r) => ({
-          id: r.id,
-          value: r.to,
-          createdAt: r.createdAt,
-        })),
-        resolved: c.resolution != null,
+      entity: result.entity
+        ? {
+            name: result.entity.name,
+            type: result.entity.type,
+            description: result.entity.description,
+            summary: result.entity.summary,
+          }
+        : undefined,
+      edges: result.edges.map((e) => ({
+        id: e.id,
+        sourceEntity: e.sourceEntityName,
+        targetEntity: e.targetEntityName,
+        relationType: e.relationType,
+        fact: e.fact,
+        sentiment: e.sentiment,
+        validAt: e.validAt,
+        invalidAt: e.invalidAt,
+        createdAt: e.createdAt,
       })),
     };
   });
@@ -262,7 +229,10 @@ export const addMemory = createServerFn({ method: "POST" })
   });
 
 /**
- * Remove a memory or item by name
+ * Remove a memory or entity by name
+ *
+ * If a Memory is deleted, edges stay but lose provenance from this memory.
+ * If an Entity is deleted, all edges involving it are also deleted.
  */
 const forgetMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -273,19 +243,175 @@ export const forgetMemory = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     const result = await graph.forget(data.name);
 
-    if (!result.deletedMemory && !result.deletedItem) {
+    if (!result.deletedMemory && !result.deletedEntity) {
       throw new Error(`Nothing found with name "${data.name}"`);
     }
 
     const deleted = [];
     if (result.deletedMemory) deleted.push("memory");
-    if (result.deletedItem) deleted.push("item");
+    if (result.deletedEntity) deleted.push("entity");
 
     return {
       success: true,
-      message: `Removed ${deleted.join(" and ")} "${data.name}" and its relations`,
+      message: `Removed ${deleted.join(" and ")} "${data.name}"`,
       deletedMemory: result.deletedMemory,
-      deletedItem: result.deletedItem,
+      deletedEntity: result.deletedEntity,
+    };
+  });
+
+/**
+ * Invalidate an edge (fact) with reason
+ *
+ * This creates an audit trail by:
+ * 1. Setting invalidAt on the edge (soft delete)
+ * 2. Creating an audit Memory recording the decision and reason
+ *
+ * Use this when a fact is contradictory or outdated.
+ */
+const forgetEdgeSchema = z.object({
+  edgeId: z.string().min(1, "Edge ID is required"),
+  reason: z.string().min(1, "Reason is required for audit trail"),
+  namespace: z.string().default("default"),
+});
+
+export const forgetEdge = createServerFn({ method: "POST" })
+  .inputValidator((data: unknown) => forgetEdgeSchema.parse(data))
+  .handler(async ({ data }) => {
+    const result = await graph.forgetEdge(data.edgeId, data.reason, data.namespace);
+
+    if (!result.invalidatedEdge) {
+      throw new Error(`Edge not found: "${data.edgeId}"`);
+    }
+
+    return {
+      success: true,
+      message: `Invalidated: "${result.invalidatedEdge.fact}"`,
+      invalidatedEdge: {
+        id: result.invalidatedEdge.id,
+        fact: result.invalidatedEdge.fact,
+        sourceEntity: result.invalidatedEdge.sourceEntityName,
+        targetEntity: result.invalidatedEdge.targetEntityName,
+        relationType: result.invalidatedEdge.relationType,
+        invalidAt: result.invalidatedEdge.invalidAt,
+      },
+      auditMemoryId: result.auditMemoryId,
+    };
+  });
+
+// ============================================================================
+// LLM-Powered Answer (when no direct results found)
+// ============================================================================
+
+import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
+
+/**
+ * Ask LLM to answer a question using knowledge graph context
+ *
+ * When search returns no direct results, this uses the LLM to
+ * synthesize an answer from the available knowledge.
+ */
+const askLLMSchema = z.object({
+  question: z.string().min(1, "Question is required"),
+});
+
+export const askLLM = createServerFn()
+  .inputValidator((data: unknown) => askLLMSchema.parse(data))
+  .handler(async ({ data }) => {
+    // First, search for relevant context
+    const embedding = await embed(data.question);
+    const searchResult = await graph.search(embedding, data.question, 5);
+
+    // Build context from search results
+    const contextParts: string[] = [];
+
+    if (searchResult.edges.length > 0) {
+      contextParts.push("**Relevant Facts (as relationships):**");
+      for (const edge of searchResult.edges) {
+        const sentiment =
+          edge.sentiment > 0.3
+            ? " (positive)"
+            : edge.sentiment < -0.3
+              ? " (negative)"
+              : "";
+        contextParts.push(
+          `- ${edge.sourceEntityName} → ${edge.relationType} → ${edge.targetEntityName}: ${edge.fact}${sentiment}`,
+        );
+      }
+    }
+
+    if (searchResult.memories.length > 0) {
+      contextParts.push("\n**Related Memories:**");
+      for (const memory of searchResult.memories) {
+        if (memory.summary) {
+          contextParts.push(`- ${memory.name || "Memory"}: ${memory.summary}`);
+        }
+      }
+    }
+
+    if (searchResult.entities.length > 0) {
+      contextParts.push("\n**Related Entities:**");
+      for (const entity of searchResult.entities) {
+        const desc = entity.description ? ` - ${entity.description}` : "";
+        const summary = entity.summary ? ` (${entity.summary})` : "";
+        contextParts.push(`- ${entity.name} (${entity.type})${desc}${summary}`);
+      }
+    }
+
+    const context =
+      contextParts.length > 0
+        ? contextParts.join("\n")
+        : "No directly relevant information found in the knowledge base.";
+
+    // Query LLM with context
+    let answer = "";
+
+    for await (const msg of claudeQuery({
+      prompt: `You are a helpful assistant with access to a personal knowledge base.
+
+Context from the knowledge base:
+${context}
+
+User question: ${data.question}
+
+Instructions:
+- Answer the question using the provided context if relevant
+- If the context doesn't contain relevant information, say so honestly
+- Be concise but helpful
+- If you can make reasonable inferences from the context, do so
+- Don't make up information that isn't supported by the context`,
+      options: {
+        maxTurns: 1,
+        allowedTools: [],
+        model: "haiku",
+      },
+    })) {
+      // Extract text response
+      if (
+        typeof msg === "object" &&
+        msg !== null &&
+        "type" in msg &&
+        msg.type === "assistant"
+      ) {
+        const assistantMsg = msg as {
+          type: "assistant";
+          message?: { content?: Array<{ type: string; text?: string }> };
+        };
+        if (assistantMsg.message?.content) {
+          for (const block of assistantMsg.message.content) {
+            if (block.type === "text" && block.text) {
+              answer += block.text;
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      answer: answer || "I couldn't generate an answer. Please try rephrasing your question.",
+      hasContext: contextParts.length > 0,
+      edgesUsed: searchResult.edges.length,
+      memoriesUsed: searchResult.memories.length,
+      entitiesUsed: searchResult.entities.length,
     };
   });
 
@@ -295,7 +421,9 @@ export const forgetMemory = createServerFn({ method: "POST" })
 
 /**
  * Streaming search - yields results one at a time
- * Perfect for real-time UI updates as results come in
+ *
+ * Perfect for real-time UI updates as results come in.
+ * Yields memories first, then edges, then entities, finally guidance.
  */
 const streamingSearchSchema = z.object({
   query: z.string().min(1, "Query is required"),
@@ -321,33 +449,42 @@ export const streamingSearch = createServerFn()
       };
     }
 
-    // Then yield relations
-    for (const relation of result.relations) {
+    // Then yield edges
+    for (const edge of result.edges) {
       yield {
-        type: "relation" as const,
+        type: "edge" as const,
         data: {
-          from: relation.from,
-          relation: relation.relation,
-          to: relation.to,
-          createdAt: relation.createdAt,
+          id: edge.id,
+          sourceEntity: edge.sourceEntityName,
+          targetEntity: edge.targetEntityName,
+          relationType: edge.relationType,
+          fact: edge.fact,
+          sentiment: edge.sentiment,
+          validAt: edge.validAt,
+          createdAt: edge.createdAt,
         },
       };
     }
 
-    // Finally yield conflicts
-    for (const conflict of result.conflicts) {
+    // Then yield entities
+    for (const entity of result.entities) {
       yield {
-        type: "conflict" as const,
+        type: "entity" as const,
         data: {
-          item: conflict.itemName,
-          relation: conflict.relationType,
-          options: conflict.relations.map((r) => ({
-            id: r.id,
-            value: r.to,
-            createdAt: r.createdAt,
-          })),
-          resolved: conflict.resolution != null,
+          name: entity.name,
+          type: entity.type,
+          description: entity.description,
+          summary: entity.summary,
         },
       };
     }
+
+    // Finally yield guidance for contradiction handling
+    yield {
+      type: "guidance" as const,
+      data: {
+        message:
+          "If any of these facts appear contradictory or outdated, please ask the user whether to invalidate them using the forget tool with a reason.",
+      },
+    };
   });

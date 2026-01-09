@@ -34,7 +34,8 @@ const MCP_TOOLS = [
   },
   {
     name: "search",
-    description: "Search the knowledge graph",
+    description:
+      "Search the knowledge graph. Returns edges (facts as relationships), memories, and entities. Check the guidance field for instructions on handling contradictory results.",
     inputSchema: {
       type: "object",
       properties: {
@@ -46,7 +47,7 @@ const MCP_TOOLS = [
   },
   {
     name: "get",
-    description: "Get memory/item by name",
+    description: "Get memory/entity by name",
     inputSchema: {
       type: "object",
       properties: {
@@ -57,13 +58,34 @@ const MCP_TOOLS = [
   },
   {
     name: "forget",
-    description: "Remove memory/item by name",
+    description: "Remove memory/entity by name",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Exact name" },
       },
       required: ["name"],
+    },
+  },
+  {
+    name: "forgetEdge",
+    description:
+      "Invalidate a specific edge (fact) with a reason. Creates an audit trail. Use this when a fact is contradictory or outdated.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        edgeId: { type: "string", description: "The ID of the edge to invalidate" },
+        reason: {
+          type: "string",
+          description: "Reason for invalidation (required for audit trail)",
+        },
+        namespace: {
+          type: "string",
+          description: "Optional namespace",
+          default: "default",
+        },
+      },
+      required: ["edgeId", "reason"],
     },
   },
 ];
@@ -108,11 +130,22 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
                     name: m.name,
                     summary: m.summary,
                   })),
-                  relations: result.relations.map((r) => ({
-                    from: r.from,
-                    relation: r.relation,
-                    to: r.to,
+                  edges: result.edges.map((e) => ({
+                    id: e.id,
+                    sourceEntity: e.sourceEntityName,
+                    targetEntity: e.targetEntityName,
+                    relationType: e.relationType,
+                    fact: e.fact,
+                    sentiment: e.sentiment,
                   })),
+                  entities: result.entities.map((e) => ({
+                    name: e.name,
+                    type: e.type,
+                    description: e.description,
+                    summary: e.summary,
+                  })),
+                  guidance:
+                    "If any of these facts appear contradictory or outdated, please ask the user whether to invalidate them using the forgetEdge tool with a reason.",
                 },
                 null,
                 2,
@@ -123,13 +156,13 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
       }
 
       case "get": {
-        const itemName = args?.name as string;
-        const result = await graph.get(itemName);
+        const entityName = args?.name as string;
+        const result = await graph.get(entityName);
 
-        if (!result.memory && !result.item) {
+        if (!result.memory && !result.entity) {
           return {
             content: [
-              { type: "text", text: `✗ Nothing found with name "${itemName}"` },
+              { type: "text", text: `✗ Nothing found with name "${entityName}"` },
             ],
           };
         }
@@ -140,19 +173,56 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
       }
 
       case "forget": {
-        const itemName = args?.name as string;
-        const result = await graph.forget(itemName);
+        const entityName = args?.name as string;
+        const result = await graph.forget(entityName);
 
-        if (!result.deletedMemory && !result.deletedItem) {
+        if (!result.deletedMemory && !result.deletedEntity) {
           return {
             content: [
-              { type: "text", text: `✗ Nothing found with name "${itemName}"` },
+              { type: "text", text: `✗ Nothing found with name "${entityName}"` },
             ],
           };
         }
 
         return {
-          content: [{ type: "text", text: `✓ Removed "${itemName}"` }],
+          content: [{ type: "text", text: `✓ Removed "${entityName}"` }],
+        };
+      }
+
+      case "forgetEdge": {
+        const edgeId = args?.edgeId as string;
+        const reason = args?.reason as string;
+        const namespace = (args?.namespace as string) ?? "default";
+
+        const result = await graph.forgetEdge(edgeId, reason, namespace);
+
+        if (!result.invalidatedEdge) {
+          return {
+            content: [{ type: "text", text: `✗ Edge not found: "${edgeId}"` }],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: `✓ Invalidated: "${result.invalidatedEdge.fact}"`,
+                  invalidatedEdge: {
+                    id: result.invalidatedEdge.id,
+                    fact: result.invalidatedEdge.fact,
+                    sourceEntity: result.invalidatedEdge.sourceEntityName,
+                    targetEntity: result.invalidatedEdge.targetEntityName,
+                  },
+                  auditMemoryId: result.auditMemoryId,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
         };
       }
 

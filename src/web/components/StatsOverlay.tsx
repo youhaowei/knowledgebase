@@ -5,7 +5,7 @@
  * Doesn't distract from the main graph visualization.
  */
 
-import { Brain, GitBranch, Circle } from "lucide-react";
+import { Brain, Link2, Users } from "lucide-react";
 import type { Stats } from "./types";
 
 interface StatsOverlayProps {
@@ -18,8 +18,8 @@ export function StatsOverlay({ stats, nodeCount }: StatsOverlayProps) {
 
   const items = [
     { icon: Brain, value: stats.memories, label: "Memories" },
-    { icon: Circle, value: stats.items, label: "Items" },
-    { icon: GitBranch, value: stats.relations, label: "Relations" },
+    { icon: Users, value: stats.entities, label: "Entities" },
+    { icon: Link2, value: stats.edges, label: "Edges" },
   ];
 
   return (
@@ -35,7 +35,7 @@ export function StatsOverlay({ stats, nodeCount }: StatsOverlayProps) {
           </h1>
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-glow-cyan shadow-[0_0_8px_var(--color-glow-cyan)] animate-pulse" />
-            <span className="font-mono text-[10px] tracking-widest uppercase text-text-tertiary">
+            <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary">
               {nodeCount} nodes
             </span>
           </div>
@@ -53,7 +53,7 @@ export function StatsOverlay({ stats, nodeCount }: StatsOverlayProps) {
             <span className="font-display text-sm font-semibold text-text-primary">
               {item.value}
             </span>
-            <span className="font-mono text-[9px] tracking-wider uppercase text-text-tertiary hidden sm:inline">
+            <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary hidden sm:inline">
               {item.label}
             </span>
           </div>

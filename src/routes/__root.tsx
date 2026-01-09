@@ -5,8 +5,10 @@ import {
   Scripts,
 } from "@tanstack/react-router";
 import appCss from "../web/styles.css?url";
+import { NotFound } from "../web/components/NotFound";
 
 export const Route = createRootRoute({
+  notFoundComponent: NotFound,
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -15,16 +17,6 @@ export const Route = createRootRoute({
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
-      { rel: "preconnect", href: "https://fonts.googleapis.com" },
-      {
-        rel: "preconnect",
-        href: "https://fonts.gstatic.com",
-        crossOrigin: "anonymous",
-      },
-      {
-        rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap",
-      },
       { rel: "stylesheet", href: appCss },
     ],
   }),
@@ -37,8 +29,10 @@ function RootComponent() {
       <head>
         <HeadContent />
       </head>
-      <body className="bg-void text-text-primary font-sans min-h-screen overflow-hidden">
-        <Outlet />
+      <body className="bg-void text-text-primary font-sans h-screen overflow-hidden flex flex-col">
+        <div className="flex-1 relative w-full h-full">
+          <Outlet />
+        </div>
         <Scripts />
       </body>
     </html>

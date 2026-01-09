@@ -1,6 +1,12 @@
 /**
  * Database initialization script
- * Creates required Neo4j indexes including vector index for semantic search
+ *
+ * Creates required Neo4j indexes for the edge-as-fact knowledge graph:
+ * - Memory nodes with vector embeddings
+ * - Entity nodes
+ * - RELATES_TO edges (facts as relationships between entities)
+ *
+ * This is idempotent - safe to run multiple times.
  */
 
 import neo4j from "neo4j-driver";
@@ -21,13 +27,53 @@ export async function initDatabase(): Promise<void> {
   const session = driver.session();
 
   try {
-    console.log("Initializing Neo4j database...");
+    console.log("Initializing Neo4j database (edge-as-fact model)...\n");
 
-    // Create vector index for memory embeddings
+    // ===========================================================================
+    // CONSTRAINTS (uniqueness)
+    // ===========================================================================
+
+    await session.run(`
+      CREATE CONSTRAINT memory_id IF NOT EXISTS
+      FOR (m:Memory) REQUIRE m.id IS UNIQUE
+    `);
+    console.log("✓ Constraint 'memory_id' ready");
+
+    await session.run(`
+      CREATE CONSTRAINT entity_name_namespace IF NOT EXISTS
+      FOR (e:Entity) REQUIRE (e.name, e.namespace) IS UNIQUE
+    `);
+    console.log("✓ Constraint 'entity_name_namespace' ready");
+
+    // ===========================================================================
+    // INDEXES (for faster lookups)
+    // ===========================================================================
+
+    await session.run(`
+      CREATE INDEX memory_namespace IF NOT EXISTS
+      FOR (m:Memory) ON (m.namespace)
+    `);
+    console.log("✓ Index 'memory_namespace' ready");
+
+    await session.run(`
+      CREATE INDEX memory_name IF NOT EXISTS
+      FOR (m:Memory) ON (m.name)
+    `);
+    console.log("✓ Index 'memory_name' ready");
+
+    await session.run(`
+      CREATE INDEX entity_namespace IF NOT EXISTS
+      FOR (e:Entity) ON (e.namespace)
+    `);
+    console.log("✓ Index 'entity_namespace' ready");
+
+    // ===========================================================================
+    // VECTOR INDEXES (for semantic search)
+    // ===========================================================================
+
     await session.run(`
       CREATE VECTOR INDEX memory_embedding IF NOT EXISTS
-      FOR (m:Memory)
-      ON m.embedding
+      FOR (m:Memory) ON (m.embedding)
       OPTIONS {
         indexConfig: {
           \`vector.dimensions\`: ${EMBEDDING_DIMENSIONS},
@@ -37,31 +83,31 @@ export async function initDatabase(): Promise<void> {
     `);
     console.log("✓ Vector index 'memory_embedding' ready");
 
-    // Create index on Memory.name for faster lookups
-    await session.run(`
-      CREATE INDEX memory_name IF NOT EXISTS
-      FOR (m:Memory)
-      ON (m.name)
-    `);
-    console.log("✓ Index 'memory_name' ready");
+    // ===========================================================================
+    // FULL-TEXT INDEX (for edge fact search)
+    // ===========================================================================
+    // Note: Neo4j doesn't support vector indexes on relationship properties,
+    // so we use full-text search for finding edges by fact content.
 
-    // Create index on Item.name for faster lookups
     await session.run(`
-      CREATE INDEX item_name IF NOT EXISTS
-      FOR (i:Item)
-      ON (i.name)
+      CREATE FULLTEXT INDEX edge_fact_text IF NOT EXISTS
+      FOR ()-[r:RELATES_TO]-()
+      ON EACH [r.fact]
     `);
-    console.log("✓ Index 'item_name' ready");
+    console.log("✓ Full-text index 'edge_fact_text' ready");
 
-    // Create index on Memory.namespace for filtering
-    await session.run(`
-      CREATE INDEX memory_namespace IF NOT EXISTS
-      FOR (m:Memory)
-      ON (m.namespace)
-    `);
-    console.log("✓ Index 'memory_namespace' ready");
+    console.log("\n✅ Database initialization complete!");
+    console.log(`
+Schema summary:
+- Memory: id (unique), name, text, summary, embedding (vector), namespace
+- Entity: name+namespace (unique), type, description, summary
 
-    console.log("Database initialization complete!");
+Edges (facts as relationships):
+- Entity -[RELATES_TO {
+    id, relationType, fact, sentiment, factEmbedding,
+    episodes[], validAt, invalidAt, createdAt
+  }]-> Entity
+`);
   } catch (error) {
     console.error("Database initialization failed:", error);
     throw error;

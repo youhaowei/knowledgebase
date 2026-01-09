@@ -144,7 +144,7 @@ export function Sidebar({ stats, memories, onAddMemory }: SidebarProps) {
               </h1>
               <div className="flex items-center gap-1.5 mt-0.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-glow-cyan shadow-[0_0_8px_var(--color-glow-cyan)]" />
-                <span className="font-mono text-[0.65rem] tracking-widest uppercase text-text-tertiary">
+                <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary">
                   Online
                 </span>
               </div>
@@ -157,8 +157,8 @@ export function Sidebar({ stats, memories, onAddMemory }: SidebarProps) {
           <div className="grid grid-cols-3 gap-3 px-7 py-5 border-b border-border">
             {[
               { value: stats.memories, label: "Memories" },
-              { value: stats.items, label: "Items" },
-              { value: stats.relations, label: "Relations" },
+              { value: stats.entities, label: "Entities" },
+              { value: stats.edges, label: "Edges" },
             ].map((stat) => (
               <div
                 key={stat.label}
@@ -168,7 +168,7 @@ export function Sidebar({ stats, memories, onAddMemory }: SidebarProps) {
                 <div className="font-display text-[1.75rem] font-semibold text-text-primary leading-none relative z-10">
                   {stat.value}
                 </div>
-                <div className="font-mono text-[0.65rem] tracking-[0.15em] uppercase text-text-tertiary mt-2 relative z-10">
+                <div className="text-xs font-medium tracking-wide uppercase text-text-tertiary mt-2 relative z-10">
                   {stat.label}
                 </div>
               </div>
@@ -234,7 +234,7 @@ export function Sidebar({ stats, memories, onAddMemory }: SidebarProps) {
 function MemoriesPanel({ memories }: { memories: Memory[] }) {
   return (
     <div>
-      <h3 className="font-mono text-[0.7rem] tracking-[0.2em] uppercase text-text-tertiary mb-4">
+      <h3 className="text-xs font-medium tracking-wide uppercase text-text-tertiary mb-4">
         Memories ({memories.length})
       </h3>
       {memories.length === 0 ? (
@@ -284,7 +284,7 @@ function AddPanel({
   return (
     <form onSubmit={onSubmit}>
       <div className="mb-5">
-        <label className="block font-mono text-[0.7rem] tracking-[0.15em] uppercase text-text-tertiary mb-2.5">
+        <label className="block text-xs font-medium tracking-wide uppercase text-text-tertiary mb-2.5">
           Memory Text
         </label>
         <textarea
@@ -297,7 +297,7 @@ function AddPanel({
         />
       </div>
       <div className="mb-5">
-        <label className="block font-mono text-[0.7rem] tracking-[0.15em] uppercase text-text-tertiary mb-2.5">
+        <label className="block text-xs font-medium tracking-wide uppercase text-text-tertiary mb-2.5">
           Name (optional)
         </label>
         <input
@@ -334,7 +334,7 @@ function SearchPanel() {
   return (
     <div>
       <div className="mb-5">
-        <label className="block font-mono text-[0.7rem] tracking-[0.15em] uppercase text-text-tertiary mb-2.5">
+        <label className="block text-xs font-medium tracking-wide uppercase text-text-tertiary mb-2.5">
           Search Query
         </label>
         <input
@@ -348,7 +348,7 @@ function SearchPanel() {
         Search
       </button>
       <div className="text-center py-15">
-        <p className="font-mono text-xs tracking-wider text-text-tertiary">
+        <p className="text-xs font-medium tracking-wide text-text-tertiary">
           Search functionality coming soon...
         </p>
       </div>

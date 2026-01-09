@@ -2,9 +2,9 @@
  * Async Queue Processor
  *
  * Processes memories asynchronously in background:
- * 1. Extract items & relations (Claude)
- * 2. Generate embeddings (Ollama)
- * 3. Store in Neo4j (with conflict detection at read time)
+ * 1. Extract entities & edges (Claude/Gemini) - Edge-as-Fact model
+ * 2. Generate embeddings for memory AND each edge fact (Ollama)
+ * 3. Store in Neo4j with RELATES_TO edges
  *
  * Per-namespace queues to avoid race conditions
  */
@@ -64,9 +64,12 @@ export class Queue {
       const { memory, resolve, reject } = entry;
 
       try {
-        // 1. Extract items and relations using Claude
-        const { items, relations, summary } = await extract(memory.text);
+        // 1. Extract entities and edges using Claude/Gemini (Edge-as-Fact model)
+        console.log(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
+        const { entities, edges, summary } = await extract(memory.text);
         memory.summary = summary;
+
+        console.log(`[Queue] Extracted ${entities.length} entities, ${edges.length} edges`);
 
         // 2. Auto-generate name from summary if not provided
         if (!memory.name || memory.name === "") {
@@ -75,14 +78,26 @@ export class Queue {
           memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
         }
 
-        // 3. Generate embedding using Ollama
-        const embedding = await embed(memory.text);
+        // 3. Generate embedding for memory text
+        console.log(`[Queue] Generating memory embedding...`);
+        const memoryEmbedding = await embed(memory.text);
 
-        // 4. Store everything (conflicts detected at read time, not here)
-        await this.graph.store(memory, items, relations, embedding);
+        // 4. Generate embeddings for each edge's fact description
+        console.log(`[Queue] Generating embeddings for ${edges.length} edge facts...`);
+        const edgeEmbeddings: number[][] = [];
+        for (const edge of edges) {
+          const edgeEmbedding = await embed(edge.fact);
+          edgeEmbeddings.push(edgeEmbedding);
+        }
 
+        // 5. Store everything in Neo4j (entities + RELATES_TO edges)
+        console.log(`[Queue] Storing in Neo4j...`);
+        await this.graph.store(memory, entities, edges, memoryEmbedding, edgeEmbeddings);
+
+        console.log(`[Queue] Memory ${memory.id} processed successfully`);
         resolve();
       } catch (error) {
+        console.error(`[Queue] Error processing memory ${memory.id}:`, error);
         reject(error as Error);
       }
     }

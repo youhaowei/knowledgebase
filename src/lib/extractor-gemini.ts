@@ -2,62 +2,11 @@
  * Gemini Extractor - extracts structured knowledge from text
  *
  * Uses Gemini CLI in headless mode (no API costs with personal Google account)
- * Extracts: items (entities), relations (how they connect), and summary
+ * Edge-as-Fact Model: extracts entities first, then edges (facts) as relationships
  */
 
 import { Extraction } from "../types.js";
-
-// The extraction prompt (shared with Claude extractor)
-const EXTRACTION_PROMPT = `Extract structured knowledge from this text and return ONLY a valid JSON object (no markdown, no explanation).
-
-Your task:
-1. Identify **items** - named entities mentioned in the text. Each item has a type:
-   - person: Individual people (e.g., "Alice", "Marie Curie", "my manager")
-   - organization: Companies, teams, institutions (e.g., "Google", "MIT", "our team")
-   - project: Projects, products, initiatives (e.g., "React", "my thesis", "Q4 campaign")
-   - technology: Tools, languages, systems (e.g., "TypeScript", "Notion", "Excel")
-   - concept: Ideas, patterns, topics (e.g., "REST", "stoicism", "agile")
-   - preference: Preferences or opinions (e.g., "dark mode", "morning workouts")
-   - decision: Choices or conclusions (e.g., "use Postgres", "move to Austin")
-
-   **CRITICAL RULES for item names**:
-   - Names MUST be 1-3 words maximum
-   - Use proper nouns, acronyms, or short phrases
-   - GOOD: "GraphQL", "Meta", "REST", "morning routine", "Alice"
-   - BAD: "Query language for APIs", "My preference for working in the morning"
-   - If it doesn't have a short canonical name, it's probably a description, not an entity
-
-2. Identify **relations** - directed edges between items.
-
-   Choose the most SPECIFIC relation type:
-   - created_by: thing → creator (e.g., "GraphQL" → created_by → "Meta")
-   - uses: user → tool (e.g., "Alice" → uses → "Notion")
-   - works_at: person → organization
-   - works_on: person/org → project
-   - built_by: project → creator
-   - prefers: agent → preference (EXCLUSIVE: one preference per category)
-   - avoids: agent → avoided_thing
-   - knows: person → person/topic
-   - depends_on: dependent → dependency
-   - alternative_to: thing → alternative
-   - part_of: component → whole
-   - is_a: specific → general
-   - located_in: thing → place
-   - related_to: (fallback) generic connection
-
-   **IMPORTANT**:
-   - Direction matters! "GraphQL created_by Meta" not "Meta created GraphQL"
-   - Prefer specific relations over "related_to"
-   - Only extract relations explicitly stated or strongly implied
-
-3. Generate a **summary** - a concise 1-2 sentence summary of the key information.
-
-Return ONLY this JSON structure (no other text):
-{
-  "items": [{"name": "...", "type": "person|organization|project|technology|concept|preference|decision", "description": "optional"}],
-  "relations": [{"from": "item_name", "relation": "relation_type", "to": "item_name"}],
-  "summary": "..."
-}`;
+import { extractionPrompt } from "./extractor.js";
 
 interface GeminiJsonOutput {
   session_id: string;
@@ -69,11 +18,9 @@ interface GeminiJsonOutput {
  * Parse the CLI JSON output to extract the GeminiJsonOutput structure
  */
 function parseGeminiCliOutput(output: string): GeminiJsonOutput {
-  // Find the start of the JSON output (look for opening brace with session_id)
   let jsonStartIndex = output.indexOf('{"session_id"');
 
   if (jsonStartIndex === -1) {
-    // Try alternate format - find session_id and work backwards
     const altStart = output.indexOf('"session_id"');
     if (altStart === -1) {
       throw new Error("No session_id found in output");
@@ -128,7 +75,8 @@ function extractJsonObject(text: string): string {
 }
 
 export async function extractWithGemini(text: string): Promise<Extraction> {
-  const fullPrompt = `${EXTRACTION_PROMPT}\n\nText to extract from:\n${text}`;
+  // Use the shared extraction prompt
+  const fullPrompt = `${extractionPrompt(text)}\n\nReturn ONLY valid JSON (no markdown, no explanation).`;
 
   // Use Bun's spawn to call gemini CLI in sandbox mode (no file/shell access)
   const proc = Bun.spawn(["gemini", "-o", "json", "--sandbox", fullPrompt], {

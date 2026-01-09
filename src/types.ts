@@ -1,68 +1,100 @@
 import { z } from "zod";
 
-// Item types that can be extracted from text
-export const ItemType = z.enum([
+// =============================================================================
+// ENTITY TYPES
+// =============================================================================
+
+export const EntityType = z.enum([
   "person",
   "organization",
   "project",
   "technology",
   "concept",
-  "preference",
-  "decision",
 ]);
 
 // An extracted entity from text
-export const Item = z.object({
+export const Entity = z.object({
   name: z.string(),
-  type: ItemType,
+  type: EntityType,
   description: z.string().optional(),
 });
 
-// A relation between two items
-export const Relation = z.object({
-  from: z.string(), // Item name (source)
-  relation: z.string(), // Relation type: "uses", "prefers", "works_on", etc.
-  to: z.string(), // Item name (target)
+// Stored entity includes namespace and summary
+export const StoredEntity = Entity.extend({
+  namespace: z.string().default("default"),
+  summary: z.string().optional(), // LLM-generated summary of what we know about this entity
 });
 
-// Stored relation includes metadata
-export const StoredRelation = Relation.extend({
+// =============================================================================
+// EDGE TYPES - Facts as edges between entities (Graphiti-style)
+// =============================================================================
+
+// An extracted edge (fact as relationship between entities)
+export const ExtractedEdge = z.object({
+  relationType: z.string(),           // camelCase relation type (uses, prefers, hasAdvantageOver)
+  sourceIndex: z.number().int(),      // Index into entities array
+  targetIndex: z.number().int(),      // Index into entities array
+  fact: z.string(),                   // Natural language description of the relationship
+  sentiment: z.number().min(-1).max(1).default(0), // -1 (negative) to 1 (positive)
+  validAt: z.string().optional(),     // ISO 8601 when relationship became true
+  invalidAt: z.string().optional(),   // ISO 8601 when relationship ended
+});
+
+// Stored edge includes metadata
+export const StoredEdge = z.object({
   id: z.string(),
-  memoryId: z.string(), // Which memory this relation came from
+  sourceEntityName: z.string(),       // Source entity name
+  targetEntityName: z.string(),       // Target entity name
+  relationType: z.string(),           // camelCase relation type
+  fact: z.string(),                   // Natural language description
+  sentiment: z.number().min(-1).max(1), // -1 to 1
+
+  // Provenance
+  episodes: z.array(z.string()),      // Memory IDs that reference this edge
+  namespace: z.string().default("default"),
+
+  // Temporal validity
+  validAt: z.date().optional(),       // When relationship became true
+  invalidAt: z.date().optional(),     // When relationship ended (human-set via forget)
   createdAt: z.date(),
+
+  // Multi-user attribution
+  createdBy: z.string().optional(),
 });
 
-// Resolution record for conflict resolution
-export const Resolution = z.object({
-  id: z.string(),
-  conflictingRelations: z.array(z.string()), // Relation IDs that conflicted
-  decision: z.enum(["keep_newer", "keep_older", "keep_both", "keep_neither"]),
-  keptRelationId: z.string().optional(), // Which relation was kept (if not both/neither)
-  createdAt: z.date(),
-});
+// =============================================================================
+// EXTRACTION TYPES
+// =============================================================================
 
-// Extraction result from Claude
+// Extraction result from Claude (edge-as-fact format)
 export const Extraction = z.object({
-  items: z.array(Item),
-  relations: z.array(Relation),
+  entities: z.array(Entity),          // Extract entities first (indexed 0, 1, 2...)
+  edges: z.array(ExtractedEdge),      // Edges reference entities by index
   summary: z.string(),
 });
 
-// A memory node in the graph
+// =============================================================================
+// MEMORY TYPES
+// =============================================================================
+
 export const Memory = z.object({
   id: z.string(),
-  name: z.string(), // User-provided or auto-generated from summary
-  text: z.string(), // Original text
-  summary: z.string(), // Claude-generated summary
+  name: z.string(),                    // User-provided or auto-generated from summary
+  text: z.string(),                    // Original text
+  summary: z.string(),                 // Claude-generated summary
   namespace: z.string().default("default"),
   createdAt: z.date(),
+  createdBy: z.string().optional(),
 });
 
-// Type exports
-export type ItemType = z.infer<typeof ItemType>;
-export type Item = z.infer<typeof Item>;
-export type Relation = z.infer<typeof Relation>;
-export type StoredRelation = z.infer<typeof StoredRelation>;
-export type Resolution = z.infer<typeof Resolution>;
+// =============================================================================
+// TYPE EXPORTS
+// =============================================================================
+
+export type EntityType = z.infer<typeof EntityType>;
+export type Entity = z.infer<typeof Entity>;
+export type StoredEntity = z.infer<typeof StoredEntity>;
+export type ExtractedEdge = z.infer<typeof ExtractedEdge>;
+export type StoredEdge = z.infer<typeof StoredEdge>;
 export type Extraction = z.infer<typeof Extraction>;
 export type Memory = z.infer<typeof Memory>;

@@ -1,33 +1,40 @@
 /**
- * Neo4j Graph Storage with Conflict Detection
+ * Neo4j Graph Storage - Edge-as-Fact Model (Graphiti-style)
  *
- * Stores memories, items, and relations in Neo4j
- * Detects conflicts at READ time (not write time)
- * Supports vector search via Neo4j vector index
+ * Stores:
+ * - Memory: Source episodes/inputs with embeddings
+ * - Entity: Named things with summaries
+ * - RELATES_TO edges: Facts as relationships between entities
+ *
+ * Facts are edges, not nodes. Each edge has:
+ * - relationType, fact text, sentiment, factEmbedding
+ * - episodes[] for provenance
+ * - validAt/invalidAt for temporal tracking
  */
 
 import neo4j, { Driver } from "neo4j-driver";
-import type {
-  Memory,
-  Item,
-  Relation,
-  StoredRelation,
-  Resolution,
-} from "../types.js";
+import type { Memory, Entity, ExtractedEdge, StoredEdge, StoredEntity } from "../types.js";
 import { randomUUID } from "crypto";
+
+// =============================================================================
+// SEARCH RESULT TYPES
+// =============================================================================
 
 export interface SearchResult {
   memories: Memory[];
-  relations: StoredRelation[];
-  conflicts: Conflict[];
+  edges: StoredEdge[];
+  entities: StoredEntity[];
 }
 
-export interface Conflict {
-  itemName: string;
-  relationType: string;
-  relations: StoredRelation[]; // 2+ conflicting relations
-  resolution?: Resolution; // null if unresolved
+export interface GetResult {
+  memory?: Memory;
+  entity?: StoredEntity;
+  edges: StoredEdge[];
 }
+
+// =============================================================================
+// GRAPH CLASS
+// =============================================================================
 
 export class Graph {
   private driver: Driver;
@@ -46,19 +53,74 @@ export class Graph {
     await this.driver.close();
   }
 
+  // ===========================================================================
+  // INITIALIZATION
+  // ===========================================================================
+
+  async init(): Promise<void> {
+    const session = this.driver.session();
+    try {
+      // Constraints
+      await session.run(`
+        CREATE CONSTRAINT memory_id IF NOT EXISTS
+        FOR (m:Memory) REQUIRE m.id IS UNIQUE
+      `);
+
+      await session.run(`
+        CREATE CONSTRAINT entity_name_namespace IF NOT EXISTS
+        FOR (e:Entity) REQUIRE (e.name, e.namespace) IS UNIQUE
+      `);
+
+      // Indexes
+      await session.run(`
+        CREATE INDEX memory_namespace IF NOT EXISTS
+        FOR (m:Memory) ON (m.namespace)
+      `);
+
+      await session.run(`
+        CREATE INDEX entity_namespace IF NOT EXISTS
+        FOR (e:Entity) ON (e.namespace)
+      `);
+
+      // Vector index for memory embeddings
+      await session.run(`
+        CREATE VECTOR INDEX memory_embedding IF NOT EXISTS
+        FOR (m:Memory) ON (m.embedding)
+        OPTIONS {indexConfig: {
+          \`vector.dimensions\`: 2560,
+          \`vector.similarity_function\`: 'cosine'
+        }}
+      `);
+
+      // Full-text index for edge fact search
+      await session.run(`
+        CREATE FULLTEXT INDEX edge_fact_text IF NOT EXISTS
+        FOR ()-[r:RELATES_TO]-()
+        ON EACH [r.fact]
+      `);
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ===========================================================================
+  // STORAGE
+  // ===========================================================================
+
   /**
-   * Store memory with items and relations (no conflict checking at write time)
+   * Store memory with entities and edges (facts as relationships)
    */
   async store(
     memory: Memory,
-    items: Item[],
-    relations: Relation[],
-    embedding: number[],
+    entities: Entity[],
+    edges: ExtractedEdge[],
+    memoryEmbedding: number[],
+    edgeEmbeddings: number[][], // One embedding per edge
   ): Promise<void> {
     const session = this.driver.session();
     try {
       await session.executeWrite(async (tx) => {
-        // Store memory with embedding
+        // 1. Store memory with embedding
         await tx.run(
           `
           CREATE (m:Memory {
@@ -77,49 +139,76 @@ export class Graph {
             text: memory.text,
             summary: memory.summary,
             namespace: memory.namespace,
-            embedding,
+            embedding: memoryEmbedding,
             createdAt: memory.createdAt.toISOString(),
           },
         );
 
-        // Upsert items (merge by name + namespace)
-        for (const item of items) {
+        // 2. Upsert entities (merge by name + namespace)
+        for (const entity of entities) {
           await tx.run(
             `
-            MERGE (i:Item {name: $name, namespace: $namespace})
-            ON CREATE SET i.type = $type, i.description = $description
-            ON MATCH SET i.description = COALESCE($description, i.description)
+            MERGE (e:Entity {name: $name, namespace: $namespace})
+            ON CREATE SET e.type = $type, e.description = $description
+            ON MATCH SET e.description = COALESCE($description, e.description)
             `,
             {
-              name: item.name,
-              type: item.type,
-              description: item.description ?? null,
+              name: entity.name,
+              type: entity.type,
+              description: entity.description ?? null,
               namespace: memory.namespace,
             },
           );
         }
 
-        // Create relations with unique IDs and timestamps
-        for (const rel of relations) {
+        // 3. Create edges (facts as relationships between entities)
+        for (let i = 0; i < edges.length; i++) {
+          const edge = edges[i]!;
+          const embedding = edgeEmbeddings[i] ?? [];
+
+          // Validate indices
+          const sourceEntity = entities[edge.sourceIndex];
+          const targetEntity = entities[edge.targetIndex];
+          if (!sourceEntity || !targetEntity) {
+            console.warn(
+              `Invalid edge indices: ${edge.sourceIndex} -> ${edge.targetIndex} for entities length ${entities.length}`,
+            );
+            continue;
+          }
+
+          const edgeId = randomUUID();
+
+          // Create or update RELATES_TO edge
+          // If edge with same relationType exists between these entities, add to episodes
           await tx.run(
             `
-            MATCH (a:Item {name: $from, namespace: $namespace})
-            MATCH (b:Item {name: $to, namespace: $namespace})
-            CREATE (a)-[:RELATION {
-              id: $relId,
-              type: $relation,
-              memoryId: $memoryId,
-              createdAt: datetime($createdAt)
-            }]->(b)
+            MATCH (source:Entity {name: $sourceName, namespace: $namespace})
+            MATCH (target:Entity {name: $targetName, namespace: $namespace})
+            MERGE (source)-[r:RELATES_TO {relationType: $relationType}]->(target)
+            ON CREATE SET
+              r.id = $id,
+              r.fact = $fact,
+              r.sentiment = $sentiment,
+              r.factEmbedding = $embedding,
+              r.episodes = [$memoryId],
+              r.validAt = CASE WHEN $validAt IS NOT NULL THEN datetime($validAt) ELSE null END,
+              r.invalidAt = null,
+              r.createdAt = datetime()
+            ON MATCH SET
+              r.episodes = r.episodes + $memoryId,
+              r.fact = CASE WHEN size($fact) > size(r.fact) THEN $fact ELSE r.fact END
             `,
             {
-              from: rel.from,
-              to: rel.to,
-              relation: rel.relation,
-              relId: randomUUID(),
-              memoryId: memory.id,
+              sourceName: sourceEntity.name,
+              targetName: targetEntity.name,
               namespace: memory.namespace,
-              createdAt: new Date().toISOString(),
+              relationType: edge.relationType,
+              id: edgeId,
+              fact: edge.fact,
+              sentiment: edge.sentiment,
+              embedding,
+              memoryId: memory.id,
+              validAt: edge.validAt ?? null,
             },
           );
         }
@@ -129,9 +218,13 @@ export class Graph {
     }
   }
 
+  // ===========================================================================
+  // SEARCH
+  // ===========================================================================
+
   /**
-   * Search memories by vector similarity + text matching
-   * Returns memories, relations, and detected conflicts
+   * Search by vector similarity on memories and full-text on edge facts
+   * Also fuzzy matches entity names
    */
   async search(
     embedding: number[],
@@ -154,7 +247,7 @@ export class Graph {
                score
         ORDER BY score DESC
         `,
-        { embedding, limit },
+        { embedding, limit: neo4j.int(limit) },
       );
 
       const memories: Memory[] = memoryResult.records.map((r) => ({
@@ -166,330 +259,457 @@ export class Graph {
         createdAt: new Date(r.get("createdAt")),
       }));
 
-      // 2. Also look up items by name (fuzzy match on query)
-      const relResult = await session.run(
+      // 2. Full-text search for edges by fact content
+      const edgeResult = await session.run(
         `
-        MATCH (a:Item)-[r:RELATION]->(b:Item)
-        WHERE a.name =~ $pattern OR b.name =~ $pattern
+        CALL db.index.fulltext.queryRelationships('edge_fact_text', $query)
+        YIELD relationship, score
+        WITH relationship as r, score
+        MATCH (source:Entity)-[r]->(target:Entity)
+        WHERE r.invalidAt IS NULL
         RETURN r.id as id,
-               a.name as from,
-               r.type as relation,
-               b.name as to,
-               r.memoryId as memoryId,
-               r.createdAt as createdAt
-        ORDER BY r.createdAt DESC
+               source.name as sourceEntityName,
+               target.name as targetEntityName,
+               r.relationType as relationType,
+               r.fact as fact,
+               r.sentiment as sentiment,
+               r.episodes as episodes,
+               source.namespace as namespace,
+               r.validAt as validAt,
+               r.invalidAt as invalidAt,
+               r.createdAt as createdAt,
+               score
+        ORDER BY score DESC
+        LIMIT $limit
         `,
-        { pattern: `(?i).*${query}.*` },
+        { query, limit: neo4j.int(limit) },
       );
 
-      const relations: StoredRelation[] = relResult.records.map((r) => ({
+      const edges: StoredEdge[] = edgeResult.records.map((r) => ({
         id: r.get("id"),
-        from: r.get("from"),
-        relation: r.get("relation"),
-        to: r.get("to"),
-        memoryId: r.get("memoryId"),
+        sourceEntityName: r.get("sourceEntityName"),
+        targetEntityName: r.get("targetEntityName"),
+        relationType: r.get("relationType"),
+        fact: r.get("fact"),
+        sentiment: r.get("sentiment") ?? 0,
+        episodes: r.get("episodes") ?? [],
+        namespace: r.get("namespace"),
+        validAt: r.get("validAt") ? new Date(r.get("validAt")) : undefined,
+        invalidAt: r.get("invalidAt") ? new Date(r.get("invalidAt")) : undefined,
         createdAt: new Date(r.get("createdAt")),
       }));
 
-      // 3. Detect conflicts
-      const conflicts = await this.detectConflicts(relations);
+      // 3. Fuzzy match entities by name
+      const entityResult = await session.run(
+        `
+        MATCH (e:Entity)
+        WHERE e.name =~ $pattern
+        RETURN e.name as name,
+               e.type as type,
+               e.description as description,
+               e.summary as summary,
+               e.namespace as namespace
+        LIMIT $limit
+        `,
+        { pattern: `(?i).*${query}.*`, limit: neo4j.int(limit) },
+      );
 
-      return { memories, relations, conflicts };
+      const entities: StoredEntity[] = entityResult.records.map((r) => ({
+        name: r.get("name"),
+        type: r.get("type"),
+        description: r.get("description") ?? undefined,
+        summary: r.get("summary") ?? undefined,
+        namespace: r.get("namespace"),
+      }));
+
+      return { memories, edges, entities };
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ===========================================================================
+  // GET BY NAME
+  // ===========================================================================
+
+  /**
+   * Get memory or entity by exact name lookup
+   * Returns all edges associated with the found item
+   */
+  async get(name: string, namespace = "default"): Promise<GetResult> {
+    const session = this.driver.session();
+    try {
+      // Try to find a Memory with this name
+      const memResult = await session.run(
+        `
+        MATCH (m:Memory {name: $name, namespace: $namespace})
+        RETURN m.id as id,
+               m.name as name,
+               m.text as text,
+               m.summary as summary,
+               m.namespace as namespace,
+               m.createdAt as createdAt
+        `,
+        { name, namespace },
+      );
+
+      const memoryRecord = memResult.records[0];
+      const memory: Memory | undefined = memoryRecord
+        ? {
+            id: memoryRecord.get("id"),
+            name: memoryRecord.get("name"),
+            text: memoryRecord.get("text"),
+            summary: memoryRecord.get("summary"),
+            namespace: memoryRecord.get("namespace"),
+            createdAt: new Date(memoryRecord.get("createdAt")),
+          }
+        : undefined;
+
+      // Try to find an Entity with this name
+      const entityResult = await session.run(
+        `
+        MATCH (e:Entity {name: $name, namespace: $namespace})
+        RETURN e.name as name,
+               e.type as type,
+               e.description as description,
+               e.summary as summary,
+               e.namespace as namespace
+        `,
+        { name, namespace },
+      );
+
+      const entityRecord = entityResult.records[0];
+      const entity: StoredEntity | undefined = entityRecord
+        ? {
+            name: entityRecord.get("name"),
+            type: entityRecord.get("type"),
+            description: entityRecord.get("description") ?? undefined,
+            summary: entityRecord.get("summary") ?? undefined,
+            namespace: entityRecord.get("namespace"),
+          }
+        : undefined;
+
+      // Get edges
+      let edges: StoredEdge[] = [];
+
+      if (memory) {
+        // Get edges from memories in this episode
+        const edgeResult = await session.run(
+          `
+          MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
+          WHERE $memoryId IN r.episodes
+          RETURN r.id as id,
+                 source.name as sourceEntityName,
+                 target.name as targetEntityName,
+                 r.relationType as relationType,
+                 r.fact as fact,
+                 r.sentiment as sentiment,
+                 r.episodes as episodes,
+                 source.namespace as namespace,
+                 r.validAt as validAt,
+                 r.invalidAt as invalidAt,
+                 r.createdAt as createdAt
+          `,
+          { memoryId: memory.id },
+        );
+
+        edges = edgeResult.records.map((r) => ({
+          id: r.get("id"),
+          sourceEntityName: r.get("sourceEntityName"),
+          targetEntityName: r.get("targetEntityName"),
+          relationType: r.get("relationType"),
+          fact: r.get("fact"),
+          sentiment: r.get("sentiment") ?? 0,
+          episodes: r.get("episodes") ?? [],
+          namespace: r.get("namespace"),
+          validAt: r.get("validAt") ? new Date(r.get("validAt")) : undefined,
+          invalidAt: r.get("invalidAt") ? new Date(r.get("invalidAt")) : undefined,
+          createdAt: new Date(r.get("createdAt")),
+        }));
+      } else if (entity) {
+        // Get edges involving this entity (as source or target)
+        const edgeResult = await session.run(
+          `
+          MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
+          WHERE (source.name = $name OR target.name = $name) AND source.namespace = $namespace
+          RETURN r.id as id,
+                 source.name as sourceEntityName,
+                 target.name as targetEntityName,
+                 r.relationType as relationType,
+                 r.fact as fact,
+                 r.sentiment as sentiment,
+                 r.episodes as episodes,
+                 source.namespace as namespace,
+                 r.validAt as validAt,
+                 r.invalidAt as invalidAt,
+                 r.createdAt as createdAt
+          ORDER BY r.createdAt DESC
+          `,
+          { name, namespace },
+        );
+
+        edges = edgeResult.records.map((r) => ({
+          id: r.get("id"),
+          sourceEntityName: r.get("sourceEntityName"),
+          targetEntityName: r.get("targetEntityName"),
+          relationType: r.get("relationType"),
+          fact: r.get("fact"),
+          sentiment: r.get("sentiment") ?? 0,
+          episodes: r.get("episodes") ?? [],
+          namespace: r.get("namespace"),
+          validAt: r.get("validAt") ? new Date(r.get("validAt")) : undefined,
+          invalidAt: r.get("invalidAt") ? new Date(r.get("invalidAt")) : undefined,
+          createdAt: new Date(r.get("createdAt")),
+        }));
+      }
+
+      return { memory, entity, edges };
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ===========================================================================
+  // FORGET (with reason - creates audit memory)
+  // ===========================================================================
+
+  /**
+   * Invalidate an edge with reason, creating an audit trail
+   */
+  async forgetEdge(
+    edgeId: string,
+    reason: string,
+    namespace = "default",
+  ): Promise<{
+    invalidatedEdge?: StoredEdge;
+    auditMemoryId?: string;
+  }> {
+    const session = this.driver.session();
+    try {
+      let invalidatedEdge: StoredEdge | undefined;
+      let auditMemoryId: string | undefined;
+
+      await session.executeWrite(async (tx) => {
+        // Find and invalidate the edge
+        const result = await tx.run(
+          `
+          MATCH (source:Entity)-[r:RELATES_TO {id: $edgeId}]->(target:Entity)
+          WHERE source.namespace = $namespace
+          SET r.invalidAt = datetime()
+          RETURN r.id as id,
+                 source.name as sourceEntityName,
+                 target.name as targetEntityName,
+                 r.relationType as relationType,
+                 r.fact as fact,
+                 r.sentiment as sentiment,
+                 r.episodes as episodes,
+                 source.namespace as namespace,
+                 r.validAt as validAt,
+                 r.invalidAt as invalidAt,
+                 r.createdAt as createdAt
+          `,
+          { edgeId, namespace },
+        );
+
+        const record = result.records[0];
+        if (record) {
+          invalidatedEdge = {
+            id: record.get("id"),
+            sourceEntityName: record.get("sourceEntityName"),
+            targetEntityName: record.get("targetEntityName"),
+            relationType: record.get("relationType"),
+            fact: record.get("fact"),
+            sentiment: record.get("sentiment") ?? 0,
+            episodes: record.get("episodes") ?? [],
+            namespace: record.get("namespace"),
+            validAt: record.get("validAt") ? new Date(record.get("validAt")) : undefined,
+            invalidAt: record.get("invalidAt") ? new Date(record.get("invalidAt")) : undefined,
+            createdAt: new Date(record.get("createdAt")),
+          };
+
+          // Create audit memory recording the decision
+          auditMemoryId = randomUUID();
+          const auditText = `Invalidated fact "${invalidatedEdge.fact}" because: ${reason}`;
+
+          await tx.run(
+            `
+            CREATE (m:Memory {
+              id: $id,
+              name: $name,
+              text: $text,
+              summary: $summary,
+              namespace: $namespace,
+              embedding: [],
+              createdAt: datetime()
+            })
+            `,
+            {
+              id: auditMemoryId,
+              name: `Invalidation: ${invalidatedEdge.fact.slice(0, 50)}...`,
+              text: auditText,
+              summary: auditText,
+              namespace,
+            },
+          );
+        }
+      });
+
+      return { invalidatedEdge, auditMemoryId };
     } finally {
       await session.close();
     }
   }
 
   /**
-   * Get memory or item by exact name lookup
+   * Remove by name - handles both Memories and Entities
    */
-  async get(name: string): Promise<{
-    memory?: Memory;
-    relatedItems?: Item[];
-    item?: Item;
-    relations: StoredRelation[];
-    conflicts: Conflict[];
+  async forget(
+    name: string,
+    namespace = "default",
+  ): Promise<{
+    deletedMemory: boolean;
+    deletedEntity: boolean;
   }> {
     const session = this.driver.session();
     try {
-      // Check for Memory with this name
-      const memResult = await session.run(
+      let deletedMemory = false;
+      let deletedEntity = false;
+
+      await session.executeWrite(async (tx) => {
+        // Delete Memory (edges referencing this memory stay but lose provenance)
+        const memResult = await tx.run(
+          `
+          MATCH (m:Memory {name: $name, namespace: $namespace})
+          DETACH DELETE m
+          RETURN count(m) as deleted
+          `,
+          { name, namespace },
+        );
+        deletedMemory = (memResult.records[0]?.get("deleted") ?? 0) > 0;
+
+        // Delete Entity and all edges involving it
+        const entityResult = await tx.run(
+          `
+          MATCH (e:Entity {name: $name, namespace: $namespace})
+          OPTIONAL MATCH (e)-[r:RELATES_TO]-()
+          DELETE r
+          DETACH DELETE e
+          RETURN count(e) as deleted
+          `,
+          { name, namespace },
+        );
+        deletedEntity = (entityResult.records[0]?.get("deleted") ?? 0) > 0;
+      });
+
+      return { deletedMemory, deletedEntity };
+    } finally {
+      await session.close();
+    }
+  }
+
+  // ===========================================================================
+  // STATS
+  // ===========================================================================
+
+  async stats(namespace = "default"): Promise<{
+    memories: number;
+    entities: number;
+    edges: number;
+  }> {
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
         `
-        MATCH (m:Memory {name: $name})
-        OPTIONAL MATCH (a:Item)-[r:RELATION {memoryId: m.id}]->(b:Item)
-        RETURN m.id as memId,
-               m.name as memName,
-               m.text as memText,
-               m.summary as memSummary,
-               m.namespace as memNamespace,
-               m.createdAt as memCreatedAt,
-               collect(DISTINCT {name: a.name, type: a.type, description: a.description}) +
-               collect(DISTINCT {name: b.name, type: b.type, description: b.description}) as items
+        MATCH (m:Memory {namespace: $namespace})
+        WITH count(m) as memCount
+        MATCH (e:Entity {namespace: $namespace})
+        WITH memCount, count(e) as entityCount
+        MATCH (e1:Entity {namespace: $namespace})-[r:RELATES_TO]->()
+        RETURN memCount as memories, entityCount as entities, count(r) as edges
         `,
-        { name },
+        { namespace },
       );
 
-      const memoryRecord = memResult.records[0];
-      const memory =
-        memoryRecord && memoryRecord.get("memId")
-          ? {
-              id: memoryRecord.get("memId"),
-              name: memoryRecord.get("memName"),
-              text: memoryRecord.get("memText"),
-              summary: memoryRecord.get("memSummary"),
-              namespace: memoryRecord.get("memNamespace"),
-              createdAt: new Date(memoryRecord.get("memCreatedAt")),
-            }
-          : undefined;
-
-      interface ItemData {
-        name: string;
-        type: string;
-        description?: string;
-      }
-      const relatedItems: Item[] = memoryRecord
-        ? memoryRecord
-            .get("items")
-            .filter((i: ItemData) => i.name) // Remove nulls
-            .map((i: ItemData) => ({
-              name: i.name,
-              type: i.type,
-              description: i.description,
-            }))
-        : [];
-
-      // Check for Item with this name
-      const itemResult = await session.run(
-        `
-        MATCH (i:Item {name: $name})
-        RETURN i.name as name,
-               i.type as type,
-               i.description as description
-        `,
-        { name },
-      );
-
-      const itemRecord = itemResult.records[0];
-      const item: Item | undefined = itemRecord
-        ? {
-            name: itemRecord.get("name") as string,
-            type: itemRecord.get("type") as Item["type"],
-            description: itemRecord.get("description") as string | undefined,
-          }
-        : undefined;
-
-      // Get all relations involving this item
-      const relResult = await session.run(
-        `
-        MATCH (a:Item {name: $name})-[r:RELATION]->(b:Item)
-        RETURN r.id as id,
-               a.name as from,
-               r.type as relation,
-               b.name as to,
-               r.memoryId as memoryId,
-               r.createdAt as createdAt
-        UNION
-        MATCH (a:Item)-[r:RELATION]->(b:Item {name: $name})
-        RETURN r.id as id,
-               a.name as from,
-               r.type as relation,
-               b.name as to,
-               r.memoryId as memoryId,
-               r.createdAt as createdAt
-        ORDER BY createdAt DESC
-        `,
-        { name },
-      );
-
-      const relations: StoredRelation[] = relResult.records.map((r) => ({
-        id: r.get("id"),
-        from: r.get("from"),
-        relation: r.get("relation"),
-        to: r.get("to"),
-        memoryId: r.get("memoryId"),
-        createdAt: new Date(r.get("createdAt")),
-      }));
-
-      const conflicts = await this.detectConflicts(relations);
-
+      const record = result.records[0];
       return {
-        memory,
-        relatedItems: relatedItems.length > 0 ? relatedItems : undefined,
-        item,
-        relations,
-        conflicts,
+        memories: record?.get("memories") ?? 0,
+        entities: record?.get("entities") ?? 0,
+        edges: record?.get("edges") ?? 0,
       };
     } finally {
       await session.close();
     }
   }
 
-  /**
-   * Detect conflicts in a set of relations
-   * Conflict = same subject + EXCLUSIVE relation type, different objects
-   *
-   * Only certain relation types are exclusive (can only have one target):
-   * - prefers: A person typically has ONE preference for a category
-   * - is: Identity relations are exclusive
-   * - decided: A decision typically resolves to one choice
-   *
-   * Non-exclusive relations (can have multiple targets):
-   * - uses, knows, works_on, created, depends_on, related_to, alternative_to, etc.
-   */
-  private async detectConflicts(
-    relations: StoredRelation[],
-  ): Promise<Conflict[]> {
-    // Relation types where having multiple targets indicates a conflict
-    const exclusiveRelations = new Set(["prefers", "is", "decided"]);
+  // ===========================================================================
+  // GRAPH DATA FOR VISUALIZATION
+  // ===========================================================================
 
-    const conflicts: Conflict[] = [];
-    const grouped = new Map<string, StoredRelation[]>();
-
-    // Group by "from + relationType"
-    for (const rel of relations) {
-      const key = `${rel.from}::${rel.relation}`;
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)!.push(rel);
-    }
-
-    // Find groups with different "to" values, but only for exclusive relations
-    for (const [key, rels] of grouped) {
-      const parts = key.split("::");
-      const relationType = parts[1] ?? "";
-
-      // Skip non-exclusive relation types
-      if (!exclusiveRelations.has(relationType)) continue;
-
-      const uniqueTos = new Set(rels.map((r) => r.to));
-      if (uniqueTos.size > 1) {
-        const itemName = parts[0] ?? "";
-
-        // Check if there's an existing resolution
-        const resolution = await this.getResolution(rels.map((r) => r.id));
-
-        conflicts.push({
-          itemName,
-          relationType,
-          relations: rels,
-          resolution,
-        });
-      }
-    }
-
-    return conflicts;
-  }
-
-  /**
-   * Get resolution for a set of relation IDs (if one exists)
-   */
-  private async getResolution(
-    relationIds: string[],
-  ): Promise<Resolution | undefined> {
-    const session = this.driver.session();
-    try {
-      const result = await session.run(
-        `
-        MATCH (res:Resolution)
-        WHERE ALL(id IN $relationIds WHERE id IN res.conflictingRelations)
-        RETURN res.id as id,
-               res.conflictingRelations as conflictingRelations,
-               res.decision as decision,
-               res.keptRelationId as keptRelationId,
-               res.createdAt as createdAt
-        ORDER BY res.createdAt DESC
-        LIMIT 1
-        `,
-        { relationIds },
-      );
-
-      const record = result.records[0];
-      if (record) {
-        return {
-          id: record.get("id"),
-          conflictingRelations: record.get("conflictingRelations"),
-          decision: record.get("decision"),
-          keptRelationId: record.get("keptRelationId") ?? undefined,
-          createdAt: new Date(record.get("createdAt")),
-        };
-      }
-      return undefined;
-    } finally {
-      await session.close();
-    }
-  }
-
-  /**
-   * Store a resolution decision
-   */
-  async storeResolution(
-    conflictingRelationIds: string[],
-    decision: "keep_newer" | "keep_older" | "keep_both" | "keep_neither",
-    keptRelationId?: string,
-  ): Promise<void> {
-    const session = this.driver.session();
-    try {
-      await session.run(
-        `
-        CREATE (res:Resolution {
-          id: $id,
-          conflictingRelations: $conflictingRelations,
-          decision: $decision,
-          keptRelationId: $keptRelationId,
-          createdAt: datetime($createdAt)
-        })
-        `,
-        {
-          id: randomUUID(),
-          conflictingRelations: conflictingRelationIds,
-          decision,
-          keptRelationId: keptRelationId ?? null,
-          createdAt: new Date().toISOString(),
-        },
-      );
-    } finally {
-      await session.close();
-    }
-  }
-
-  /**
-   * Remove by name - handles both Memories and Items
-   */
-  async forget(name: string): Promise<{
-    deletedMemory: boolean;
-    deletedItem: boolean;
+  async getGraphData(namespace = "default"): Promise<{
+    nodes: Array<{
+      id: string;
+      name: string;
+      type: string;
+      description?: string;
+      summary?: string;
+    }>;
+    links: Array<{
+      source: string;
+      target: string;
+      relationType: string;
+      fact: string;
+      sentiment: number;
+      edgeId: string;
+    }>;
   }> {
     const session = this.driver.session();
     try {
-      let deletedMemory = false;
-      let deletedItem = false;
+      // Get all entities as nodes
+      const nodeResult = await session.run(
+        `
+        MATCH (e:Entity {namespace: $namespace})
+        RETURN e.name as id,
+               e.name as name,
+               e.type as type,
+               e.description as description,
+               e.summary as summary
+        `,
+        { namespace },
+      );
 
-      await session.executeWrite(async (tx) => {
-        // Try to delete Memory with this name (and its relations)
-        const memResult = await tx.run(
-          `
-          MATCH (m:Memory {name: $name})
-          OPTIONAL MATCH ()-[r:RELATION {memoryId: m.id}]->()
-          DELETE r, m
-          RETURN count(m) as deleted
-          `,
-          { name },
-        );
-        deletedMemory = memResult.records[0]?.get("deleted") > 0;
+      const nodes = nodeResult.records.map((r) => ({
+        id: r.get("id"),
+        name: r.get("name"),
+        type: r.get("type"),
+        description: r.get("description") ?? undefined,
+        summary: r.get("summary") ?? undefined,
+      }));
 
-        // Try to delete Item with this name (and its relations)
-        const itemResult = await tx.run(
-          `
-          MATCH (i:Item {name: $name})
-          OPTIONAL MATCH (i)-[r:RELATION]-()
-          DELETE r, i
-          RETURN count(i) as deleted
-          `,
-          { name },
-        );
-        deletedItem = itemResult.records[0]?.get("deleted") > 0;
-      });
+      // Get edges as links (only active, non-invalidated)
+      const linkResult = await session.run(
+        `
+        MATCH (source:Entity {namespace: $namespace})-[r:RELATES_TO]->(target:Entity)
+        WHERE r.invalidAt IS NULL
+        RETURN source.name as source,
+               target.name as target,
+               r.relationType as relationType,
+               r.fact as fact,
+               r.sentiment as sentiment,
+               r.id as edgeId
+        `,
+        { namespace },
+      );
 
-      return { deletedMemory, deletedItem };
+      const links = linkResult.records.map((r) => ({
+        source: r.get("source"),
+        target: r.get("target"),
+        relationType: r.get("relationType"),
+        fact: r.get("fact"),
+        sentiment: r.get("sentiment") ?? 0,
+        edgeId: r.get("edgeId"),
+      }));
+
+      return { nodes, links };
     } finally {
       await session.close();
     }

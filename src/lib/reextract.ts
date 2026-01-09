@@ -1,17 +1,19 @@
 /**
- * Re-extract entities and relations from all memories
+ * Re-extract entities and edges from all memories
  *
  * Run this when changing the extraction prompt to update the graph structure.
  * This will:
- * 1. Delete all existing Item nodes and RELATION edges
+ * 1. Delete all existing Entity nodes and RELATES_TO edges
  * 2. Re-run extraction on each memory's text
- * 3. Store the new items and relations
+ * 3. Generate embeddings for each edge fact
+ * 4. Store the new entities and edges
  *
  * Usage: bun run db:reextract
  */
 
 import neo4j from "neo4j-driver";
 import { extract } from "./extractor";
+import { embed } from "./embedder";
 import { randomUUID } from "crypto";
 
 const NEO4J_URI = process.env.NEO4J_URI ?? "bolt://localhost:7687";
@@ -49,26 +51,26 @@ async function reextractMemories(): Promise<void> {
       return;
     }
 
-    // Clear existing items and relations
-    console.log("Clearing existing Items and Relations...");
+    // Clear existing entities (edges are deleted via DETACH DELETE)
+    console.log("Clearing existing Entities and RELATES_TO edges...");
     await session.run(`
-      MATCH (i:Item)
-      DETACH DELETE i
+      MATCH (e:Entity)
+      DETACH DELETE e
     `);
     console.log("✓ Cleared existing graph data\n");
 
     // Re-extract each memory
     let success = 0;
     let failed = 0;
-    let totalItems = 0;
-    let totalRelations = 0;
+    let totalEntities = 0;
+    let totalEdges = 0;
 
     for (let i = 0; i < memories.length; i++) {
       const memory = memories[i]!;
       const progress = `[${i + 1}/${memories.length}]`;
 
       try {
-        // Extract entities and relations
+        // Extract entities and edges
         console.log(`${progress} Extracting: ${memory.name || memory.id}`);
         const extraction = await extract(memory.text);
 
@@ -81,53 +83,79 @@ async function reextractMemories(): Promise<void> {
           { id: memory.id, summary: extraction.summary },
         );
 
-        // Create items
-        for (const item of extraction.items) {
+        // Create entities
+        for (const entity of extraction.entities) {
           await session.run(
             `
-            MERGE (i:Item {name: $name, namespace: $namespace})
-            ON CREATE SET i.type = $type, i.description = $description
-            ON MATCH SET i.description = COALESCE($description, i.description)
+            MERGE (e:Entity {name: $name, namespace: $namespace})
+            ON CREATE SET e.type = $type, e.description = $description
+            ON MATCH SET e.description = COALESCE($description, e.description)
             `,
             {
-              name: item.name,
-              type: item.type,
-              description: item.description ?? null,
+              name: entity.name,
+              type: entity.type,
+              description: entity.description ?? null,
               namespace: memory.namespace,
             },
           );
         }
 
-        // Create relations
-        for (const rel of extraction.relations) {
+        // Create edges (facts as relationships between entities)
+        for (const edge of extraction.edges) {
+          // Validate indices
+          const sourceEntity = extraction.entities[edge.sourceIndex];
+          const targetEntity = extraction.entities[edge.targetIndex];
+          if (!sourceEntity || !targetEntity) {
+            console.warn(
+              `         ⚠ Invalid edge indices: ${edge.sourceIndex} -> ${edge.targetIndex}`,
+            );
+            continue;
+          }
+
+          // Generate embedding for edge fact
+          console.log(`         Embedding edge: ${edge.fact.slice(0, 50)}...`);
+          const embedding = await embed(edge.fact);
+          const edgeId = randomUUID();
+
+          // Create RELATES_TO edge
           await session.run(
             `
-            MATCH (a:Item {name: $from, namespace: $namespace})
-            MATCH (b:Item {name: $to, namespace: $namespace})
-            CREATE (a)-[:RELATION {
-              id: $relId,
-              type: $relation,
-              memoryId: $memoryId,
-              createdAt: datetime($createdAt)
-            }]->(b)
+            MATCH (source:Entity {name: $sourceName, namespace: $namespace})
+            MATCH (target:Entity {name: $targetName, namespace: $namespace})
+            MERGE (source)-[r:RELATES_TO {relationType: $relationType}]->(target)
+            ON CREATE SET
+              r.id = $id,
+              r.fact = $fact,
+              r.sentiment = $sentiment,
+              r.factEmbedding = $embedding,
+              r.episodes = [$memoryId],
+              r.validAt = CASE WHEN $validAt IS NOT NULL THEN datetime($validAt) ELSE null END,
+              r.invalidAt = null,
+              r.createdAt = datetime()
+            ON MATCH SET
+              r.episodes = r.episodes + $memoryId,
+              r.fact = CASE WHEN size($fact) > size(r.fact) THEN $fact ELSE r.fact END
             `,
             {
-              from: rel.from,
-              to: rel.to,
-              relation: rel.relation,
-              relId: randomUUID(),
-              memoryId: memory.id,
+              sourceName: sourceEntity.name,
+              targetName: targetEntity.name,
               namespace: memory.namespace,
-              createdAt: new Date().toISOString(),
+              relationType: edge.relationType,
+              id: edgeId,
+              fact: edge.fact,
+              sentiment: edge.sentiment,
+              embedding,
+              memoryId: memory.id,
+              validAt: edge.validAt ?? null,
             },
           );
         }
 
         console.log(
-          `         → ${extraction.items.length} items, ${extraction.relations.length} relations`,
+          `         → ${extraction.entities.length} entities, ${extraction.edges.length} edges`,
         );
-        totalItems += extraction.items.length;
-        totalRelations += extraction.relations.length;
+        totalEntities += extraction.entities.length;
+        totalEdges += extraction.edges.length;
         success++;
       } catch (error) {
         console.error(`${progress} ✗ ${memory.name || memory.id}: ${error}`);
@@ -138,8 +166,8 @@ async function reextractMemories(): Promise<void> {
     console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     console.log(`Re-extraction complete!`);
     console.log(`  ✓ Memories processed: ${success}`);
-    console.log(`  ✓ Total items: ${totalItems}`);
-    console.log(`  ✓ Total relations: ${totalRelations}`);
+    console.log(`  ✓ Total entities: ${totalEntities}`);
+    console.log(`  ✓ Total edges: ${totalEdges}`);
     if (failed > 0) {
       console.log(`  ✗ Failed: ${failed}`);
     }
