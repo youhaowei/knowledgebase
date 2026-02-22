@@ -7,36 +7,15 @@
  * - Each edge has relationType, sentiment, and natural language description
  *
  * Supports multiple LLM backends:
- * - Claude: Uses Claude Agent SDK with OAuth subscription (no API costs)
+ * - Claude: Uses unifai prompt() API with OAuth subscription (no API costs)
  * - Gemini: Uses Gemini CLI in sandbox mode (free with Google account)
  *
  * Set EXTRACTOR_BACKEND env var to choose: "claude" (default) or "gemini"
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { prompt } from "unifai";
 import { Extraction } from "../types.js";
 import { extractWithGemini } from "./extractor-gemini.js";
-
-// Type guard for assistant messages with content
-interface AssistantMessage {
-  type: "assistant";
-  message?: {
-    content?: Array<{
-      type: string;
-      name?: string;
-      input?: unknown;
-    }>;
-  };
-}
-
-function isAssistantMessage(msg: unknown): msg is AssistantMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    msg.type === "assistant"
-  );
-}
 
 // JSON schema for edge-based extraction
 const extractionSchema = {
@@ -163,35 +142,17 @@ Your task:
 Return a JSON object matching the schema.`;
 
 async function extractWithClaude(text: string): Promise<Extraction> {
-  for await (const msg of query({
-    prompt: extractionPrompt(text),
-    options: {
-      outputFormat: { type: "json_schema", schema: extractionSchema },
-      maxTurns: 1,
-      allowedTools: [],
-      model: "haiku",
-    },
-  })) {
-    if (isAssistantMessage(msg) && msg.message?.content) {
-      const content = msg.message.content;
-      for (const block of content) {
-        if (
-          block.type === "tool_use" &&
-          block.name === "StructuredOutput" &&
-          block.input
-        ) {
-          console.log(
-            "Extracted edges:",
-            JSON.stringify(block.input, null, 2),
-          );
-          const result = Extraction.parse(block.input);
-          return result;
-        }
-      }
-    }
+  const result = await prompt("claude", extractionPrompt(text), {
+    model: "haiku",
+    maxTurns: 1,
+    allowedTools: [],
+    outputFormat: { type: "json_schema", schema: extractionSchema },
+  });
+  if (!result.structuredOutput) {
+    throw new Error("Extraction failed - no structured output in response");
   }
-
-  throw new Error("Extraction failed - no structured_output in response");
+  console.log("Extracted edges:", JSON.stringify(result.structuredOutput, null, 2));
+  return Extraction.parse(result.structuredOutput);
 }
 
 // Cache for gemini availability check
@@ -220,14 +181,14 @@ async function isGeminiAvailable(): Promise<boolean> {
  * Priority:
  * 1. EXTRACTOR_BACKEND env var if set ("claude" or "gemini")
  * 2. Gemini CLI if available (free with Google account)
- * 3. Claude Agent SDK as fallback
+ * 3. Claude (via unifai) as fallback
  */
 export async function extract(text: string): Promise<Extraction> {
   const backendOverride = process.env.EXTRACTOR_BACKEND;
 
   // Explicit override
   if (backendOverride === "claude") {
-    console.log("Using Claude Agent SDK for extraction (explicit)...");
+    console.log("Using Claude (via unifai) for extraction (explicit)...");
     return extractWithClaude(text);
   }
   if (backendOverride === "gemini") {
@@ -247,7 +208,7 @@ export async function extract(text: string): Promise<Extraction> {
   }
 
   // Fallback to Claude
-  console.log("Using Claude Agent SDK for extraction (fallback)...");
+  console.log("Using Claude (via unifai) for extraction (fallback)...");
   return extractWithClaude(text);
 }
 

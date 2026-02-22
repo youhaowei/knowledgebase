@@ -80,7 +80,7 @@ User text → Queue → Claude extraction → Ollama embeddings → Neo4j storag
 
 6. **Per-namespace queues** (`src/lib/queue.ts`) - Each namespace has its own processing queue to prevent race conditions.
 
-7. **Zero API costs** - Uses Claude Agent SDK with OAuth subscription for extraction, Ollama for local embeddings.
+7. **Zero API costs** - Uses unifai (Claude backend) with OAuth subscription for extraction, Ollama for local embeddings.
 
 ### Core Files
 
@@ -138,5 +138,5 @@ User text → Queue → Claude extraction → Ollama embeddings → Neo4j storag
 
 - **Frontend**: React 19, TanStack Router/Start, Vite, Tailwind CSS v4
 - **Backend**: Bun runtime, neo4j-driver, @modelcontextprotocol/sdk
-- **AI**: @anthropic-ai/claude-agent-sdk (extraction), Ollama (embeddings)
+- **AI**: unifai (Claude extraction), Ollama (embeddings)
 - **Validation**: Zod

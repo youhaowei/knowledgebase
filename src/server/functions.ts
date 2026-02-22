@@ -302,7 +302,7 @@ export const forgetEdge = createServerFn({ method: "POST" })
 // LLM-Powered Answer (when no direct results found)
 // ============================================================================
 
-import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
+import { prompt } from "unifai";
 
 /**
  * Ask LLM to answer a question using knowledge graph context
@@ -363,10 +363,7 @@ export const askLLM = createServerFn()
         : "No directly relevant information found in the knowledge base.";
 
     // Query LLM with context
-    let answer = "";
-
-    for await (const msg of claudeQuery({
-      prompt: `You are a helpful assistant with access to a personal knowledge base.
+    const result = await prompt("claude", `You are a helpful assistant with access to a personal knowledge base.
 
 Context from the knowledge base:
 ${context}
@@ -378,33 +375,12 @@ Instructions:
 - If the context doesn't contain relevant information, say so honestly
 - Be concise but helpful
 - If you can make reasonable inferences from the context, do so
-- Don't make up information that isn't supported by the context`,
-      options: {
-        maxTurns: 1,
-        allowedTools: [],
-        model: "haiku",
-      },
-    })) {
-      // Extract text response
-      if (
-        typeof msg === "object" &&
-        msg !== null &&
-        "type" in msg &&
-        msg.type === "assistant"
-      ) {
-        const assistantMsg = msg as {
-          type: "assistant";
-          message?: { content?: Array<{ type: string; text?: string }> };
-        };
-        if (assistantMsg.message?.content) {
-          for (const block of assistantMsg.message.content) {
-            if (block.type === "text" && block.text) {
-              answer += block.text;
-            }
-          }
-        }
-      }
-    }
+- Don't make up information that isn't supported by the context`, {
+      maxTurns: 1,
+      allowedTools: [],
+      model: "haiku",
+    });
+    const answer = result.text;
 
     return {
       answer: answer || "I couldn't generate an answer. Please try rephrasing your question.",

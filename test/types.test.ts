@@ -1,30 +1,32 @@
 import { test, expect, describe } from "bun:test";
-import { Item, Relation, Memory, Extraction } from "../src/types";
+import { Entity, ExtractedEdge, Memory, Extraction } from "../src/types";
 
 describe("Type Validation", () => {
-  test("should validate Item schema", () => {
-    const validItem = {
+  test("should validate Entity schema", () => {
+    const validEntity = {
       name: "Alice",
       type: "person" as const,
       description: "A software engineer",
     };
 
-    const parsed = Item.parse(validItem);
+    const parsed = Entity.parse(validEntity);
     expect(parsed.name).toBe("Alice");
     expect(parsed.type).toBe("person");
   });
 
-  test("should validate Relation schema", () => {
-    const validRelation = {
-      from: "Alice",
-      relation: "uses",
-      to: "TypeScript",
+  test("should validate ExtractedEdge schema", () => {
+    const validEdge = {
+      relationType: "uses",
+      sourceIndex: 0,
+      targetIndex: 1,
+      fact: "Alice uses TypeScript for development",
     };
 
-    const parsed = Relation.parse(validRelation);
-    expect(parsed.from).toBe("Alice");
-    expect(parsed.relation).toBe("uses");
-    expect(parsed.to).toBe("TypeScript");
+    const parsed = ExtractedEdge.parse(validEdge);
+    expect(parsed.relationType).toBe("uses");
+    expect(parsed.sourceIndex).toBe(0);
+    expect(parsed.targetIndex).toBe(1);
+    expect(parsed.fact).toBe("Alice uses TypeScript for development");
   });
 
   test("should validate Memory schema", () => {
@@ -44,22 +46,29 @@ describe("Type Validation", () => {
 
   test("should validate Extraction schema", () => {
     const validExtraction = {
-      items: [
+      entities: [
         { name: "Alice", type: "person" as const },
         { name: "TypeScript", type: "technology" as const },
       ],
-      relations: [{ from: "Alice", relation: "prefers", to: "TypeScript" }],
+      edges: [
+        {
+          relationType: "prefers",
+          sourceIndex: 0,
+          targetIndex: 1,
+          fact: "Alice prefers TypeScript",
+        },
+      ],
       summary: "Alice prefers TypeScript",
     };
 
     const parsed = Extraction.parse(validExtraction);
-    expect(parsed.items.length).toBe(2);
-    expect(parsed.relations.length).toBe(1);
+    expect(parsed.entities.length).toBe(2);
+    expect(parsed.edges.length).toBe(1);
   });
 
-  test("should reject invalid item types", () => {
+  test("should reject invalid entity types", () => {
     expect(() => {
-      Item.parse({
+      Entity.parse({
         name: "Test",
         type: "invalid_type",
       });
