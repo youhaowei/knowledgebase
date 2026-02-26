@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Knowledgebase is a personal knowledge graph that auto-extracts entities and edges (facts as relationships) from text, stores them in Neo4j with vector embeddings, and provides semantic search. Three access methods: Web UI, MCP tools for Claude Code, and REST API.
+Knowledgebase is a personal knowledge graph that auto-extracts entities and edges (facts as relationships) from text, stores them with vector embeddings, and provides semantic search. Three access methods: Web UI, MCP tools for Claude Code, and REST API.
 
 ## Commands
 
@@ -32,8 +32,8 @@ Facts ARE edges between entities with semantic relation types. This enables:
 - Temporal validity: `validAt` / `invalidAt` for time-aware knowledge
 
 ```
-User text → Queue → Claude extraction → Ollama embeddings → Neo4j storage
-                    (entities, edges)    (2560-dim vectors)  (graph + full-text index)
+User text → Queue → Claude extraction → Ollama embeddings → GraphProvider storage
+                    (entities, edges)    (2560-dim vectors)   (graph + vector + FTS index)
 ```
 
 **Core Types:**
@@ -76,40 +76,53 @@ User text → Queue → Claude extraction → Ollama embeddings → Neo4j storag
 
 4. **Index-based entity references** - Extraction outputs entities first (indexed 0,1,2), edges reference by index. Efficient for LLM output.
 
-5. **Full-text search on edges** - Neo4j doesn't support vector indexes on relationships, so we use full-text index on `fact` property.
+5. **Full-text search on edges** - LadybugDB uses separate `Fact` node table mirroring `RELATES_TO` edges, with FTS index on `text` property.
 
 6. **Per-namespace queues** (`src/lib/queue.ts`) - Each namespace has its own processing queue to prevent race conditions.
 
 7. **Zero API costs** - Uses unifai (Claude backend) with OAuth subscription for extraction, Ollama for local embeddings.
+
+### Storage Backend
+
+Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implementations:
+- **LadybugProvider** (default) — Embedded graph DB at `.ladybug/`, uses `lbug` package
+- **Neo4jProvider** (optional) — Remote Neo4j, activated by `NEO4J_URI` env var
+
+`createGraphProvider()` picks the backend automatically based on environment.
 
 ### Core Files
 
 | File | Purpose |
 |------|---------|
 | `src/types.ts` | Zod schemas (Entity, ExtractedEdge, StoredEdge, Memory, Extraction) |
+| `src/lib/graph-provider.ts` | GraphProvider interface + factory |
+| `src/lib/ladybug-provider.ts` | LadybugDB implementation (default) |
+| `src/lib/neo4j-provider.ts` | Neo4j implementation (optional) |
 | `src/lib/extractor.ts` | Claude/Gemini-powered entity/edge extraction |
 | `src/lib/embedder.ts` | Ollama embedding generation (2560-dim) |
-| `src/lib/graph.ts` | Neo4j operations (store, search, get, forget, forgetEdge) |
 | `src/lib/queue.ts` | Async processing pipeline |
 | `src/server/functions.ts` | TanStack server functions (type-safe API) |
 | `src/routes/mcp.tsx` | MCP protocol endpoint for Claude Code |
 | `src/web/components/Graph.tsx` | react-force-graph-2d visualization |
 
-### Neo4j Model
+### Graph Model
 
-**Nodes:**
-- `Memory` - Source text + embedding + summary
-- `Entity` - Named entities with type, description, summary
+**Node tables:**
+- `Memory` — Source text + embedding + summary + status
+- `Entity` — Named entities with type, description, scope (project/global)
+- `Fact` — Mirrors RELATES_TO edges for FTS indexing (LadybugDB workaround)
 
-**Edges:**
+**Relationships:**
 - `(Entity)-[RELATES_TO {
     id, relationType, fact, sentiment, factEmbedding,
-    episodes[], validAt, invalidAt, createdAt
-  }]->(Entity)` - Facts as relationships
+    episodes[], validAt, invalidAt, namespace, createdAt
+  }]->(Entity)` — Facts as relationships
 
 **Indexes:**
-- `memory_embedding` - Vector index for semantic search (2560 dims, cosine)
-- `edge_fact_text` - Full-text index on edge fact property
+- `memory_vec_idx` — Vector index for semantic search (2560 dims, cosine)
+- `fact_fts_idx` — Full-text index on Fact.text property
+
+**Soft deletes:** All nodes use `deletedAt` property (empty string = active, ISO date = deleted).
 
 ### MCP Tools
 
@@ -137,6 +150,6 @@ User text → Queue → Claude extraction → Ollama embeddings → Neo4j storag
 ## Dependencies
 
 - **Frontend**: React 19, TanStack Router/Start, Vite, Tailwind CSS v4
-- **Backend**: Bun runtime, neo4j-driver, @modelcontextprotocol/sdk
+- **Backend**: Bun runtime, lbug (LadybugDB), neo4j-driver (optional), @modelcontextprotocol/sdk
 - **AI**: unifai (Claude extraction), Ollama (embeddings)
 - **Validation**: Zod

@@ -31,7 +31,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "unifai": "file:../unifai",
+    "unifai": "github:youhaowei/unifai",
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/geist-mono": "^5.2.7",
     "@modelcontextprotocol/sdk": "^1.25.2",
