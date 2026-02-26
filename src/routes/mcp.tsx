@@ -6,7 +6,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Graph } from "@/lib/graph";
 import { Queue } from "@/lib/queue";
-import { embed } from "@/lib/embedder";
+import { embed, isVectorEnabled } from "@/lib/embedder";
 import { randomUUID } from "crypto";
 
 // Shared instances
@@ -116,7 +116,7 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
       case "search": {
         const query = args?.query as string;
         const limit = (args?.limit as number) ?? 10;
-        const embedding = await embed(query);
+        const embedding = isVectorEnabled() ? await embed(query) : [];
         const result = await graph.search(embedding, query, limit);
 
         return {

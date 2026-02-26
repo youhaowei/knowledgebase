@@ -4,14 +4,14 @@
  * Processes memories asynchronously in background:
  * 1. Extract entities & edges (Claude/Gemini) - Edge-as-Fact model
  * 2. Generate embeddings for memory AND each edge fact (Ollama)
- * 3. Store in Neo4j with RELATES_TO edges
+ * 3. Store via GraphProvider (LadybugDB default, Neo4j optional)
  *
  * Per-namespace queues to avoid race conditions
  */
 
 import { extract } from "./extractor.js";
 import { embed } from "./embedder.js";
-import { Graph } from "./graph.js";
+import type { GraphProvider } from "./graph-provider.js";
 import type { Memory } from "../types.js";
 
 type QueueEntry = {
@@ -23,9 +23,9 @@ type QueueEntry = {
 export class Queue {
   private entries: Map<string, QueueEntry[]> = new Map();
   private processing: Set<string> = new Set();
-  private graph: Graph;
+  private graph: GraphProvider;
 
-  constructor(graph: Graph) {
+  constructor(graph: GraphProvider) {
     this.graph = graph;
   }
 
@@ -65,11 +65,11 @@ export class Queue {
 
       try {
         // 1. Extract entities and edges using Claude/Gemini (Edge-as-Fact model)
-        console.log(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
+        console.error(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
         const { entities, edges, summary } = await extract(memory.text);
         memory.summary = summary;
 
-        console.log(`[Queue] Extracted ${entities.length} entities, ${edges.length} edges`);
+        console.error(`[Queue] Extracted ${entities.length} entities, ${edges.length} edges`);
 
         // 2. Auto-generate name from summary if not provided
         if (!memory.name || memory.name === "") {
@@ -79,22 +79,22 @@ export class Queue {
         }
 
         // 3. Generate embedding for memory text
-        console.log(`[Queue] Generating memory embedding...`);
+        console.error(`[Queue] Generating memory embedding...`);
         const memoryEmbedding = await embed(memory.text);
 
         // 4. Generate embeddings for each edge's fact description
-        console.log(`[Queue] Generating embeddings for ${edges.length} edge facts...`);
+        console.error(`[Queue] Generating embeddings for ${edges.length} edge facts...`);
         const edgeEmbeddings: number[][] = [];
         for (const edge of edges) {
           const edgeEmbedding = await embed(edge.fact);
           edgeEmbeddings.push(edgeEmbedding);
         }
 
-        // 5. Store everything in Neo4j (entities + RELATES_TO edges)
-        console.log(`[Queue] Storing in Neo4j...`);
+        // 5. Store everything (entities + RELATES_TO edges)
+        console.error(`[Queue] Storing...`);
         await this.graph.store(memory, entities, edges, memoryEmbedding, edgeEmbeddings);
 
-        console.log(`[Queue] Memory ${memory.id} processed successfully`);
+        console.error(`[Queue] Memory ${memory.id} processed successfully`);
         resolve();
       } catch (error) {
         console.error(`[Queue] Error processing memory ${memory.id}:`, error);

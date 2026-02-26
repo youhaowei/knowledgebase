@@ -16,7 +16,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { Graph } from "../lib/graph.js";
 import { Queue } from "../lib/queue.js";
-import { embed } from "../lib/embedder.js";
+import { embed, isVectorEnabled } from "../lib/embedder.js";
 import { randomUUID } from "crypto";
 
 // Shared instances (singleton pattern for server-side)
@@ -86,7 +86,7 @@ const searchSchema = z.object({
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
   .handler(async ({ data }) => {
-    const embedding = await embed(data.query);
+    const embedding = isVectorEnabled() ? await embed(data.query) : [];
     const result = await graph.search(embedding, data.query, data.limit);
 
     return {
@@ -318,7 +318,7 @@ export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
   .handler(async ({ data }) => {
     // First, search for relevant context
-    const embedding = await embed(data.question);
+    const embedding = isVectorEnabled() ? await embed(data.question) : [];
     const searchResult = await graph.search(embedding, data.question, 5);
 
     // Build context from search results
@@ -409,7 +409,7 @@ const streamingSearchSchema = z.object({
 export const streamingSearch = createServerFn()
   .inputValidator((data: unknown) => streamingSearchSchema.parse(data))
   .handler(async function* ({ data }) {
-    const embedding = await embed(data.query);
+    const embedding = isVectorEnabled() ? await embed(data.query) : [];
     const result = await graph.search(embedding, data.query, data.limit);
 
     // Yield memories one at a time for streaming UI

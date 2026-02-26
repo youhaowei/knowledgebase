@@ -252,6 +252,8 @@ export class Neo4jProvider implements GraphProvider {
   ): Promise<SearchResult> {
     const session = this.driver.session();
     try {
+      let memories: Memory[] = [];
+      if (embedding.length > 0) {
       const memoryResult = await session.run(
         `
         CALL db.index.vector.queryNodes('memory_embedding', $limit, $embedding)
@@ -271,7 +273,7 @@ export class Neo4jProvider implements GraphProvider {
         { embedding, limit: neo4j.int(limit) },
       );
 
-      const memories: Memory[] = memoryResult.records.map((r) => ({
+      memories = memoryResult.records.map((r) => ({
         id: r.get("id"),
         name: r.get("name"),
         text: r.get("text"),
@@ -282,6 +284,7 @@ export class Neo4jProvider implements GraphProvider {
         error: r.get("error") ?? undefined,
         createdAt: new Date(r.get("createdAt")),
       }));
+      }
 
       const edgeResult = await session.run(
         `

@@ -18,8 +18,14 @@ bun run db:reembed       # Re-embed all memories (after model change)
 bun run db:reextract     # Re-extract edges from all memories (after prompt change)
 
 # Testing & Quality
-bun test                 # Run all tests
+bun test                 # Run unit tests (excludes CLI tests)
+bun run test:cli         # Run CLI E2E tests (slow, requires Gemini)
+bun run test:all         # Run all tests (unit + CLI, separate processes)
 bun run lint             # ESLint check
+
+# CLI
+bun run kb <cmd>         # Knowledgebase CLI (add, search, get, forget, stats)
+bun run kb-test <cmd>    # CLI with --env test (isolated data)
 ```
 
 ## Architecture
@@ -139,6 +145,7 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 - Routes are file-based in `src/routes/` (auto-generates `routeTree.gen.ts`)
 - UI components in `src/web/components/ui/` follow shadcn/ui patterns
 - Design tokens documented in `DESIGN_SYSTEM.md` (neon cyber aesthetic)
+- CLI stdout is for machine-readable output only. All diagnostics/progress → `console.error` (stderr)
 
 ## Bun-Specific
 
@@ -146,6 +153,9 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 - Use `bun run <script>` (not npm/yarn/pnpm)
 - Bun auto-loads `.env` - no dotenv needed
 - Prefer `Bun.file()` over `fs.readFile()`
+- LadybugDB (lbug) native addon: Bun segfaults on `close()` — skip explicit close, use `process.exit(0)`
+- LadybugDB creates `.wal` files as siblings (e.g., `.ladybug-test.wal` alongside `.ladybug-test/`). Clean up both directory AND `.wal` file in test teardown
+- CLI tests must run separately (`bun run test:cli`) — native addon crashes Bun when mixed with other tests in the same runner
 
 ## Dependencies
 

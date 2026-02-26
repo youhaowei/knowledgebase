@@ -151,7 +151,7 @@ async function extractWithClaude(text: string): Promise<Extraction> {
   if (!result.structuredOutput) {
     throw new Error("Extraction failed - no structured output in response");
   }
-  console.log("Extracted edges:", JSON.stringify(result.structuredOutput, null, 2));
+  console.error("Extracted edges:", JSON.stringify(result.structuredOutput, null, 2));
   return Extraction.parse(result.structuredOutput);
 }
 
@@ -188,17 +188,17 @@ export async function extract(text: string): Promise<Extraction> {
 
   // Explicit override
   if (backendOverride === "claude") {
-    console.log("Using Claude (via unifai) for extraction (explicit)...");
+    console.error("Using Claude (via unifai) for extraction (explicit)...");
     return extractWithClaude(text);
   }
   if (backendOverride === "gemini") {
-    console.log("Using Gemini CLI for extraction (explicit)...");
+    console.error("Using Gemini CLI for extraction (explicit)...");
     return extractWithGemini(text);
   }
 
   // Auto-detect: prefer Gemini if available
   if (await isGeminiAvailable()) {
-    console.log("Using Gemini CLI for extraction (auto-detected)...");
+    console.error("Using Gemini CLI for extraction (auto-detected)...");
     try {
       return await extractWithGemini(text);
     } catch (error) {
@@ -208,7 +208,7 @@ export async function extract(text: string): Promise<Extraction> {
   }
 
   // Fallback to Claude
-  console.log("Using Claude (via unifai) for extraction (fallback)...");
+  console.error("Using Claude (via unifai) for extraction (fallback)...");
   return extractWithClaude(text);
 }
 

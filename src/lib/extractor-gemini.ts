@@ -117,7 +117,7 @@ export async function extractWithGemini(text: string): Promise<Extraction> {
   // Parse and validate the extraction result
   try {
     const parsed = JSON.parse(jsonContent);
-    console.log("Gemini extraction result:", JSON.stringify(parsed, null, 2));
+    console.error("Gemini extraction result:", JSON.stringify(parsed, null, 2));
     return Extraction.parse(parsed);
   } catch (e) {
     console.error("Failed to parse extraction JSON:", jsonContent);

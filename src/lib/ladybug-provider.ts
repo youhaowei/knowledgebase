@@ -168,7 +168,7 @@ export class LadybugProvider implements GraphProvider {
 
     for (const entity of entities) {
       if (!entity.uuid) {
-        throw new Error(`Entity "${entity.name}" missing UUID`);
+        (entity as Entity & { uuid: string }).uuid = randomUUID();
       }
       const entityWithScope = entity as Entity & {
         namespace?: string;
@@ -363,7 +363,7 @@ export class LadybugProvider implements GraphProvider {
     query: string,
     limit = 10,
   ): Promise<SearchResult> {
-    const memories = await this.vectorSearch(embedding, limit);
+    const memories = embedding.length > 0 ? await this.vectorSearch(embedding, limit) : [];
     const edges = await this.fullTextSearchEdges(query, limit);
 
     const entityResult = await this.executeQuery(
