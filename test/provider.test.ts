@@ -41,7 +41,8 @@ describe("GraphProvider", () => {
   });
 
   afterAll(async () => {
-    await provider.close();
+    // Skip explicit close — LadybugDB native addon segfaults in Bun on close().
+    // OS reclaims resources on process exit. See CLAUDE.md "Bun-Specific" section.
   });
 
   afterEach(async () => {
@@ -88,6 +89,8 @@ describe("GraphProvider", () => {
           relationType: "prefers",
           fact: "Alice prefers TypeScript",
           sentiment: 0.8,
+          confidence: 1.0,
+          confidenceReason: "explicitly stated",
         },
         {
           sourceIndex: 0,
@@ -95,6 +98,8 @@ describe("GraphProvider", () => {
           relationType: "avoids",
           fact: "Alice avoids JavaScript",
           sentiment: -0.3,
+          confidence: 0.6,
+          confidenceReason: "inferred from context",
         },
       ];
 
@@ -142,6 +147,85 @@ describe("GraphProvider", () => {
         namespace: testNamespace,
       });
       expect(memories.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe("confidence scoring", () => {
+    test("stores and retrieves confidence fields on edges", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const memory: Memory = {
+        id: randomUUID(),
+        name: "Confidence Test",
+        text: "DashFrame uses Zustand for state management",
+        summary: "DashFrame uses Zustand",
+        namespace: testNamespace,
+        status: "completed",
+        createdAt: new Date(),
+      };
+
+      const entities: Entity[] = [
+        { uuid: randomUUID(), name: "DashFrame", type: "project" },
+        { uuid: randomUUID(), name: "Zustand", type: "technology" },
+      ];
+
+      const edges: ExtractedEdge[] = [
+        {
+          sourceIndex: 0,
+          targetIndex: 1,
+          relationType: "uses",
+          fact: "DashFrame uses Zustand for state management",
+          sentiment: 0,
+          confidence: 0.8,
+          confidenceReason: "strongly implied",
+        },
+      ];
+
+      await provider.store(memory, entities, edges, makeTestEmbedding(400), [
+        makeTestEmbedding(401),
+      ]);
+
+      const result = await provider.get("DashFrame", testNamespace);
+      expect(result.edges.length).toBeGreaterThanOrEqual(1);
+      const storedEdge = result.edges.find((e) => e.relationType === "uses");
+      expect(storedEdge?.confidence).toBe(0.8);
+      expect(storedEdge?.confidenceReason).toBe("strongly implied");
+    });
+
+    test("defaults confidence to 1 when not provided", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const memory: Memory = {
+        id: randomUUID(),
+        name: "Default Confidence Test",
+        text: "Bob works on Dashboard",
+        summary: "Bob on Dashboard",
+        namespace: testNamespace,
+        status: "completed",
+        createdAt: new Date(),
+      };
+
+      const entities: Entity[] = [
+        { uuid: randomUUID(), name: "Bob", type: "person" },
+        { uuid: randomUUID(), name: "Dashboard", type: "project" },
+      ];
+
+      const edges: ExtractedEdge[] = [
+        {
+          sourceIndex: 0,
+          targetIndex: 1,
+          relationType: "worksOn",
+          fact: "Bob works on Dashboard",
+          sentiment: 0.5,
+        },
+      ];
+
+      await provider.store(memory, entities, edges, makeTestEmbedding(410), [
+        makeTestEmbedding(411),
+      ]);
+
+      const result = await provider.get("Bob", testNamespace);
+      const storedEdge = result.edges.find((e) => e.relationType === "worksOn");
+      expect(storedEdge?.confidence).toBe(1);
+      expect(storedEdge?.confidenceReason).toBeUndefined();
     });
   });
 

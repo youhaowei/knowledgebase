@@ -9,9 +9,9 @@
     "db:init": "bun run src/lib/init-db.ts",
     "db:reembed": "bun run src/lib/reembed.ts",
     "db:reextract": "bun run src/lib/reextract.ts",
-    "test": "bun test --exclude test/cli.test.ts",
+    "test": "bun test test/types.test.ts test/embedder.test.ts && bun test test/provider.test.ts",
     "test:cli": "bun test test/cli.test.ts",
-    "test:all": "bun test --exclude test/cli.test.ts && bun test test/cli.test.ts",
+    "test:all": "bun test test/types.test.ts test/embedder.test.ts && bun test test/provider.test.ts && bun test test/cli.test.ts",
     "lint": "eslint .",
     "kb": "bun run src/cli.ts",
     "kb-test": "bun run src/cli.ts --env test"

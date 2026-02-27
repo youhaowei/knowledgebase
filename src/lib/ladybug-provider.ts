@@ -111,8 +111,8 @@ export class LadybugProvider implements GraphProvider {
 
     await this.tryQuery(`CREATE NODE TABLE IF NOT EXISTS Fact(
       id STRING PRIMARY KEY, text STRING, relationType STRING, sourceUuid STRING,
-      targetUuid STRING, sentiment DOUBLE, factEmbedding DOUBLE[2560],
-      episodes STRING[], validAt STRING,
+      targetUuid STRING, sentiment DOUBLE, confidence DOUBLE, confidenceReason STRING,
+      factEmbedding DOUBLE[2560], episodes STRING[], validAt STRING,
       invalidAt STRING, namespace STRING, createdAt STRING, deletedAt STRING
     )`);
 
@@ -121,11 +121,28 @@ export class LadybugProvider implements GraphProvider {
       `ALTER TABLE Fact ADD factEmbedding DOUBLE[2560] DEFAULT ${this.zeroEmbeddingStr()}`,
     );
 
+    // Migration: add confidence scoring columns
+    await this.tryQuery(
+      `ALTER TABLE Fact ADD confidence DOUBLE DEFAULT 1.0`,
+    );
+    await this.tryQuery(
+      `ALTER TABLE Fact ADD confidenceReason STRING DEFAULT ''`,
+    );
+
     await this.tryQuery(`CREATE REL TABLE IF NOT EXISTS RELATES_TO(
       FROM Entity TO Entity, id STRING, relationType STRING, fact STRING,
-      sentiment DOUBLE, factEmbedding DOUBLE[2560], episodes STRING[],
+      sentiment DOUBLE, confidence DOUBLE, confidenceReason STRING,
+      factEmbedding DOUBLE[2560], episodes STRING[],
       validAt STRING, invalidAt STRING, namespace STRING, createdAt STRING
     )`);
+
+    // Migration: add confidence scoring columns to RELATES_TO rel table
+    await this.tryQuery(
+      `ALTER TABLE RELATES_TO ADD confidence DOUBLE DEFAULT 1.0`,
+    );
+    await this.tryQuery(
+      `ALTER TABLE RELATES_TO ADD confidenceReason STRING DEFAULT ''`,
+    );
 
     await this.tryQuery(
       `CALL CREATE_VECTOR_INDEX('Memory', 'memory_vec_idx', 'embedding', metric := 'cosine')`,
@@ -334,6 +351,7 @@ export class LadybugProvider implements GraphProvider {
        MATCH (target:Entity {uuid: $targetUuid})
        CREATE (source)-[r:RELATES_TO {
          id: $id, relationType: $relationType, fact: $fact, sentiment: $sentiment,
+         confidence: $confidence, confidenceReason: $confidenceReason,
          factEmbedding: ${embStr}, episodes: $episodes, validAt: $validAt,
          invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
        }]->(target)`,
@@ -344,6 +362,8 @@ export class LadybugProvider implements GraphProvider {
         relationType: edge.relationType,
         fact: edge.fact,
         sentiment: edge.sentiment,
+        confidence: edge.confidence ?? 1,
+        confidenceReason: edge.confidenceReason ?? "",
         episodes: [memoryId],
         validAt: edge.validAt ?? "",
         invalidAt: "",
@@ -355,7 +375,8 @@ export class LadybugProvider implements GraphProvider {
     await this.executeQuery(
       `CREATE (f:Fact {
          id: $id, text: $text, relationType: $relationType, sourceUuid: $sourceUuid,
-         targetUuid: $targetUuid, sentiment: $sentiment, factEmbedding: ${embStr},
+         targetUuid: $targetUuid, sentiment: $sentiment, confidence: $confidence,
+         confidenceReason: $confidenceReason, factEmbedding: ${embStr},
          episodes: $episodes, validAt: $validAt, invalidAt: $invalidAt,
          namespace: $namespace, createdAt: $createdAt, deletedAt: ''
        })`,
@@ -366,6 +387,8 @@ export class LadybugProvider implements GraphProvider {
         sourceUuid,
         targetUuid,
         sentiment: edge.sentiment,
+        confidence: edge.confidence ?? 1,
+        confidenceReason: edge.confidenceReason ?? "",
         episodes: [memoryId],
         validAt: edge.validAt ?? "",
         invalidAt: "",
@@ -476,6 +499,7 @@ export class LadybugProvider implements GraphProvider {
        MATCH (target:Entity {uuid: node.targetUuid, deletedAt: ''})
        RETURN node.id as id, source.name as sourceEntityName, target.name as targetEntityName,
               node.relationType as relationType, node.text as fact, node.sentiment as sentiment,
+              node.confidence as confidence, node.confidenceReason as confidenceReason,
               node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
               node.invalidAt as invalidAt, node.createdAt as createdAt, distance
        ORDER BY distance ASC
@@ -512,6 +536,7 @@ export class LadybugProvider implements GraphProvider {
        MATCH (target:Entity {uuid: node.targetUuid, deletedAt: ''})
        RETURN node.id as id, source.name as sourceEntityName, target.name as targetEntityName,
               node.relationType as relationType, node.text as fact, node.sentiment as sentiment,
+              node.confidence as confidence, node.confidenceReason as confidenceReason,
               node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
               node.invalidAt as invalidAt, node.createdAt as createdAt, score
        ORDER BY score DESC
@@ -576,6 +601,7 @@ export class LadybugProvider implements GraphProvider {
          WHERE $memoryId IN r.episodes
          RETURN r.id as id, source.name as sourceEntityName, target.name as targetEntityName,
                 r.relationType as relationType, r.fact as fact, r.sentiment as sentiment,
+                r.confidence as confidence, r.confidenceReason as confidenceReason,
                 r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
                 r.invalidAt as invalidAt, r.createdAt as createdAt`,
         { memoryId: memory.id },
@@ -588,6 +614,7 @@ export class LadybugProvider implements GraphProvider {
          WHERE (source.name = $name OR target.name = $name) AND source.namespace = $namespace
          RETURN r.id as id, source.name as sourceEntityName, target.name as targetEntityName,
                 r.relationType as relationType, r.fact as fact, r.sentiment as sentiment,
+                r.confidence as confidence, r.confidenceReason as confidenceReason,
                 r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
                 r.invalidAt as invalidAt, r.createdAt as createdAt
          ORDER BY r.createdAt DESC`,
@@ -608,6 +635,8 @@ export class LadybugProvider implements GraphProvider {
       relationType: r.relationType as string,
       fact: r.fact as string,
       sentiment: (r.sentiment as number) ?? 0,
+      confidence: (r.confidence as number) ?? 1,
+      confidenceReason: ((r.confidenceReason as string) || undefined),
       episodes: (r.episodes as string[]) ?? [],
       namespace: r.namespace as string,
       validAt:
@@ -679,6 +708,7 @@ export class LadybugProvider implements GraphProvider {
        SET r.invalidAt = $now
        RETURN r.id as id, source.name as sourceEntityName, target.name as targetEntityName,
               r.relationType as relationType, r.fact as fact, r.sentiment as sentiment,
+              r.confidence as confidence, r.confidenceReason as confidenceReason,
               r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
               r.invalidAt as invalidAt, r.createdAt as createdAt`,
       { edgeId, namespace, now },
@@ -695,6 +725,8 @@ export class LadybugProvider implements GraphProvider {
       relationType: r.relationType as string,
       fact: r.fact as string,
       sentiment: (r.sentiment as number) ?? 0,
+      confidence: (r.confidence as number) ?? 1,
+      confidenceReason: ((r.confidenceReason as string) || undefined),
       episodes: (r.episodes as string[]) ?? [],
       namespace: r.namespace as string,
       validAt:
@@ -875,6 +907,7 @@ export class LadybugProvider implements GraphProvider {
        ${whereClause}
        RETURN r.id as id, source.name as sourceEntityName, target.name as targetEntityName,
               r.relationType as relationType, r.fact as fact, r.sentiment as sentiment,
+              r.confidence as confidence, r.confidenceReason as confidenceReason,
               r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
               r.invalidAt as invalidAt, r.createdAt as createdAt
        LIMIT ${limit}`,

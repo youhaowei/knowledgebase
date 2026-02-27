@@ -32,6 +32,7 @@ export interface GraphLink {
   relationType: string; // camelCase relation (uses, prefers, hasAdvantageOver, etc.)
   fact: string; // Natural language description of the relationship
   sentiment: number; // -1 (negative) to 1 (positive)
+  confidence: number; // 0 (uncertain) to 1 (explicitly stated)
   edgeId: string; // UUID for the edge
   // Legacy support (can be computed from relationType)
   relation?: string; // Alias for relationType

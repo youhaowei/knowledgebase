@@ -137,6 +137,8 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
                     relationType: e.relationType,
                     fact: e.fact,
                     sentiment: e.sentiment,
+                    confidence: e.confidence,
+                    confidenceReason: e.confidenceReason,
                   })),
                   entities: result.entities.map((e) => ({
                     name: e.name,

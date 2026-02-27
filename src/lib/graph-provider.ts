@@ -47,6 +47,7 @@ export interface GraphData {
     relationType: string;
     fact: string;
     sentiment: number;
+    confidence: number;
     edgeId: string;
   }>;
 }

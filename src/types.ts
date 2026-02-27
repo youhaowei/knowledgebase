@@ -36,6 +36,8 @@ export const ExtractedEdge = z.object({
   targetIndex: z.number().int(),      // Index into entities array
   fact: z.string(),                   // Natural language description of the relationship
   sentiment: z.number().min(-1).max(1).default(0), // -1 (negative) to 1 (positive)
+  confidence: z.number().min(0).max(1).default(1), // 0 (uncertain) to 1 (explicitly stated)
+  confidenceReason: z.string().optional(), // Why this confidence level was assigned
   validAt: z.string().optional(),     // ISO 8601 when relationship became true
   invalidAt: z.string().optional(),   // ISO 8601 when relationship ended
 });
@@ -48,6 +50,8 @@ export const StoredEdge = z.object({
   relationType: z.string(),           // camelCase relation type
   fact: z.string(),                   // Natural language description
   sentiment: z.number().min(-1).max(1), // -1 to 1
+  confidence: z.number().min(0).max(1).default(1), // 0 (uncertain) to 1 (explicitly stated)
+  confidenceReason: z.string().optional(), // Why this confidence level was assigned
 
   // Provenance
   episodes: z.array(z.string()),      // Memory IDs that reference this edge

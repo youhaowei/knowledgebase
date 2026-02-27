@@ -155,9 +155,9 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 - Use `bun run <script>` (not npm/yarn/pnpm)
 - Bun auto-loads `.env` - no dotenv needed
 - Prefer `Bun.file()` over `fs.readFile()`
-- LadybugDB (lbug) native addon: Bun segfaults on `close()` — skip explicit close, use `process.exit(0)`
+- LadybugDB (lbug) native addon: Bun segfaults on `close()` — skip explicit close in test teardown
 - LadybugDB creates `.wal` files as siblings (e.g., `.ladybug-test.wal` alongside `.ladybug-test/`). Clean up both directory AND `.wal` file in test teardown
-- CLI tests must run separately (`bun run test:cli`) — native addon crashes Bun when mixed with other tests in the same runner
+- Native addon tests (`provider.test.ts`) and CLI tests (`cli.test.ts`) must run in separate processes — `bun run test` handles this via explicit file listing and `&&` chaining. Bun's `--exclude` flag doesn't support multiple values in v1.3.5.
 
 ## Dependencies
 

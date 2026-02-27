@@ -69,6 +69,14 @@ const extractionSchema = {
             type: "number",
             description: "Sentiment from -1 (negative/rejected) to 1 (positive/preferred). 0 = neutral factual.",
           },
+          confidence: {
+            type: "number",
+            description: "Confidence score from 0 (uncertain) to 1 (explicitly stated). 1.0 = explicitly stated, 0.8 = strongly implied, 0.6 = inferred from context.",
+          },
+          confidenceReason: {
+            type: "string",
+            description: "Brief reason for the confidence level (e.g., 'directly stated', 'implied by usage context')",
+          },
           validAt: {
             type: "string",
             description: "ISO 8601 date when relationship became true (optional)",
@@ -78,7 +86,7 @@ const extractionSchema = {
             description: "ISO 8601 date when relationship ended (optional)",
           },
         },
-        required: ["relationType", "sourceIndex", "targetIndex", "fact", "sentiment"],
+        required: ["relationType", "sourceIndex", "targetIndex", "fact", "sentiment", "confidence"],
       },
     },
     summary: {
@@ -121,6 +129,11 @@ Your task:
      -  0.0: Neutral (factual statement)
      -  0.5: Mildly positive (good, useful)
      -  1.0: Strongly positive (preferred, chosen, recommended)
+   - confidence: 0 to 1 indicating how certain the relationship is:
+     -  1.0: Explicitly stated ("We decided to use Zustand")
+     -  0.8: Strongly implied ("Zustand has been great for our state management")
+     -  0.6: Inferred from context ("The project uses React and several state libraries")
+   - confidenceReason: Brief explanation for the confidence level
 
    Common relation types:
    - uses, usedBy: Neutral usage (sentiment: 0)
@@ -132,10 +145,10 @@ Your task:
 
    Examples:
    - Entity 0: "DashFrame", Entity 1: "Zustand", Entity 2: "Redux"
-   - {relationType: "uses", sourceIndex: 0, targetIndex: 1, fact: "DashFrame uses Zustand for state management", sentiment: 0}
-   - {relationType: "prefers", sourceIndex: 0, targetIndex: 1, fact: "DashFrame chose Zustand for its simpler API", sentiment: 0.8}
-   - {relationType: "hasAdvantageOver", sourceIndex: 1, targetIndex: 2, fact: "Zustand has simpler API than Redux", sentiment: 0.5}
-   - {relationType: "rejected", sourceIndex: 0, targetIndex: 2, fact: "DashFrame rejected Redux due to boilerplate", sentiment: -0.8}
+   - {relationType: "uses", sourceIndex: 0, targetIndex: 1, fact: "DashFrame uses Zustand for state management", sentiment: 0, confidence: 1.0, confidenceReason: "directly stated"}
+   - {relationType: "prefers", sourceIndex: 0, targetIndex: 1, fact: "DashFrame chose Zustand for its simpler API", sentiment: 0.8, confidence: 0.8, confidenceReason: "implied by positive comparison"}
+   - {relationType: "hasAdvantageOver", sourceIndex: 1, targetIndex: 2, fact: "Zustand has simpler API than Redux", sentiment: 0.5, confidence: 0.8, confidenceReason: "implied by choice rationale"}
+   - {relationType: "rejected", sourceIndex: 0, targetIndex: 2, fact: "DashFrame rejected Redux due to boilerplate", sentiment: -0.8, confidence: 1.0, confidenceReason: "explicitly stated rejection"}
 
 3. **SUMMARY** - A concise 1-2 sentence summary.
 

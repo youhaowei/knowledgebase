@@ -27,6 +27,45 @@ describe("Type Validation", () => {
     expect(parsed.sourceIndex).toBe(0);
     expect(parsed.targetIndex).toBe(1);
     expect(parsed.fact).toBe("Alice uses TypeScript for development");
+    expect(parsed.confidence).toBe(1); // default
+  });
+
+  test("should validate ExtractedEdge with confidence", () => {
+    const edgeWithConfidence = {
+      relationType: "prefers",
+      sourceIndex: 0,
+      targetIndex: 1,
+      fact: "Alice prefers TypeScript",
+      sentiment: 0.8,
+      confidence: 0.6,
+      confidenceReason: "inferred from context",
+    };
+
+    const parsed = ExtractedEdge.parse(edgeWithConfidence);
+    expect(parsed.confidence).toBe(0.6);
+    expect(parsed.confidenceReason).toBe("inferred from context");
+  });
+
+  test("should reject confidence outside 0-1 range", () => {
+    expect(() => {
+      ExtractedEdge.parse({
+        relationType: "uses",
+        sourceIndex: 0,
+        targetIndex: 1,
+        fact: "test",
+        confidence: 1.5,
+      });
+    }).toThrow();
+
+    expect(() => {
+      ExtractedEdge.parse({
+        relationType: "uses",
+        sourceIndex: 0,
+        targetIndex: 1,
+        fact: "test",
+        confidence: -0.1,
+      });
+    }).toThrow();
   });
 
   test("should validate Memory schema", () => {

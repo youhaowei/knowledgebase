@@ -22,6 +22,7 @@ interface RawGraphData {
     relationType: string;
     fact: string;
     sentiment: number;
+    confidence: number;
     edgeId: string;
   }>;
 }
@@ -87,6 +88,7 @@ function processGraphData(graphData: RawGraphData) {
     relationType: e.relationType,
     fact: e.fact,
     sentiment: e.sentiment,
+    confidence: e.confidence,
     edgeId: e.edgeId,
     // Legacy support - relation as readable label
     relation: e.relationType,
