@@ -88,6 +88,8 @@ User text → Queue → Claude extraction → Ollama embeddings → GraphProvide
 
 7. **Zero API costs** - Uses unifai (Claude backend) with OAuth subscription for extraction, Ollama for local embeddings.
 
+8. **Both backends are production** — Neo4j was the original backend; LadybugDB is the newer embedded alternative. Both must receive full feature implementations, not stubs.
+
 ### Storage Backend
 
 Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implementations:

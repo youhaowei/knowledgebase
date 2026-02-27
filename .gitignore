@@ -38,6 +38,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 memories.json
 .sisyphus/
 .ladybug/
-.ladybug-*/
+.ladybug-*
 .lbug/
 .claude/worktrees/
