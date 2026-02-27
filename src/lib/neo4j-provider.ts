@@ -19,6 +19,7 @@ import type {
   GraphData,
   Stats,
 } from "./graph-provider.js";
+import { rrfFuse } from "./search-utils.js";
 
 export class Neo4jProvider implements GraphProvider {
   private driver: Driver;
@@ -64,6 +65,16 @@ export class Neo4jProvider implements GraphProvider {
       await session.run(`
         CREATE VECTOR INDEX memory_embedding IF NOT EXISTS
         FOR (m:Memory) ON (m.embedding)
+        OPTIONS {indexConfig: {
+          \`vector.dimensions\`: 2560,
+          \`vector.similarity_function\`: 'cosine'
+        }}
+      `);
+
+      await session.run(`
+        CREATE VECTOR INDEX edge_factEmbedding IF NOT EXISTS
+        FOR ()-[r:RELATES_TO]-()
+        ON (r.factEmbedding)
         OPTIONS {indexConfig: {
           \`vector.dimensions\`: 2560,
           \`vector.similarity_function\`: 'cosine'
@@ -286,46 +297,11 @@ export class Neo4jProvider implements GraphProvider {
       }));
       }
 
-      const edgeResult = await session.run(
-        `
-        CALL db.index.fulltext.queryRelationships('edge_fact_text', $query)
-        YIELD relationship, score
-        WITH relationship as r, score
-        MATCH (source:Entity)-[r]->(target:Entity)
-        WHERE r.invalidAt IS NULL
-        RETURN r.id as id,
-               source.name as sourceEntityName,
-               target.name as targetEntityName,
-               r.relationType as relationType,
-               r.fact as fact,
-               r.sentiment as sentiment,
-               r.episodes as episodes,
-               source.namespace as namespace,
-               r.validAt as validAt,
-               r.invalidAt as invalidAt,
-               r.createdAt as createdAt,
-               score
-        ORDER BY score DESC
-        LIMIT $limit
-        `,
-        { query, limit: neo4j.int(limit) },
-      );
-
-      const edges: StoredEdge[] = edgeResult.records.map((r) => ({
-        id: r.get("id"),
-        sourceEntityName: r.get("sourceEntityName"),
-        targetEntityName: r.get("targetEntityName"),
-        relationType: r.get("relationType"),
-        fact: r.get("fact"),
-        sentiment: r.get("sentiment") ?? 0,
-        episodes: r.get("episodes") ?? [],
-        namespace: r.get("namespace"),
-        validAt: r.get("validAt") ? new Date(r.get("validAt")) : undefined,
-        invalidAt: r.get("invalidAt")
-          ? new Date(r.get("invalidAt"))
-          : undefined,
-        createdAt: new Date(r.get("createdAt")),
-      }));
+      const [vectorEdges, ftsEdges] = await Promise.all([
+        this.vectorSearchEdges(embedding, limit),
+        this.fullTextSearchEdges(query, limit),
+      ]);
+      const edges = rrfFuse(vectorEdges, ftsEdges, limit);
 
       const entityResult = await session.run(
         `
@@ -411,6 +387,75 @@ export class Neo4jProvider implements GraphProvider {
         status: r.get("status") ?? "completed",
         error: r.get("error") ?? undefined,
         createdAt: new Date(r.get("createdAt")),
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async vectorSearchEdges(
+    embedding: number[],
+    limit: number,
+    filter?: EdgeFilter,
+  ): Promise<StoredEdge[]> {
+    const session = this.driver.session();
+    try {
+      const conditions: string[] = [];
+      const params: Record<string, unknown> = {
+        embedding,
+        limit: neo4j.int(limit),
+      };
+
+      if (filter?.namespace === null) {
+        conditions.push("source.namespace IS NULL");
+      } else if (filter?.namespace !== undefined) {
+        conditions.push("source.namespace = $namespace");
+        params.namespace = filter.namespace;
+      }
+      if (!filter?.includeInvalidated) {
+        conditions.push("r.invalidAt IS NULL");
+      }
+
+      const where = conditions.length
+        ? `WHERE ${conditions.join(" AND ")}`
+        : "";
+      const result = await session.run(
+        `
+        CALL db.index.vector.queryRelationships('edge_factEmbedding', $limit, $embedding)
+        YIELD relationship, score
+        WITH relationship as r, score
+        MATCH (source:Entity)-[r]->(target:Entity)
+        ${where}
+        RETURN r.id as id,
+               source.name as sourceEntityName,
+               target.name as targetEntityName,
+               r.relationType as relationType,
+               r.fact as fact,
+               r.sentiment as sentiment,
+               r.episodes as episodes,
+               source.namespace as namespace,
+               r.validAt as validAt,
+               r.invalidAt as invalidAt,
+               r.createdAt as createdAt,
+               score
+        ORDER BY score DESC
+        LIMIT $limit
+        `,
+        params,
+      );
+
+      return result.records.map((r) => ({
+        id: r.get("id"),
+        sourceEntityName: r.get("sourceEntityName"),
+        targetEntityName: r.get("targetEntityName"),
+        relationType: r.get("relationType"),
+        fact: r.get("fact"),
+        sentiment: r.get("sentiment")?.toNumber?.() ?? r.get("sentiment") ?? 0,
+        episodes: r.get("episodes") ?? [],
+        namespace: r.get("namespace") ?? undefined,
+        validAt: r.get("validAt")?.toString() ?? undefined,
+        invalidAt: r.get("invalidAt")?.toString() ?? undefined,
+        createdAt: new Date(r.get("createdAt")?.toString() ?? Date.now()),
       }));
     } finally {
       await session.close();

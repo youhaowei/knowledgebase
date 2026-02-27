@@ -19,6 +19,7 @@ import type {
   GraphData,
   Stats,
 } from "./graph-provider.js";
+import { rrfFuse } from "./search-utils.js";
 
 export class LadybugProvider implements GraphProvider {
   private db: Database;
@@ -71,7 +72,13 @@ export class LadybugProvider implements GraphProvider {
     try {
       await this.conn.query(query);
     } catch (e) {
-      if (!(e instanceof Error && e.message.includes("already exists")))
+      if (
+        !(
+          e instanceof Error &&
+          (e.message.includes("already exists") ||
+            e.message.includes("already has property"))
+        )
+      )
         throw e;
     }
   }
@@ -104,9 +111,15 @@ export class LadybugProvider implements GraphProvider {
 
     await this.tryQuery(`CREATE NODE TABLE IF NOT EXISTS Fact(
       id STRING PRIMARY KEY, text STRING, relationType STRING, sourceUuid STRING,
-      targetUuid STRING, sentiment DOUBLE, episodes STRING[], validAt STRING,
+      targetUuid STRING, sentiment DOUBLE, factEmbedding DOUBLE[2560],
+      episodes STRING[], validAt STRING,
       invalidAt STRING, namespace STRING, createdAt STRING, deletedAt STRING
     )`);
+
+    // Migration: add factEmbedding column to existing Fact tables
+    await this.tryQuery(
+      `ALTER TABLE Fact ADD factEmbedding DOUBLE[2560] DEFAULT ${this.zeroEmbeddingStr()}`,
+    );
 
     await this.tryQuery(`CREATE REL TABLE IF NOT EXISTS RELATES_TO(
       FROM Entity TO Entity, id STRING, relationType STRING, fact STRING,
@@ -116,6 +129,10 @@ export class LadybugProvider implements GraphProvider {
 
     await this.tryQuery(
       `CALL CREATE_VECTOR_INDEX('Memory', 'memory_vec_idx', 'embedding', metric := 'cosine')`,
+    );
+
+    await this.tryQuery(
+      `CALL CREATE_VECTOR_INDEX('Fact', 'fact_vec_idx', 'factEmbedding', metric := 'cosine')`,
     );
 
     await this.tryQuery(
@@ -338,9 +355,9 @@ export class LadybugProvider implements GraphProvider {
     await this.executeQuery(
       `CREATE (f:Fact {
          id: $id, text: $text, relationType: $relationType, sourceUuid: $sourceUuid,
-         targetUuid: $targetUuid, sentiment: $sentiment, episodes: $episodes,
-         validAt: $validAt, invalidAt: $invalidAt, namespace: $namespace,
-         createdAt: $createdAt, deletedAt: ''
+         targetUuid: $targetUuid, sentiment: $sentiment, factEmbedding: ${embStr},
+         episodes: $episodes, validAt: $validAt, invalidAt: $invalidAt,
+         namespace: $namespace, createdAt: $createdAt, deletedAt: ''
        })`,
       {
         id: edgeId,
@@ -363,8 +380,13 @@ export class LadybugProvider implements GraphProvider {
     query: string,
     limit = 10,
   ): Promise<SearchResult> {
-    const memories = embedding.length > 0 ? await this.vectorSearch(embedding, limit) : [];
-    const edges = await this.fullTextSearchEdges(query, limit);
+    const hasEmbedding = embedding.length > 0;
+    const memories = hasEmbedding ? await this.vectorSearch(embedding, limit) : [];
+    const [vectorEdges, ftsEdges] = await Promise.all([
+      hasEmbedding ? this.vectorSearchEdges(embedding, limit) : Promise.resolve([]),
+      this.fullTextSearchEdges(query, limit),
+    ]);
+    const edges = rrfFuse(vectorEdges, ftsEdges, limit);
 
     const entityResult = await this.executeQuery(
       `MATCH (e:Entity)
@@ -428,6 +450,42 @@ export class LadybugProvider implements GraphProvider {
     }));
   }
 
+  async vectorSearchEdges(
+    embedding: number[],
+    limit: number,
+    filter?: EdgeFilter,
+  ): Promise<StoredEdge[]> {
+    const overfetchLimit = limit * 3;
+    const conditions: string[] = ["node.deletedAt = ''"];
+    if (filter?.namespace === null) {
+      conditions.push("node.namespace = ''");
+    } else if (filter?.namespace !== undefined) {
+      conditions.push(`node.namespace = '${filter.namespace}'`);
+    }
+    if (!filter?.includeInvalidated) {
+      conditions.push("node.invalidAt = ''");
+    }
+    const whereClause = `WHERE ${conditions.join(" AND ")}`;
+
+    const embeddingStr = `[${embedding.join(",")}]`;
+    const result = await this.conn.query(
+      `CALL QUERY_VECTOR_INDEX('Fact', 'fact_vec_idx', ${embeddingStr}, ${overfetchLimit})
+       WITH node, distance
+       ${whereClause}
+       MATCH (source:Entity {uuid: node.sourceUuid, deletedAt: ''})
+       MATCH (target:Entity {uuid: node.targetUuid, deletedAt: ''})
+       RETURN node.id as id, source.name as sourceEntityName, target.name as targetEntityName,
+              node.relationType as relationType, node.text as fact, node.sentiment as sentiment,
+              node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
+              node.invalidAt as invalidAt, node.createdAt as createdAt, distance
+       ORDER BY distance ASC
+       LIMIT ${limit}`,
+    );
+
+    const rows = await result.getAll();
+    return this.mapEdgeRows(rows);
+  }
+
   async fullTextSearchEdges(
     query: string,
     limit: number,
@@ -461,22 +519,7 @@ export class LadybugProvider implements GraphProvider {
     );
 
     const rows = await result.getAll();
-    return rows.map((r) => ({
-      id: r.id as string,
-      sourceEntityName: r.sourceEntityName as string,
-      targetEntityName: r.targetEntityName as string,
-      relationType: r.relationType as string,
-      fact: r.fact as string,
-      sentiment: (r.sentiment as number) ?? 0,
-      episodes: (r.episodes as string[]) ?? [],
-      namespace: r.namespace as string,
-      validAt: r.validAt ? new Date(r.validAt as string) : undefined,
-      invalidAt:
-        r.invalidAt && r.invalidAt !== ""
-          ? new Date(r.invalidAt as string)
-          : undefined,
-      createdAt: new Date(r.createdAt as string),
-    }));
+    return this.mapEdgeRows(rows);
   }
 
   async get(name: string, namespace = "default"): Promise<GetResult> {

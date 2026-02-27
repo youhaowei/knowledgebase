@@ -406,6 +406,165 @@ describe("GraphProvider", () => {
     });
   });
 
+  describe("vectorSearchEdges()", () => {
+    test("returns edges sorted by embedding similarity", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const memory: Memory = {
+        id: randomUUID(),
+        name: "VecEdge Test",
+        text: "React is used for building user interfaces",
+        summary: "React for UIs",
+        namespace: testNamespace,
+        status: "completed",
+        createdAt: new Date(),
+      };
+
+      const entities: Entity[] = [
+        { uuid: randomUUID(), name: "React", type: "technology" },
+        { uuid: randomUUID(), name: "UI", type: "concept" },
+      ];
+
+      const edges: ExtractedEdge[] = [
+        {
+          sourceIndex: 0,
+          targetIndex: 1,
+          relationType: "usedFor",
+          fact: "React is used for building user interfaces",
+          sentiment: 0.7,
+        },
+      ];
+
+      const edgeEmbedding = makeTestEmbedding(300);
+      await provider.store(memory, entities, edges, makeTestEmbedding(299), [
+        edgeEmbedding,
+      ]);
+
+      const results = await provider.vectorSearchEdges(edgeEmbedding, 10);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0]?.fact).toContain("React");
+    });
+  });
+
+  describe("search() RRF fusion", () => {
+    test("fuses vector and FTS edge results into single ranked list", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const memory: Memory = {
+        id: randomUUID(),
+        name: "RRF Test",
+        text: "Zustand manages state in DashFrame",
+        summary: "Zustand state management",
+        namespace: testNamespace,
+        status: "completed",
+        createdAt: new Date(),
+      };
+
+      const entities: Entity[] = [
+        { uuid: randomUUID(), name: "DashFrame", type: "project" },
+        { uuid: randomUUID(), name: "Zustand", type: "technology" },
+      ];
+
+      const edges: ExtractedEdge[] = [
+        {
+          sourceIndex: 0,
+          targetIndex: 1,
+          relationType: "uses",
+          fact: "DashFrame uses Zustand for state management",
+          sentiment: 0.8,
+        },
+      ];
+
+      const edgeEmbedding = makeTestEmbedding(310);
+      await provider.store(memory, entities, edges, makeTestEmbedding(309), [
+        edgeEmbedding,
+      ]);
+
+      // Search with both matching text and similar embedding
+      const result = await provider.search(edgeEmbedding, "Zustand state", 10);
+      expect(result.edges.length).toBeGreaterThanOrEqual(1);
+      expect(result.edges[0]?.fact).toContain("Zustand");
+    });
+
+    test("edges found by both methods rank higher than single-method matches", async () => {
+      testNamespace = `test-${randomUUID()}`;
+
+      // Edge A: matching embedding AND text (should rank highest)
+      const memoryA: Memory = {
+        id: randomUUID(),
+        name: "RRF Rank A",
+        text: "PostgreSQL handles database queries efficiently",
+        summary: "PostgreSQL queries",
+        namespace: testNamespace,
+        status: "completed",
+        createdAt: new Date(),
+      };
+      const entitiesA: Entity[] = [
+        { uuid: randomUUID(), name: "PostgreSQL", type: "technology" },
+        { uuid: randomUUID(), name: "QueryEngine", type: "concept" },
+      ];
+      const edgesA: ExtractedEdge[] = [
+        {
+          sourceIndex: 0,
+          targetIndex: 1,
+          relationType: "handles",
+          fact: "PostgreSQL handles database queries efficiently",
+          sentiment: 0.9,
+        },
+      ];
+      const embeddingA = makeTestEmbedding(320);
+
+      // Edge B: only matching text, different embedding
+      const memoryB: Memory = {
+        id: randomUUID(),
+        name: "RRF Rank B",
+        text: "MySQL also handles database queries",
+        summary: "MySQL queries",
+        namespace: testNamespace,
+        status: "completed",
+        createdAt: new Date(),
+      };
+      const entitiesB: Entity[] = [
+        { uuid: randomUUID(), name: "MySQL", type: "technology" },
+        { uuid: randomUUID(), name: "QueryProcessor", type: "concept" },
+      ];
+      const edgesB: ExtractedEdge[] = [
+        {
+          sourceIndex: 0,
+          targetIndex: 1,
+          relationType: "handles",
+          fact: "MySQL also handles database queries",
+          sentiment: 0.5,
+        },
+      ];
+      // Distant embedding — won't match vector search for embeddingA
+      const embeddingB = makeTestEmbedding(999);
+
+      await provider.store(memoryA, entitiesA, edgesA, makeTestEmbedding(319), [
+        embeddingA,
+      ]);
+      await provider.store(memoryB, entitiesB, edgesB, makeTestEmbedding(998), [
+        embeddingB,
+      ]);
+
+      // Search with embeddingA and text that matches both edges
+      const result = await provider.search(
+        embeddingA,
+        "database queries",
+        10,
+      );
+
+      // Both edges should appear
+      const postgresEdge = result.edges.find((e) => e.fact.includes("PostgreSQL"));
+      const mysqlEdge = result.edges.find((e) => e.fact.includes("MySQL"));
+      expect(postgresEdge).toBeDefined();
+      expect(mysqlEdge).toBeDefined();
+
+      // PostgreSQL should rank higher (found by both vector + FTS methods)
+      const pgIdx = result.edges.indexOf(postgresEdge!);
+      const myIdx = result.edges.indexOf(mysqlEdge!);
+      expect(pgIdx).toBeLessThan(myIdx);
+    });
+  });
+
   describe("get()", () => {
     test("retrieves entity with associated edges", async () => {
       testNamespace = `test-${randomUUID()}`;

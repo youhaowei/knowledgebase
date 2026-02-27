@@ -81,6 +81,12 @@ export interface GraphProvider {
     filter?: MemoryFilter,
   ): Promise<Memory[]>;
 
+  vectorSearchEdges(
+    embedding: number[],
+    limit: number,
+    filter?: EdgeFilter,
+  ): Promise<StoredEdge[]>;
+
   fullTextSearchEdges(
     query: string,
     limit: number,
