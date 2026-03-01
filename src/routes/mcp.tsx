@@ -8,6 +8,7 @@ import { Graph } from "@/lib/graph";
 import { Queue } from "@/lib/queue";
 import { embed, isVectorEnabled } from "@/lib/embedder";
 import { randomUUID } from "crypto";
+import { classifyIntent, boostEdgesByIntent } from "@/lib/intents";
 
 // Shared instances
 const graph = new Graph();
@@ -118,6 +119,8 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
         const limit = (args?.limit as number) ?? 10;
         const embedding = isVectorEnabled() ? await embed(query) : [];
         const result = await graph.search(embedding, query, limit);
+        const intent = classifyIntent(query);
+        const boostedEdges = boostEdgesByIntent(result.edges, intent);
 
         return {
           content: [
@@ -125,12 +128,13 @@ async function handleMCPToolCall(name: string, args: Record<string, unknown>) {
               type: "text",
               text: JSON.stringify(
                 {
+                  intent,
                   memories: result.memories.map((m) => ({
                     id: m.id,
                     name: m.name,
                     summary: m.summary,
                   })),
-                  edges: result.edges.map((e) => ({
+                  edges: boostedEdges.map((e) => ({
                     id: e.id,
                     sourceEntity: e.sourceEntityName,
                     targetEntity: e.targetEntityName,

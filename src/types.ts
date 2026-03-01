@@ -92,6 +92,12 @@ export const Memory = z.object({
 });
 
 // =============================================================================
+// INTENT TYPES - Query intent classification for search boosting
+// =============================================================================
+
+export const Intent = z.enum(["factual", "decision", "general"]);
+
+// =============================================================================
 // TYPE EXPORTS
 // =============================================================================
 
@@ -102,3 +108,4 @@ export type ExtractedEdge = z.infer<typeof ExtractedEdge>;
 export type StoredEdge = z.infer<typeof StoredEdge>;
 export type Extraction = z.infer<typeof Extraction>;
 export type Memory = z.infer<typeof Memory>;
+export type Intent = z.infer<typeof Intent>;

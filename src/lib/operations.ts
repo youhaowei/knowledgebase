@@ -14,7 +14,8 @@ import { createGraphProvider, type GraphProvider } from "./graph-provider.js";
 import { Queue } from "./queue.js";
 import { embed, isVectorEnabled } from "./embedder.js";
 import { randomUUID } from "crypto";
-import type { Memory, StoredEntity, StoredEdge } from "../types.js";
+import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
+import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 
 let provider: GraphProvider;
 let queue: Queue;
@@ -64,14 +65,18 @@ export async function search(
   memories: Memory[];
   edges: StoredEdge[];
   entities: StoredEntity[];
+  intent: Intent;
   guidance: string;
 }> {
   const gp = await getProvider();
   const embedding = isVectorEnabled() ? await embed(query) : [];
   const result = await gp.search(embedding, query, limit);
+  const intent = classifyIntent(query);
 
   return {
     ...result,
+    edges: boostEdgesByIntent(result.edges, intent),
+    intent,
     guidance:
       "If any facts appear contradictory, use forgetEdge to invalidate with a reason.",
   };

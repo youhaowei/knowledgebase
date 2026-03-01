@@ -18,6 +18,7 @@ import { Graph } from "../lib/graph.js";
 import { Queue } from "../lib/queue.js";
 import { embed, isVectorEnabled } from "../lib/embedder.js";
 import { randomUUID } from "crypto";
+import { classifyIntent, boostEdgesByIntent } from "../lib/intents.js";
 
 // Shared instances (singleton pattern for server-side)
 const graph = new Graph();
@@ -89,15 +90,18 @@ export const searchMemories = createServerFn()
   .handler(async ({ data }) => {
     const embedding = isVectorEnabled() ? await embed(data.query) : [];
     const result = await graph.search(embedding, data.query, data.limit);
+    const intent = classifyIntent(data.query);
+    const boostedEdges = boostEdgesByIntent(result.edges, intent);
 
     return {
+      intent,
       memories: result.memories.map((m) => ({
         id: m.id,
         name: m.name,
         summary: m.summary,
         createdAt: m.createdAt,
       })),
-      edges: result.edges.map((e) => ({
+      edges: boostedEdges.map((e) => ({
         id: e.id,
         sourceEntity: e.sourceEntityName,
         targetEntity: e.targetEntityName,
@@ -416,6 +420,14 @@ export const streamingSearch = createServerFn()
   .handler(async function* ({ data }) {
     const embedding = isVectorEnabled() ? await embed(data.query) : [];
     const result = await graph.search(embedding, data.query, data.limit);
+    const intent = classifyIntent(data.query);
+    const boostedEdges = boostEdgesByIntent(result.edges, intent);
+
+    // Yield intent classification first
+    yield {
+      type: "intent" as const,
+      data: { intent },
+    };
 
     // Yield memories one at a time for streaming UI
     for (const memory of result.memories) {
@@ -430,8 +442,8 @@ export const streamingSearch = createServerFn()
       };
     }
 
-    // Then yield edges
-    for (const edge of result.edges) {
+    // Then yield boosted edges
+    for (const edge of boostedEdges) {
       yield {
         type: "edge" as const,
         data: {
