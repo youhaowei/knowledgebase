@@ -20,7 +20,7 @@ import type {
   Stats,
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
-import { getActiveDimension, OLLAMA_DIM } from "./embedder.js";
+import { getActiveDimension, OLLAMA_DIM, isZeroEmbedding } from "./embedder.js";
 
 export class LadybugProvider implements GraphProvider {
   private db: Database;
@@ -1058,6 +1058,165 @@ export class LadybugProvider implements GraphProvider {
     _nodeLimit?: number,
   ): Promise<GraphData> {
     return { nodes: [], links: [] };
+  }
+
+  async findMemoriesNeedingEmbedding(
+    dimension: 2560 | 384,
+  ): Promise<Memory[]> {
+    const col = dimension === 2560 ? "embedding" : "embedding384";
+    // Zero-vector sentinel: first element is 0.0 (real embeddings never have exactly 0)
+    const result = await this.conn.query(
+      `MATCH (m:Memory)
+       WHERE m.deletedAt = '' AND m.${col}[1] = 0.0 AND m.text IS NOT NULL AND m.text <> ''
+       RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
+              m.category as category, m.namespace as namespace, m.status as status,
+              m.error as error, m.createdAt as createdAt`,
+    );
+    const rows = await result.getAll();
+    return rows.map((r) => ({
+      id: r.id as string,
+      name: r.name as string,
+      text: r.text as string,
+      summary: r.summary as string,
+      category: ((r.category as string) || undefined) as Memory["category"],
+      namespace: r.namespace as string,
+      status: (r.status as Memory["status"]) ?? "completed",
+      error: (r.error as string) || undefined,
+      createdAt: new Date(r.createdAt as string),
+    }));
+  }
+
+  async findEdgesNeedingEmbedding(
+    dimension: 2560 | 384,
+  ): Promise<Array<{ id: string; fact: string }>> {
+    const col = dimension === 2560 ? "factEmbedding" : "factEmbedding384";
+    const result = await this.conn.query(
+      `MATCH (f:Fact)
+       WHERE f.deletedAt = '' AND f.${col}[1] = 0.0 AND f.text IS NOT NULL AND f.text <> ''
+       RETURN f.id as id, f.text as fact`,
+    );
+    const rows = await result.getAll();
+    return rows.map((r) => ({
+      id: r.id as string,
+      fact: r.fact as string,
+    }));
+  }
+
+  async updateMemoryEmbeddings(
+    memoryId: string,
+    embedding2560: number[],
+    embedding384: number[],
+  ): Promise<void> {
+    const has2560 = !isZeroEmbedding(embedding2560);
+    const has384 = !isZeroEmbedding(embedding384);
+    if (!has2560 && !has384) return;
+
+    // Read existing memory fields (including current embeddings to preserve)
+    const result = await this.conn.query(
+      `MATCH (m:Memory {id: $id, deletedAt: ''})
+       RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
+              m.category as category, m.namespace as namespace, m.status as status,
+              m.error as error, m.embedding as embedding, m.embedding384 as embedding384,
+              m.createdAt as createdAt`,
+      { id: memoryId },
+    );
+    const rows = await result.getAll();
+    if (rows.length === 0) return;
+    const m = rows[0]!;
+
+    // Use new embedding if real, otherwise preserve existing
+    const final2560 = has2560 ? embedding2560 : (m.embedding as number[]);
+    const final384 = has384 ? embedding384 : (m.embedding384 as number[]);
+    const emb2560Str = `[${final2560.join(",")}]`;
+    const emb384Str = `[${final384.join(",")}]`;
+
+    // Delete + recreate (LadybugDB can't SET vector-indexed columns)
+    await this.executeQuery(
+      `MATCH (m:Memory {id: $id, deletedAt: ''}) DELETE m`,
+      { id: memoryId },
+    );
+    await this.executeQuery(
+      `CREATE (m:Memory {
+         id: $id, name: $name, text: $text, summary: $summary,
+         category: $category, namespace: $namespace, status: $status, error: $error,
+         embedding: ${emb2560Str}, embedding384: ${emb384Str},
+         createdAt: $createdAt, deletedAt: ''
+       })`,
+      {
+        id: m.id as string,
+        name: (m.name as string) ?? "",
+        text: (m.text as string) ?? "",
+        summary: (m.summary as string) ?? "",
+        category: (m.category as string) ?? "",
+        namespace: (m.namespace as string) ?? "",
+        status: (m.status as string) ?? "completed",
+        error: (m.error as string) ?? "",
+        createdAt: (m.createdAt as string) ?? new Date().toISOString(),
+      },
+    );
+  }
+
+  async updateFactEmbeddings(
+    factId: string,
+    embedding2560: number[],
+    embedding384: number[],
+  ): Promise<void> {
+    const has2560 = !isZeroEmbedding(embedding2560);
+    const has384 = !isZeroEmbedding(embedding384);
+    if (!has2560 && !has384) return;
+
+    // Read existing fact fields (including current embeddings to preserve)
+    const result = await this.conn.query(
+      `MATCH (f:Fact {id: $id, deletedAt: ''})
+       RETURN f.id as id, f.text as text, f.relationType as relationType,
+              f.sourceUuid as sourceUuid, f.targetUuid as targetUuid,
+              f.sentiment as sentiment, f.confidence as confidence,
+              f.confidenceReason as confidenceReason, f.episodes as episodes,
+              f.factEmbedding as factEmbedding, f.factEmbedding384 as factEmbedding384,
+              f.validAt as validAt, f.invalidAt as invalidAt,
+              f.namespace as namespace, f.createdAt as createdAt`,
+      { id: factId },
+    );
+    const rows = await result.getAll();
+    if (rows.length === 0) return;
+    const f = rows[0]!;
+
+    // Use new embedding if real, otherwise preserve existing
+    const final2560 = has2560 ? embedding2560 : (f.factEmbedding as number[]);
+    const final384 = has384 ? embedding384 : (f.factEmbedding384 as number[]);
+    const emb2560Str = `[${final2560.join(",")}]`;
+    const emb384Str = `[${final384.join(",")}]`;
+
+    // Delete + recreate (LadybugDB can't SET vector-indexed columns)
+    await this.executeQuery(
+      `MATCH (f:Fact {id: $id, deletedAt: ''}) DELETE f`,
+      { id: factId },
+    );
+    await this.executeQuery(
+      `CREATE (f:Fact {
+         id: $id, text: $text, relationType: $relationType, sourceUuid: $sourceUuid,
+         targetUuid: $targetUuid, sentiment: $sentiment, confidence: $confidence,
+         confidenceReason: $confidenceReason, factEmbedding: ${emb2560Str},
+         factEmbedding384: ${emb384Str},
+         episodes: $episodes, validAt: $validAt, invalidAt: $invalidAt,
+         namespace: $namespace, createdAt: $createdAt, deletedAt: ''
+       })`,
+      {
+        id: f.id as string,
+        text: f.text as string,
+        relationType: f.relationType as string,
+        sourceUuid: f.sourceUuid as string,
+        targetUuid: f.targetUuid as string,
+        sentiment: f.sentiment as number,
+        confidence: (f.confidence as number) ?? 1,
+        confidenceReason: (f.confidenceReason as string) ?? "",
+        episodes: (f.episodes as string[]) ?? [],
+        validAt: (f.validAt as string) ?? "",
+        invalidAt: (f.invalidAt as string) ?? "",
+        namespace: (f.namespace as string) ?? "",
+        createdAt: (f.createdAt as string) ?? new Date().toISOString(),
+      },
+    );
   }
 
   async purgeDeleted(): Promise<{

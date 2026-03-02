@@ -20,7 +20,7 @@ import type {
   Stats,
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
-import { getActiveDimension, OLLAMA_DIM, FALLBACK_DIM } from "./embedder.js";
+import { getActiveDimension, OLLAMA_DIM, FALLBACK_DIM, isZeroEmbedding } from "./embedder.js";
 
 const ZERO_EMBEDDING_384 = new Array(FALLBACK_DIM).fill(0);
 
@@ -1371,6 +1371,121 @@ export class Neo4jProvider implements GraphProvider {
         DELETE r
         `,
         { uuid },
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async findMemoriesNeedingEmbedding(
+    dimension: 2560 | 384,
+  ): Promise<Memory[]> {
+    const col = dimension === 2560 ? "embedding" : "embedding384";
+    const session = this.driver.session();
+    try {
+      // IS NULL catches pre-migration nodes that lack the property entirely
+      const result = await session.run(
+        `MATCH (m:Memory)
+         WHERE (m.${col} IS NULL OR m.${col}[0] = 0.0)
+           AND m.text IS NOT NULL AND m.text <> ''
+         RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
+                m.category as category, m.namespace as namespace, m.status as status,
+                m.error as error, m.createdAt as createdAt`,
+      );
+      return result.records.map((r) => ({
+        id: r.get("id"),
+        name: r.get("name") ?? "",
+        text: r.get("text"),
+        summary: r.get("summary") ?? "",
+        category: r.get("category") ?? undefined,
+        namespace: r.get("namespace") ?? "",
+        status: r.get("status") ?? "completed",
+        error: r.get("error") ?? undefined,
+        createdAt: new Date(r.get("createdAt")),
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async findEdgesNeedingEmbedding(
+    dimension: 2560 | 384,
+  ): Promise<Array<{ id: string; fact: string }>> {
+    const col = dimension === 2560 ? "factEmbedding" : "factEmbedding384";
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (:Entity)-[r:RELATES_TO]->(:Entity)
+         WHERE (r.${col} IS NULL OR r.${col}[0] = 0.0)
+           AND r.fact IS NOT NULL AND r.fact <> ''
+         RETURN r.id as id, r.fact as fact`,
+      );
+      return result.records.map((r) => ({
+        id: r.get("id"),
+        fact: r.get("fact"),
+      }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async updateMemoryEmbeddings(
+    memoryId: string,
+    embedding2560: number[],
+    embedding384: number[],
+  ): Promise<void> {
+    const has2560 = !isZeroEmbedding(embedding2560);
+    const has384 = !isZeroEmbedding(embedding384);
+    if (!has2560 && !has384) return;
+
+    const session = this.driver.session();
+    try {
+      const setClauses: string[] = [];
+      const params: Record<string, unknown> = { memoryId };
+      if (has2560) {
+        setClauses.push("m.embedding = $emb2560");
+        params.emb2560 = embedding2560;
+      }
+      if (has384) {
+        setClauses.push("m.embedding384 = $emb384");
+        params.emb384 = embedding384;
+      }
+      await session.run(
+        `MATCH (m:Memory {id: $memoryId})
+         SET ${setClauses.join(", ")}`,
+        params,
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async updateFactEmbeddings(
+    factId: string,
+    embedding2560: number[],
+    embedding384: number[],
+  ): Promise<void> {
+    const has2560 = !isZeroEmbedding(embedding2560);
+    const has384 = !isZeroEmbedding(embedding384);
+    if (!has2560 && !has384) return;
+
+    const session = this.driver.session();
+    try {
+      const setClauses: string[] = [];
+      const params: Record<string, unknown> = { factId };
+      if (has2560) {
+        setClauses.push("r.factEmbedding = $emb2560");
+        params.emb2560 = embedding2560;
+      }
+      if (has384) {
+        setClauses.push("r.factEmbedding384 = $emb384");
+        params.emb384 = embedding384;
+      }
+      await session.run(
+        `MATCH (:Entity)-[r:RELATES_TO]->(:Entity)
+         WHERE r.id = $factId
+         SET ${setClauses.join(", ")}`,
+        params,
       );
     } finally {
       await session.close();
