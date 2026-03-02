@@ -10,7 +10,7 @@
  */
 
 import { extract } from "./extractor.js";
-import { embed } from "./embedder.js";
+import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory } from "../types.js";
 
@@ -78,21 +78,27 @@ export class Queue {
           memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
         }
 
-        // 3. Generate embedding for memory text
-        console.error(`[Queue] Generating memory embedding...`);
-        const memoryEmbedding = await embed(memory.text);
+        // 3. Generate dual embeddings for memory text (Ollama 2560-dim + fallback 384-dim)
+        console.error(`[Queue] Generating memory embeddings (dual)...`);
+        const memEmb = await embedDual(memory.text);
 
-        // 4. Generate embeddings for each edge's fact description
+        // 4. Generate dual embeddings for each edge's fact description
         console.error(`[Queue] Generating embeddings for ${edges.length} edge facts...`);
         const edgeEmbeddings: number[][] = [];
+        const edgeEmbeddings384: number[][] = [];
         for (const edge of edges) {
-          const edgeEmbedding = await embed(edge.fact);
-          edgeEmbeddings.push(edgeEmbedding);
+          const edgeEmb = await embedDual(edge.fact);
+          edgeEmbeddings.push(edgeEmb.ollama);
+          edgeEmbeddings384.push(edgeEmb.fallback);
         }
 
-        // 5. Store everything (entities + RELATES_TO edges)
+        // 5. Store everything (entities + RELATES_TO edges) with both embedding dimensions
         console.error(`[Queue] Storing...`);
-        await this.graph.store(memory, entities, edges, memoryEmbedding, edgeEmbeddings);
+        await this.graph.store(
+          memory, entities, edges,
+          memEmb.ollama, edgeEmbeddings,
+          memEmb.fallback, edgeEmbeddings384,
+        );
 
         console.error(`[Queue] Memory ${memory.id} processed successfully`);
         resolve();

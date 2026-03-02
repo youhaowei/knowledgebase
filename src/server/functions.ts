@@ -16,7 +16,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { Graph } from "../lib/graph.js";
 import { Queue } from "../lib/queue.js";
-import { embed, isVectorEnabled } from "../lib/embedder.js";
+import { embedWithDimension, isZeroEmbedding } from "../lib/embedder.js";
 import { randomUUID } from "crypto";
 import { classifyIntent, boostEdgesByIntent } from "../lib/intents.js";
 
@@ -88,7 +88,8 @@ const searchSchema = z.object({
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
   .handler(async ({ data }) => {
-    const embedding = isVectorEnabled() ? await embed(data.query) : [];
+    const embResult = await embedWithDimension(data.query);
+    const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
     const result = await graph.search(embedding, data.query, data.limit);
     const intent = classifyIntent(data.query);
     const boostedEdges = boostEdgesByIntent(result.edges, intent);
@@ -327,7 +328,8 @@ export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
   .handler(async ({ data }) => {
     // First, search for relevant context
-    const embedding = isVectorEnabled() ? await embed(data.question) : [];
+    const embResult = await embedWithDimension(data.question);
+    const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
     const searchResult = await graph.search(embedding, data.question, 5);
 
     // Build context from search results
@@ -418,7 +420,8 @@ const streamingSearchSchema = z.object({
 export const streamingSearch = createServerFn()
   .inputValidator((data: unknown) => streamingSearchSchema.parse(data))
   .handler(async function* ({ data }) {
-    const embedding = isVectorEnabled() ? await embed(data.query) : [];
+    const embResult = await embedWithDimension(data.query);
+    const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
     const result = await graph.search(embedding, data.query, data.limit);
     const intent = classifyIntent(data.query);
     const boostedEdges = boostEdgesByIntent(result.edges, intent);

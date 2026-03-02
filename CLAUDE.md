@@ -38,9 +38,16 @@ Facts ARE edges between entities with semantic relation types. This enables:
 - Temporal validity: `validAt` / `invalidAt` for time-aware knowledge
 
 ```
-User text → Queue → Claude extraction → Ollama embeddings → GraphProvider storage
-                    (entities, edges)    (2560-dim vectors)   (graph + vector + FTS index)
+User text → Queue → Claude extraction → Dual embeddings → GraphProvider storage
+                    (entities, edges)    (Ollama 2560-dim    (graph + dual vector
+                                          + fallback 384-dim)  + FTS index)
 ```
+
+**Embedding Architecture (Dual Indexes):**
+- **Primary**: Ollama qwen3-embedding:4b (2560-dim) — higher quality, requires Ollama
+- **Fallback**: HuggingFace transformers.js Snowflake Arctic (384-dim) — zero-dependency, always available
+- Ingestion writes to both indexes; search routes to whichever embedder is active
+- `db:reembed` backfills both dimensions when Ollama becomes available
 
 **Core Types:**
 - **Entity** - Named things: "DashFrame", "Zustand", "Redux"
@@ -86,9 +93,11 @@ User text → Queue → Claude extraction → Ollama embeddings → GraphProvide
 
 6. **Per-namespace queues** (`src/lib/queue.ts`) - Each namespace has its own processing queue to prevent race conditions.
 
-7. **Zero API costs** - Uses unifai (Claude backend) with OAuth subscription for extraction, Ollama for local embeddings.
+7. **Zero API costs** - Uses unifai (Claude backend) with OAuth subscription for extraction, local embeddings (Ollama primary, transformers.js fallback).
 
 8. **Both backends are production** — Neo4j was the original backend; LadybugDB is the newer embedded alternative. Both must receive full feature implementations, not stubs.
+
+9. **Dual vector indexes** - Both 2560-dim (Ollama) and 384-dim (fallback) indexes coexist per node type. Ingestion populates both; search routes by active embedder. `getActiveDimension()` gates index selection.
 
 ### Storage Backend
 
@@ -107,7 +116,8 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 | `src/lib/ladybug-provider.ts` | LadybugDB implementation (default) |
 | `src/lib/neo4j-provider.ts` | Neo4j implementation (optional) |
 | `src/lib/extractor.ts` | Claude/Gemini-powered entity/edge extraction |
-| `src/lib/embedder.ts` | Ollama embedding generation (2560-dim) |
+| `src/lib/embedder.ts` | Dual-mode embedding (Ollama 2560-dim + fallback 384-dim) |
+| `src/lib/fallback-embedder.ts` | HuggingFace transformers.js fallback (384-dim, zero-dependency) |
 | `src/lib/queue.ts` | Async processing pipeline |
 | `src/server/functions.ts` | TanStack server functions (type-safe API) |
 | `src/routes/mcp.tsx` | MCP protocol endpoint for Claude Code |
@@ -116,18 +126,21 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 ### Graph Model
 
 **Node tables:**
-- `Memory` — Source text + embedding + summary + status
+- `Memory` — Source text + embedding (2560-dim) + embedding384 (384-dim) + summary + status
 - `Entity` — Named entities with type, description, scope (project/global)
-- `Fact` — Mirrors RELATES_TO edges for FTS indexing (LadybugDB workaround)
+- `Fact` — Mirrors RELATES_TO edges for FTS indexing (LadybugDB workaround), includes factEmbedding384
 
 **Relationships:**
 - `(Entity)-[RELATES_TO {
-    id, relationType, fact, sentiment, factEmbedding,
+    id, relationType, fact, sentiment, factEmbedding, factEmbedding384,
     episodes[], validAt, invalidAt, namespace, createdAt
   }]->(Entity)` — Facts as relationships
 
 **Indexes:**
-- `memory_vec_idx` — Vector index for semantic search (2560 dims, cosine)
+- `memory_vec_idx` — Vector index on Memory.embedding (2560 dims, cosine)
+- `memory_vec_384` — Vector index on Memory.embedding384 (384 dims, cosine)
+- `fact_vec_idx` — Vector index on Fact.factEmbedding (2560 dims, cosine)
+- `fact_vec_384` — Vector index on Fact.factEmbedding384 (384 dims, cosine)
 - `fact_fts_idx` — Full-text index on Fact.text property
 
 **Soft deletes:** All nodes use `deletedAt` property (empty string = active, ISO date = deleted).

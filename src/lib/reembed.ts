@@ -1,92 +1,80 @@
 /**
- * Re-embed all memories with the current embedding model
+ * Re-embed all memory text with the current embedding model(s)
  *
- * Run this when changing embedding models to update all stored vectors.
+ * Generates both Ollama (2560-dim) and fallback (384-dim) embeddings.
+ * Run this when changing embedding models or after installing Ollama.
+ * Uses createGraphProvider() for backend-agnostic operation.
+ *
+ * NOTE: Only re-embeds Memory nodes, not edge facts. To update edge
+ * embeddings, use db:reextract (which also re-runs extraction).
+ *
  * Usage: bun run db:reembed
  */
 
-import neo4j from "neo4j-driver";
-import { embed } from "./embedder";
+import { embedDual, checkAnyEmbedder } from "./embedder";
+import { createGraphProvider } from "./graph-provider";
 
-const NEO4J_URI = process.env.NEO4J_URI ?? "bolt://localhost:7687";
-const NEO4J_USER = process.env.NEO4J_USER ?? "neo4j";
-const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD ?? "password";
+async function reembed(): Promise<void> {
+  const { ollama, fallback, any } = await checkAnyEmbedder();
+  if (!any) {
+    console.error(
+      "No embedders available. Install Ollama or ensure transformers.js can load.",
+    );
+    process.exit(1);
+  }
 
-async function reembedMemories(): Promise<void> {
-  const driver = neo4j.driver(
-    NEO4J_URI,
-    neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD),
+  console.error(
+    `[reembed] Embedders: Ollama=${ollama ? "yes" : "no"}, Fallback=${fallback ? "yes" : "no"}`,
   );
 
-  const session = driver.session();
+  const provider = await createGraphProvider();
 
-  try {
-    // Get all memories
-    console.log("Fetching all memories...");
-    const result = await session.run(`
-      MATCH (m:Memory)
-      RETURN m.id as id, m.text as text, m.name as name
-      ORDER BY m.createdAt
-    `);
+  // Get all memories
+  console.error("Fetching all memories...");
+  const memories = await provider.findMemories({});
 
-    const memories = result.records.map((r) => ({
-      id: r.get("id") as string,
-      text: r.get("text") as string,
-      name: r.get("name") as string,
-    }));
+  console.error(`Found ${memories.length} memories to re-embed\n`);
 
-    console.log(`Found ${memories.length} memories to re-embed\n`);
-
-    if (memories.length === 0) {
-      console.log("No memories to re-embed.");
-      return;
-    }
-
-    // Re-embed each memory
-    let success = 0;
-    let failed = 0;
-
-    for (let i = 0; i < memories.length; i++) {
-      const memory = memories[i]!;
-      const progress = `[${i + 1}/${memories.length}]`;
-
-      try {
-        // Generate new embedding
-        const embedding = await embed(memory.text);
-
-        // Update in database
-        await session.run(
-          `
-          MATCH (m:Memory {id: $id})
-          SET m.embedding = $embedding
-          `,
-          { id: memory.id, embedding },
-        );
-
-        console.log(`${progress} ✓ ${memory.name || memory.id}`);
-        success++;
-      } catch (error) {
-        console.error(`${progress} ✗ ${memory.name || memory.id}: ${error}`);
-        failed++;
-      }
-    }
-
-    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`Re-embedding complete!`);
-    console.log(`  ✓ Success: ${success}`);
-    if (failed > 0) {
-      console.log(`  ✗ Failed: ${failed}`);
-    }
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  } finally {
-    await session.close();
-    await driver.close();
+  if (memories.length === 0) {
+    console.error("No memories to re-embed.");
+    return;
   }
+
+  let success = 0;
+  let failed = 0;
+
+  for (let i = 0; i < memories.length; i++) {
+    const memory = memories[i]!;
+    const progress = `[${i + 1}/${memories.length}]`;
+
+    try {
+      const { ollama: emb2560, fallback: emb384 } = await embedDual(
+        memory.text,
+      );
+
+      // LadybugDB requires delete+create for vector-indexed properties,
+      // so we use store() which handles this. Empty arrays = no entity/edge changes.
+      await provider.store(memory, [], [], emb2560, [], emb384, []);
+
+      console.error(`${progress} ✓ ${memory.name || memory.id}`);
+      success++;
+    } catch (error) {
+      console.error(`${progress} ✗ ${memory.name || memory.id}: ${error}`);
+      failed++;
+    }
+  }
+
+  console.error(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.error(`Re-embedding complete!`);
+  console.error(`  ✓ Success: ${success}`);
+  if (failed > 0) {
+    console.error(`  ✗ Failed: ${failed}`);
+  }
+  console.error(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 }
 
-// Run if executed directly
 if (import.meta.main) {
-  reembedMemories()
+  reembed()
     .then(() => process.exit(0))
     .catch((error) => {
       console.error("Re-embedding failed:", error);

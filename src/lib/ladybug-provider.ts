@@ -20,6 +20,7 @@ import type {
   Stats,
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
+import { getActiveDimension, OLLAMA_DIM } from "./embedder.js";
 
 export class LadybugProvider implements GraphProvider {
   private db: Database;
@@ -32,8 +33,12 @@ export class LadybugProvider implements GraphProvider {
   }
 
   private static readonly EMBEDDING_DIM = 2560;
+  private static readonly FALLBACK_DIM = 384;
   private static readonly ZERO_EMBEDDING = new Array(
     LadybugProvider.EMBEDDING_DIM,
+  ).fill(0);
+  private static readonly ZERO_EMBEDDING_384 = new Array(
+    LadybugProvider.FALLBACK_DIM,
   ).fill(0);
 
   /**
@@ -53,6 +58,10 @@ export class LadybugProvider implements GraphProvider {
 
   private zeroEmbeddingStr(): string {
     return `[${LadybugProvider.ZERO_EMBEDDING.join(",")}]`;
+  }
+
+  private zeroEmbedding384Str(): string {
+    return `[${LadybugProvider.ZERO_EMBEDDING_384.join(",")}]`;
   }
 
   private escapeFtsQuery(query: string): string {
@@ -144,14 +153,31 @@ export class LadybugProvider implements GraphProvider {
       `ALTER TABLE RELATES_TO ADD confidenceReason STRING DEFAULT ''`,
     );
 
+    // Migration: add 384-dim fallback embedding columns
+    await this.tryQuery(
+      `ALTER TABLE Memory ADD embedding384 DOUBLE[384] DEFAULT ${this.zeroEmbedding384Str()}`,
+    );
+    await this.tryQuery(
+      `ALTER TABLE Fact ADD factEmbedding384 DOUBLE[384] DEFAULT ${this.zeroEmbedding384Str()}`,
+    );
+
+    // Vector indexes — 2560-dim (Ollama)
     await this.tryQuery(
       `CALL CREATE_VECTOR_INDEX('Memory', 'memory_vec_idx', 'embedding', metric := 'cosine')`,
     );
-
     await this.tryQuery(
       `CALL CREATE_VECTOR_INDEX('Fact', 'fact_vec_idx', 'factEmbedding', metric := 'cosine')`,
     );
 
+    // Vector indexes — 384-dim (fallback)
+    await this.tryQuery(
+      `CALL CREATE_VECTOR_INDEX('Memory', 'memory_vec_384', 'embedding384', metric := 'cosine')`,
+    );
+    await this.tryQuery(
+      `CALL CREATE_VECTOR_INDEX('Fact', 'fact_vec_384', 'factEmbedding384', metric := 'cosine')`,
+    );
+
+    // Full-text search index
     await this.tryQuery(
       `CALL CREATE_FTS_INDEX('Fact', 'fact_fts_idx', ['text'])`,
     );
@@ -172,8 +198,13 @@ export class LadybugProvider implements GraphProvider {
     edges: ExtractedEdge[],
     memoryEmbedding: number[],
     edgeEmbeddings: number[][],
+    memoryEmbedding384?: number[],
+    edgeEmbeddings384?: number[][],
   ): Promise<void> {
     const embeddingStr = `[${memoryEmbedding.join(",")}]`;
+    const embedding384Str = memoryEmbedding384
+      ? `[${memoryEmbedding384.join(",")}]`
+      : this.zeroEmbedding384Str();
     const createdAt = memory.createdAt.toISOString();
 
     // LadybugDB: vector-indexed properties can't be updated with MERGE, use delete+create
@@ -185,7 +216,8 @@ export class LadybugProvider implements GraphProvider {
       `CREATE (m:Memory {
          id: $id, name: $name, text: $text, summary: $summary,
          category: $category, namespace: $namespace, status: $status, error: $error,
-         embedding: ${embeddingStr}, createdAt: $createdAt, deletedAt: ''
+         embedding: ${embeddingStr}, embedding384: ${embedding384Str},
+         createdAt: $createdAt, deletedAt: ''
        })`,
       {
         id: memory.id,
@@ -231,6 +263,7 @@ export class LadybugProvider implements GraphProvider {
     for (let i = 0; i < edges.length; i++) {
       const edge = edges[i]!;
       const embedding = edgeEmbeddings[i] ?? [];
+      const embedding384 = edgeEmbeddings384?.[i] ?? [];
       const sourceEntity = entities[edge.sourceIndex];
       const targetEntity = entities[edge.targetIndex];
 
@@ -244,6 +277,7 @@ export class LadybugProvider implements GraphProvider {
       await this.storeEdge(
         edge,
         embedding,
+        embedding384,
         sourceEntity,
         targetEntity,
         memory.id,
@@ -255,6 +289,7 @@ export class LadybugProvider implements GraphProvider {
   private async storeEdge(
     edge: ExtractedEdge,
     embedding: number[],
+    embedding384: number[],
     sourceEntity: Entity,
     targetEntity: Entity,
     memoryId: string,
@@ -264,6 +299,9 @@ export class LadybugProvider implements GraphProvider {
     const targetUuid = targetEntity.uuid!;
     const edgeId = randomUUID();
     const embStr = `[${embedding.join(",")}]`;
+    const emb384Str = embedding384.length > 0
+      ? `[${embedding384.join(",")}]`
+      : this.zeroEmbedding384Str();
     const now = new Date().toISOString();
     const sourceEntityWithScope = sourceEntity as Entity & {
       namespace?: string;
@@ -295,6 +333,7 @@ export class LadybugProvider implements GraphProvider {
         edge,
         edgeId,
         embStr,
+        emb384Str,
         sourceUuid,
         targetUuid,
         memoryId,
@@ -340,6 +379,7 @@ export class LadybugProvider implements GraphProvider {
     edge: ExtractedEdge,
     edgeId: string,
     embStr: string,
+    emb384Str: string,
     sourceUuid: string,
     targetUuid: string,
     memoryId: string,
@@ -377,6 +417,7 @@ export class LadybugProvider implements GraphProvider {
          id: $id, text: $text, relationType: $relationType, sourceUuid: $sourceUuid,
          targetUuid: $targetUuid, sentiment: $sentiment, confidence: $confidence,
          confidenceReason: $confidenceReason, factEmbedding: ${embStr},
+         factEmbedding384: ${emb384Str},
          episodes: $episodes, validAt: $validAt, invalidAt: $invalidAt,
          namespace: $namespace, createdAt: $createdAt, deletedAt: ''
        })`,
@@ -449,8 +490,9 @@ export class LadybugProvider implements GraphProvider {
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
     const embeddingStr = `[${embedding.join(",")}]`;
+    const indexName = getActiveDimension() === OLLAMA_DIM ? "memory_vec_idx" : "memory_vec_384";
     const result = await this.conn.query(
-      `CALL QUERY_VECTOR_INDEX('Memory', 'memory_vec_idx', ${embeddingStr}, ${overfetchLimit})
+      `CALL QUERY_VECTOR_INDEX('Memory', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
        ${whereClause}
        RETURN node.id as id, node.name as name, node.text as text, node.summary as summary,
@@ -491,8 +533,9 @@ export class LadybugProvider implements GraphProvider {
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
     const embeddingStr = `[${embedding.join(",")}]`;
+    const indexName = getActiveDimension() === OLLAMA_DIM ? "fact_vec_idx" : "fact_vec_384";
     const result = await this.conn.query(
-      `CALL QUERY_VECTOR_INDEX('Fact', 'fact_vec_idx', ${embeddingStr}, ${overfetchLimit})
+      `CALL QUERY_VECTOR_INDEX('Fact', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
        ${whereClause}
        MATCH (source:Entity {uuid: node.sourceUuid, deletedAt: ''})

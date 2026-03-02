@@ -3,183 +3,110 @@
  *
  * Run this when changing the extraction prompt to update the graph structure.
  * This will:
- * 1. Delete all existing Entity nodes and RELATES_TO edges
- * 2. Re-run extraction on each memory's text
- * 3. Generate embeddings for each edge fact
- * 4. Store the new entities and edges
+ * 1. Re-run extraction on each memory's text
+ * 2. Generate dual embeddings for each edge fact
+ * 3. Store entities (MERGE) and edges via the provider
+ *
+ * Entities and edges are upserted via MERGE — stale entities from previous
+ * extractions are not deleted (they become orphans but cause no harm).
+ * Uses createGraphProvider() for backend-agnostic operation.
  *
  * Usage: bun run db:reextract
  */
 
-import neo4j from "neo4j-driver";
 import { extract } from "./extractor";
-import { embed } from "./embedder";
-import { randomUUID } from "crypto";
-
-const NEO4J_URI = process.env.NEO4J_URI ?? "bolt://localhost:7687";
-const NEO4J_USER = process.env.NEO4J_USER ?? "neo4j";
-const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD ?? "password";
+import { embedDual, checkAnyEmbedder } from "./embedder";
+import { createGraphProvider } from "./graph-provider";
 
 async function reextractMemories(): Promise<void> {
-  const driver = neo4j.driver(
-    NEO4J_URI,
-    neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD),
+  const { ollama, fallback, any } = await checkAnyEmbedder();
+  if (!any) {
+    console.error(
+      "No embedders available. Install Ollama or ensure transformers.js can load.",
+    );
+    process.exit(1);
+  }
+
+  console.error(
+    `[reextract] Embedders: Ollama=${ollama ? "yes" : "no"}, Fallback=${fallback ? "yes" : "no"}`,
   );
 
-  const session = driver.session();
+  const provider = await createGraphProvider();
 
-  try {
-    // Get all memories
-    console.log("Fetching all memories...");
-    const result = await session.run(`
-      MATCH (m:Memory)
-      RETURN m.id as id, m.text as text, m.name as name, m.namespace as namespace
-      ORDER BY m.createdAt
-    `);
+  // Get all memories
+  console.error("Fetching all memories...");
+  const memories = await provider.findMemories({});
 
-    const memories = result.records.map((r) => ({
-      id: r.get("id") as string,
-      text: r.get("text") as string,
-      name: r.get("name") as string,
-      namespace: (r.get("namespace") as string) || "default",
-    }));
+  console.error(`Found ${memories.length} memories to re-extract\n`);
 
-    console.log(`Found ${memories.length} memories to re-extract\n`);
-
-    if (memories.length === 0) {
-      console.log("No memories to re-extract.");
-      return;
-    }
-
-    // Clear existing entities (edges are deleted via DETACH DELETE)
-    console.log("Clearing existing Entities and RELATES_TO edges...");
-    await session.run(`
-      MATCH (e:Entity)
-      DETACH DELETE e
-    `);
-    console.log("✓ Cleared existing graph data\n");
-
-    // Re-extract each memory
-    let success = 0;
-    let failed = 0;
-    let totalEntities = 0;
-    let totalEdges = 0;
-
-    for (let i = 0; i < memories.length; i++) {
-      const memory = memories[i]!;
-      const progress = `[${i + 1}/${memories.length}]`;
-
-      try {
-        // Extract entities and edges
-        console.log(`${progress} Extracting: ${memory.name || memory.id}`);
-        const extraction = await extract(memory.text);
-
-        // Update memory summary if changed
-        await session.run(
-          `
-          MATCH (m:Memory {id: $id})
-          SET m.summary = $summary
-          `,
-          { id: memory.id, summary: extraction.summary },
-        );
-
-        // Create entities
-        for (const entity of extraction.entities) {
-          await session.run(
-            `
-            MERGE (e:Entity {name: $name, namespace: $namespace})
-            ON CREATE SET e.type = $type, e.description = $description
-            ON MATCH SET e.description = COALESCE($description, e.description)
-            `,
-            {
-              name: entity.name,
-              type: entity.type,
-              description: entity.description ?? null,
-              namespace: memory.namespace,
-            },
-          );
-        }
-
-        // Create edges (facts as relationships between entities)
-        for (const edge of extraction.edges) {
-          // Validate indices
-          const sourceEntity = extraction.entities[edge.sourceIndex];
-          const targetEntity = extraction.entities[edge.targetIndex];
-          if (!sourceEntity || !targetEntity) {
-            console.warn(
-              `         ⚠ Invalid edge indices: ${edge.sourceIndex} -> ${edge.targetIndex}`,
-            );
-            continue;
-          }
-
-          // Generate embedding for edge fact
-          console.log(`         Embedding edge: ${edge.fact.slice(0, 50)}...`);
-          const embedding = await embed(edge.fact);
-          const edgeId = randomUUID();
-
-          // Create RELATES_TO edge
-          await session.run(
-            `
-            MATCH (source:Entity {name: $sourceName, namespace: $namespace})
-            MATCH (target:Entity {name: $targetName, namespace: $namespace})
-            MERGE (source)-[r:RELATES_TO {relationType: $relationType}]->(target)
-            ON CREATE SET
-              r.id = $id,
-              r.fact = $fact,
-              r.sentiment = $sentiment,
-              r.confidence = $confidence,
-              r.confidenceReason = $confidenceReason,
-              r.factEmbedding = $embedding,
-              r.episodes = [$memoryId],
-              r.validAt = CASE WHEN $validAt IS NOT NULL THEN datetime($validAt) ELSE null END,
-              r.invalidAt = null,
-              r.createdAt = datetime()
-            ON MATCH SET
-              r.episodes = r.episodes + $memoryId,
-              r.fact = CASE WHEN size($fact) > size(r.fact) THEN $fact ELSE r.fact END
-            `,
-            {
-              sourceName: sourceEntity.name,
-              targetName: targetEntity.name,
-              namespace: memory.namespace,
-              relationType: edge.relationType,
-              id: edgeId,
-              fact: edge.fact,
-              sentiment: edge.sentiment,
-              confidence: edge.confidence ?? 1,
-              confidenceReason: edge.confidenceReason ?? null,
-              embedding,
-              memoryId: memory.id,
-              validAt: edge.validAt ?? null,
-            },
-          );
-        }
-
-        console.log(
-          `         → ${extraction.entities.length} entities, ${extraction.edges.length} edges`,
-        );
-        totalEntities += extraction.entities.length;
-        totalEdges += extraction.edges.length;
-        success++;
-      } catch (error) {
-        console.error(`${progress} ✗ ${memory.name || memory.id}: ${error}`);
-        failed++;
-      }
-    }
-
-    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`Re-extraction complete!`);
-    console.log(`  ✓ Memories processed: ${success}`);
-    console.log(`  ✓ Total entities: ${totalEntities}`);
-    console.log(`  ✓ Total edges: ${totalEdges}`);
-    if (failed > 0) {
-      console.log(`  ✗ Failed: ${failed}`);
-    }
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  } finally {
-    await session.close();
-    await driver.close();
+  if (memories.length === 0) {
+    console.error("No memories to re-extract.");
+    return;
   }
+
+  // Re-extract each memory
+  let success = 0;
+  let failed = 0;
+  let totalEntities = 0;
+  let totalEdges = 0;
+
+  for (let i = 0; i < memories.length; i++) {
+    const memory = memories[i]!;
+    const progress = `[${i + 1}/${memories.length}]`;
+
+    try {
+      // Extract entities and edges
+      console.error(`${progress} Extracting: ${memory.name || memory.id}`);
+      const extraction = await extract(memory.text);
+
+      // Generate dual embeddings for memory text
+      const memEmb = await embedDual(memory.text);
+
+      // Generate dual embeddings for each edge fact
+      const edgeEmbeddings: number[][] = [];
+      const edgeEmbeddings384: number[][] = [];
+      for (const edge of extraction.edges) {
+        console.error(
+          `         Embedding edge: ${edge.fact.slice(0, 50)}...`,
+        );
+        const edgeEmb = await embedDual(edge.fact);
+        edgeEmbeddings.push(edgeEmb.ollama);
+        edgeEmbeddings384.push(edgeEmb.fallback);
+      }
+
+      // Store via provider — handles entity MERGE, edge creation, embeddings
+      const memoryWithSummary = { ...memory, summary: extraction.summary };
+      await provider.store(
+        memoryWithSummary,
+        extraction.entities,
+        extraction.edges,
+        memEmb.ollama,
+        edgeEmbeddings,
+        memEmb.fallback,
+        edgeEmbeddings384,
+      );
+
+      console.error(
+        `         → ${extraction.entities.length} entities, ${extraction.edges.length} edges`,
+      );
+      totalEntities += extraction.entities.length;
+      totalEdges += extraction.edges.length;
+      success++;
+    } catch (error) {
+      console.error(`${progress} ✗ ${memory.name || memory.id}: ${error}`);
+      failed++;
+    }
+  }
+
+  console.error(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.error(`Re-extraction complete!`);
+  console.error(`  ✓ Memories processed: ${success}`);
+  console.error(`  ✓ Total entities: ${totalEntities}`);
+  console.error(`  ✓ Total edges: ${totalEdges}`);
+  if (failed > 0) {
+    console.error(`  ✗ Failed: ${failed}`);
+  }
+  console.error(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 }
 
 // Run if executed directly

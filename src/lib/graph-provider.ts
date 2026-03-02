@@ -68,6 +68,8 @@ export interface GraphProvider {
     edges: ExtractedEdge[],
     memoryEmbedding: number[],
     edgeEmbeddings: number[][],
+    memoryEmbedding384?: number[],
+    edgeEmbeddings384?: number[][],
   ): Promise<void>;
 
   search(

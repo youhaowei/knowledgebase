@@ -20,6 +20,9 @@ import type {
   Stats,
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
+import { getActiveDimension, OLLAMA_DIM, FALLBACK_DIM } from "./embedder.js";
+
+const ZERO_EMBEDDING_384 = new Array(FALLBACK_DIM).fill(0);
 
 export class Neo4jProvider implements GraphProvider {
   private driver: Driver;
@@ -81,6 +84,26 @@ export class Neo4jProvider implements GraphProvider {
         }}
       `);
 
+      // 384-dim fallback vector indexes
+      await session.run(`
+        CREATE VECTOR INDEX memory_embedding_384 IF NOT EXISTS
+        FOR (m:Memory) ON (m.embedding384)
+        OPTIONS {indexConfig: {
+          \`vector.dimensions\`: 384,
+          \`vector.similarity_function\`: 'cosine'
+        }}
+      `);
+
+      await session.run(`
+        CREATE VECTOR INDEX edge_factEmbedding_384 IF NOT EXISTS
+        FOR ()-[r:RELATES_TO]-()
+        ON (r.factEmbedding384)
+        OPTIONS {indexConfig: {
+          \`vector.dimensions\`: 384,
+          \`vector.similarity_function\`: 'cosine'
+        }}
+      `);
+
       await session.run(`
         CREATE FULLTEXT INDEX edge_fact_text IF NOT EXISTS
         FOR ()-[r:RELATES_TO]-()
@@ -118,6 +141,8 @@ export class Neo4jProvider implements GraphProvider {
     edges: ExtractedEdge[],
     memoryEmbedding: number[],
     edgeEmbeddings: number[][],
+    memoryEmbedding384?: number[],
+    edgeEmbeddings384?: number[][],
   ): Promise<void> {
     const session = this.driver.session();
     try {
@@ -134,6 +159,7 @@ export class Neo4jProvider implements GraphProvider {
             m.status = $status,
             m.error = $error,
             m.embedding = $embedding,
+            m.embedding384 = $embedding384,
             m.createdAt = datetime($createdAt)
           ON MATCH SET
             m.name = $name,
@@ -141,7 +167,8 @@ export class Neo4jProvider implements GraphProvider {
             m.category = $category,
             m.status = $status,
             m.error = $error,
-            m.embedding = $embedding
+            m.embedding = $embedding,
+            m.embedding384 = $embedding384
           `,
           {
             id: memory.id,
@@ -153,6 +180,7 @@ export class Neo4jProvider implements GraphProvider {
             status: memory.status ?? "completed",
             error: memory.error ?? null,
             embedding: memoryEmbedding,
+            embedding384: memoryEmbedding384 ?? ZERO_EMBEDDING_384,
             createdAt: memory.createdAt.toISOString(),
           },
         );
@@ -200,6 +228,7 @@ export class Neo4jProvider implements GraphProvider {
         for (let i = 0; i < edges.length; i++) {
           const edge = edges[i]!;
           const embedding = edgeEmbeddings[i] ?? [];
+          const embedding384 = edgeEmbeddings384?.[i] ?? ZERO_EMBEDDING_384;
 
           const sourceEntity = entities[edge.sourceIndex];
           const targetEntity = entities[edge.targetIndex];
@@ -228,6 +257,7 @@ export class Neo4jProvider implements GraphProvider {
               r.confidence = $confidence,
               r.confidenceReason = $confidenceReason,
               r.factEmbedding = $embedding,
+              r.factEmbedding384 = $embedding384,
               r.episodes = [$memoryId],
               r.validAt = CASE WHEN $validAt IS NOT NULL THEN datetime($validAt) ELSE null END,
               r.invalidAt = null,
@@ -249,6 +279,7 @@ export class Neo4jProvider implements GraphProvider {
               confidence: edge.confidence ?? 1,
               confidenceReason: edge.confidenceReason ?? null,
               embedding,
+              embedding384,
               memoryId: memory.id,
               validAt: edge.validAt ?? null,
             },
@@ -269,9 +300,10 @@ export class Neo4jProvider implements GraphProvider {
     try {
       let memories: Memory[] = [];
       if (embedding.length > 0) {
-      const memoryResult = await session.run(
+        const memIndexName = getActiveDimension() === OLLAMA_DIM ? "memory_embedding" : "memory_embedding_384";
+        const memoryResult = await session.run(
         `
-        CALL db.index.vector.queryNodes('memory_embedding', $limit, $embedding)
+        CALL db.index.vector.queryNodes('${memIndexName}', $limit, $embedding)
         YIELD node, score
         RETURN node.id as id,
                node.name as name,
@@ -362,9 +394,10 @@ export class Neo4jProvider implements GraphProvider {
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
+      const vsIndexName = getActiveDimension() === OLLAMA_DIM ? "memory_embedding" : "memory_embedding_384";
       const result = await session.run(
         `
-        CALL db.index.vector.queryNodes('memory_embedding', $limit, $embedding)
+        CALL db.index.vector.queryNodes('${vsIndexName}', $limit, $embedding)
         YIELD node, score
         ${where}
         RETURN node.id as id,
@@ -423,9 +456,10 @@ export class Neo4jProvider implements GraphProvider {
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
+      const edgeIndexName = getActiveDimension() === OLLAMA_DIM ? "edge_factEmbedding" : "edge_factEmbedding_384";
       const result = await session.run(
         `
-        CALL db.index.vector.queryRelationships('edge_factEmbedding', $limit, $embedding)
+        CALL db.index.vector.queryRelationships('${edgeIndexName}', $limit, $embedding)
         YIELD relationship, score
         WITH relationship as r, score
         MATCH (source:Entity)-[r]->(target:Entity)

@@ -12,7 +12,7 @@
 
 import { createGraphProvider, type GraphProvider } from "./graph-provider.js";
 import { Queue } from "./queue.js";
-import { embed, isVectorEnabled } from "./embedder.js";
+import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
@@ -69,8 +69,8 @@ export async function search(
   guidance: string;
 }> {
   const gp = await getProvider();
-  const embedding = isVectorEnabled() ? await embed(query) : [];
-  const result = await gp.search(embedding, query, limit);
+  const { embedding } = await embedWithDimension(query);
+  const result = await gp.search(isZeroEmbedding(embedding) ? [] : embedding, query, limit);
   const intent = classifyIntent(query);
 
   return {
