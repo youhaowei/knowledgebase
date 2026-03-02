@@ -137,6 +137,28 @@ export interface GraphProvider {
     entities: number;
     facts: number;
   }>;
+
+  /** Find memories where the embedding for the given dimension is all zeros */
+  findMemoriesNeedingEmbedding(dimension: 2560 | 384): Promise<Memory[]>;
+
+  /** Find edges (facts) where the embedding for the given dimension is all zeros */
+  findEdgesNeedingEmbedding(
+    dimension: 2560 | 384,
+  ): Promise<Array<{ id: string; fact: string }>>;
+
+  /** Update just the embeddings on a Memory node. Skips zero-vector values to preserve existing data. */
+  updateMemoryEmbeddings(
+    memoryId: string,
+    embedding2560: number[],
+    embedding384: number[],
+  ): Promise<void>;
+
+  /** Update just the embeddings on a Fact node (and relationship in Neo4j). Skips zero-vector values to preserve existing data. */
+  updateFactEmbeddings(
+    factId: string,
+    embedding2560: number[],
+    embedding384: number[],
+  ): Promise<void>;
 }
 
 export async function createGraphProvider(): Promise<GraphProvider> {
