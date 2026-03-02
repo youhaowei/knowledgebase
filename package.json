@@ -8,6 +8,7 @@
     "build": "vite build",
     "db:init": "bun run src/lib/init-db.ts",
     "db:reembed": "bun run src/lib/reembed.ts",
+    "db:backfill": "bun run src/lib/reembed.ts --backfill",
     "db:reextract": "bun run src/lib/reextract.ts",
     "test": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts && bun test test/provider.test.ts",
     "test:cli": "bun test test/cli.test.ts",

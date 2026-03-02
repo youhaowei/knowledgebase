@@ -14,7 +14,8 @@ bun run dev              # TanStack Start dev server (port 8000, SSR + HMR + MCP
 
 # Database
 bun run db:init          # Initialize Neo4j schema + indexes
-bun run db:reembed       # Re-embed all memories (after model change)
+bun run db:reembed       # Re-embed all memories + edges (after model change)
+bun run db:backfill      # Only re-embed entries with zero-vector gaps
 bun run db:reextract     # Re-extract edges from all memories (after prompt change)
 
 # Testing & Quality
