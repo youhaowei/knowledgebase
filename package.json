@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "kb": "src/cli.ts"
+  },
   "exports": {
     "./mcp": "./src/mcp-server.ts",
     "./operations": "./src/operations.ts",
