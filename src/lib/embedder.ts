@@ -1,50 +1,62 @@
 /**
  * Embedder - generates vector embeddings for text
  *
- * Primary: Ollama qwen3-embedding:4b (2560 dimensions)
- * Fallback: HuggingFace transformers.js Snowflake Arctic (384 dimensions)
+ * Primary: Ollama (model configurable via EMBEDDING_MODEL env var)
+ * Fallback: HuggingFace transformers.js Snowflake Arctic
  *
+ * Dimensions are detected from model output, not hardcoded.
  * Tries Ollama first; falls back to transformers.js if unavailable.
  */
 
 import {
   embedFallback,
   isFallbackAvailable,
-  FALLBACK_DIM,
+  getFallbackDim,
 } from "./fallback-embedder.js";
+import type { EmbeddingMap } from "../types.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
 const MODEL = process.env.EMBEDDING_MODEL ?? "qwen3-embedding:4b";
-const OLLAMA_DIM = 2560;
-const ZERO_EMBEDDING_OLLAMA = new Array(OLLAMA_DIM).fill(0);
-const ZERO_EMBEDDING_FALLBACK = new Array(FALLBACK_DIM).fill(0);
 
 export type EmbedSource = "ollama" | "fallback";
 
 export type EmbedResult = {
   embedding: number[];
-  dimension: typeof OLLAMA_DIM | typeof FALLBACK_DIM;
+  dimension: number;
   source: EmbedSource;
 };
 
-/** Check if an embedding is all zeros (sentinel for "no embedder available") */
+/** Check if an embedding is all zeros or empty */
 export function isZeroEmbedding(embedding: number[]): boolean {
-  return embedding.every((v) => v === 0);
+  return embedding.length === 0 || embedding.every((v) => v === 0);
 }
 
 let ollamaWarned = false;
 let ollamaAvailable = true;
+let ollamaDim: number | null = null;
 
-export { OLLAMA_DIM, FALLBACK_DIM };
+/** Get the detected Ollama embedding dimension (null if not yet detected) */
+export function getOllamaDim(): number | null {
+  return ollamaDim;
+}
 
 /** Which embedding dimension is active for the current session */
-export function getActiveDimension(): typeof OLLAMA_DIM | typeof FALLBACK_DIM {
-  return ollamaAvailable ? OLLAMA_DIM : FALLBACK_DIM;
+export function getActiveDimension(): number | null {
+  if (ollamaAvailable && ollamaDim) return ollamaDim;
+  return getFallbackDim();
+}
+
+/** Get all detected embedding dimensions */
+export function getRegisteredDimensions(): number[] {
+  const dims: number[] = [];
+  if (ollamaDim) dims.push(ollamaDim);
+  const fb = getFallbackDim();
+  if (fb && fb !== ollamaDim) dims.push(fb);
+  return dims;
 }
 
 /**
- * Generate an Ollama embedding (2560-dim). Returns zero-vector on failure.
- * Backward-compatible — same behavior as before.
+ * Generate an Ollama embedding. Returns empty array on failure.
  */
 export async function embed(text: string): Promise<number[]> {
   try {
@@ -70,6 +82,12 @@ export async function embed(text: string): Promise<number[]> {
 
     ollamaAvailable = true;
     ollamaWarned = false;
+
+    if (ollamaDim === null) {
+      ollamaDim = data.embedding.length;
+      console.error(`[embedder] Detected Ollama dimension: ${ollamaDim}`);
+    }
+
     return data.embedding;
   } catch (err) {
     ollamaAvailable = false;
@@ -79,51 +97,59 @@ export async function embed(text: string): Promise<number[]> {
       );
       ollamaWarned = true;
     }
-    return [...ZERO_EMBEDDING_OLLAMA];
+    return [];
   }
 }
 
 /**
  * Generate embeddings with dimension metadata.
- * Tries Ollama first → falls back to transformers.js → zero-vector as last resort.
+ * Tries Ollama first → falls back to transformers.js → empty result as last resort.
  */
 export async function embedWithDimension(text: string): Promise<EmbedResult> {
-  // Try Ollama first
   const ollamaResult = await embed(text);
-  if (ollamaAvailable) {
-    return { embedding: ollamaResult, dimension: OLLAMA_DIM, source: "ollama" };
+  if (ollamaAvailable && ollamaResult.length > 0) {
+    return { embedding: ollamaResult, dimension: ollamaResult.length, source: "ollama" };
   }
 
-  // Ollama failed — try fallback
   const fallbackResult = await embedFallback(text);
-  if (!isZeroEmbedding(fallbackResult)) {
+  if (fallbackResult.length > 0) {
     return {
       embedding: fallbackResult,
-      dimension: FALLBACK_DIM,
+      dimension: fallbackResult.length,
       source: "fallback",
     };
   }
 
-  // Both failed — return zero-vector with fallback dimension
   return {
-    embedding: [...ZERO_EMBEDDING_FALLBACK],
-    dimension: FALLBACK_DIM,
+    embedding: [],
+    dimension: 0,
     source: "fallback",
   };
 }
 
 /**
- * Generate both Ollama (2560) and fallback (384) embeddings simultaneously.
- * Used during ingestion to populate both vector indexes.
+ * Generate embeddings from all available sources simultaneously.
+ * Returns an EmbeddingMap keyed by detected dimension.
+ * Used during ingestion to populate all vector indexes.
  */
-export async function embedDual(
-  text: string,
-): Promise<{ ollama: number[]; fallback: number[] }> {
+export async function embedDual(text: string): Promise<EmbeddingMap> {
   const [ollamaResult, fallbackResult] = await Promise.all([
     embed(text),
     embedFallback(text),
   ]);
-  return { ollama: ollamaResult, fallback: fallbackResult };
+
+  const map: EmbeddingMap = new Map();
+
+  if (ollamaDim && ollamaResult.length > 0 && !isZeroEmbedding(ollamaResult)) {
+    map.set(ollamaDim, ollamaResult);
+  }
+
+  const fb = getFallbackDim();
+  if (fb && fallbackResult.length > 0 && !isZeroEmbedding(fallbackResult)) {
+    map.set(fb, fallbackResult);
+  }
+
+  return map;
 }
 
 /** Check if Ollama is available and the model is ready */

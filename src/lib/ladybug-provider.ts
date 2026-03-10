@@ -9,6 +9,7 @@ import type {
   EntityFilter,
   EdgeFilter,
   MemoryFilter,
+  EmbeddingMap,
 } from "../types.js";
 import type {
   GraphProvider,
@@ -20,7 +21,7 @@ import type {
   Stats,
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
-import { getActiveDimension, OLLAMA_DIM, isZeroEmbedding } from "./embedder.js";
+import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
 
 export class LadybugProvider implements GraphProvider {
   private db: Database;
@@ -32,14 +33,25 @@ export class LadybugProvider implements GraphProvider {
     this.db = new Database(this.dataPath);
   }
 
-  private static readonly EMBEDDING_DIM = 2560;
-  private static readonly FALLBACK_DIM = 384;
-  private static readonly ZERO_EMBEDDING = new Array(
-    LadybugProvider.EMBEDDING_DIM,
-  ).fill(0);
-  private static readonly ZERO_EMBEDDING_384 = new Array(
-    LadybugProvider.FALLBACK_DIM,
-  ).fill(0);
+  /** Maps dimension → column/index names for Memory and Fact tables */
+  private dimensionRegistry = new Map<number, {
+    memoryCol: string;
+    factCol: string;
+    memoryIndex: string;
+    factIndex: string;
+  }>();
+
+  /** Known dimensions registered at init time (backward compat) */
+  private static readonly KNOWN_DIMENSIONS: Array<{
+    dim: number;
+    memoryCol: string;
+    factCol: string;
+    memoryIndex: string;
+    factIndex: string;
+  }> = [
+    { dim: 2560, memoryCol: "embedding", factCol: "factEmbedding", memoryIndex: "memory_vec_idx", factIndex: "fact_vec_idx" },
+    { dim: 384, memoryCol: "embedding384", factCol: "factEmbedding384", memoryIndex: "memory_vec_384", factIndex: "fact_vec_384" },
+  ];
 
   /**
    * Execute a query with optional parameters.
@@ -56,12 +68,49 @@ export class LadybugProvider implements GraphProvider {
     return this.conn.execute(prepared, params);
   }
 
-  private zeroEmbeddingStr(): string {
-    return `[${LadybugProvider.ZERO_EMBEDDING.join(",")}]`;
+  private zeroEmbeddingStr(dim: number): string {
+    return `[${new Array(dim).fill(0).join(",")}]`;
   }
 
-  private zeroEmbedding384Str(): string {
-    return `[${LadybugProvider.ZERO_EMBEDDING_384.join(",")}]`;
+  /** Get dimension info from registry, throw if unknown */
+  private getDimInfo(dim: number) {
+    const info = this.dimensionRegistry.get(dim);
+    if (!info) throw new Error(`Unknown embedding dimension: ${dim}. Run ensureDimension() first.`);
+    return info;
+  }
+
+  /** Build embedding column strings from an EmbeddingMap for SQL interpolation */
+  private embeddingColumns(embeddings: EmbeddingMap): Record<string, string> {
+    const cols: Record<string, string> = {};
+    for (const [dim, info] of this.dimensionRegistry) {
+      const vec = embeddings.get(dim);
+      cols[info.memoryCol] = vec && !isZeroEmbedding(vec)
+        ? `[${vec.join(",")}]`
+        : this.zeroEmbeddingStr(dim);
+      cols[info.factCol] = vec && !isZeroEmbedding(vec)
+        ? `[${vec.join(",")}]`
+        : this.zeroEmbeddingStr(dim);
+    }
+    return cols;
+  }
+
+  /** Auto-create columns and indexes for a new dimension */
+  async ensureDimension(dim: number): Promise<void> {
+    if (this.dimensionRegistry.has(dim)) return;
+
+    const memoryCol = `embedding_${dim}`;
+    const factCol = `factEmbedding_${dim}`;
+    const memoryIndex = `memory_vec_${dim}`;
+    const factIndex = `fact_vec_${dim}`;
+
+    const zeroStr = this.zeroEmbeddingStr(dim);
+    await this.tryQuery(`ALTER TABLE Memory ADD ${memoryCol} DOUBLE[${dim}] DEFAULT ${zeroStr}`);
+    await this.tryQuery(`ALTER TABLE Fact ADD ${factCol} DOUBLE[${dim}] DEFAULT ${zeroStr}`);
+    await this.tryQuery(`CALL CREATE_VECTOR_INDEX('Memory', '${memoryIndex}', '${memoryCol}', metric := 'cosine')`);
+    await this.tryQuery(`CALL CREATE_VECTOR_INDEX('Fact', '${factIndex}', '${factCol}', metric := 'cosine')`);
+
+    this.dimensionRegistry.set(dim, { memoryCol, factCol, memoryIndex, factIndex });
+    console.error(`[ladybug] Auto-created indexes for ${dim}-dim embeddings`);
   }
 
   private escapeFtsQuery(query: string): string {
@@ -127,7 +176,7 @@ export class LadybugProvider implements GraphProvider {
 
     // Migration: add factEmbedding column to existing Fact tables
     await this.tryQuery(
-      `ALTER TABLE Fact ADD factEmbedding DOUBLE[2560] DEFAULT ${this.zeroEmbeddingStr()}`,
+      `ALTER TABLE Fact ADD factEmbedding DOUBLE[2560] DEFAULT ${this.zeroEmbeddingStr(2560)}`,
     );
 
     // Migration: add confidence scoring columns
@@ -155,27 +204,27 @@ export class LadybugProvider implements GraphProvider {
 
     // Migration: add 384-dim fallback embedding columns
     await this.tryQuery(
-      `ALTER TABLE Memory ADD embedding384 DOUBLE[384] DEFAULT ${this.zeroEmbedding384Str()}`,
+      `ALTER TABLE Memory ADD embedding384 DOUBLE[384] DEFAULT ${this.zeroEmbeddingStr(384)}`,
     );
     await this.tryQuery(
-      `ALTER TABLE Fact ADD factEmbedding384 DOUBLE[384] DEFAULT ${this.zeroEmbedding384Str()}`,
+      `ALTER TABLE Fact ADD factEmbedding384 DOUBLE[384] DEFAULT ${this.zeroEmbeddingStr(384)}`,
     );
 
-    // Vector indexes — 2560-dim (Ollama)
-    await this.tryQuery(
-      `CALL CREATE_VECTOR_INDEX('Memory', 'memory_vec_idx', 'embedding', metric := 'cosine')`,
-    );
-    await this.tryQuery(
-      `CALL CREATE_VECTOR_INDEX('Fact', 'fact_vec_idx', 'factEmbedding', metric := 'cosine')`,
-    );
-
-    // Vector indexes — 384-dim (fallback)
-    await this.tryQuery(
-      `CALL CREATE_VECTOR_INDEX('Memory', 'memory_vec_384', 'embedding384', metric := 'cosine')`,
-    );
-    await this.tryQuery(
-      `CALL CREATE_VECTOR_INDEX('Fact', 'fact_vec_384', 'factEmbedding384', metric := 'cosine')`,
-    );
+    // Register known dimensions and create vector indexes
+    for (const known of LadybugProvider.KNOWN_DIMENSIONS) {
+      this.dimensionRegistry.set(known.dim, {
+        memoryCol: known.memoryCol,
+        factCol: known.factCol,
+        memoryIndex: known.memoryIndex,
+        factIndex: known.factIndex,
+      });
+      await this.tryQuery(
+        `CALL CREATE_VECTOR_INDEX('Memory', '${known.memoryIndex}', '${known.memoryCol}', metric := 'cosine')`,
+      );
+      await this.tryQuery(
+        `CALL CREATE_VECTOR_INDEX('Fact', '${known.factIndex}', '${known.factCol}', metric := 'cosine')`,
+      );
+    }
 
     // Full-text search index
     await this.tryQuery(
@@ -192,19 +241,37 @@ export class LadybugProvider implements GraphProvider {
     }
   }
 
+  /** Ensure all dimensions in the given embedding maps are registered */
+  private async ensureAllDimensions(memEmb: EmbeddingMap, edgeEmbs: EmbeddingMap[]) {
+    for (const dim of memEmb.keys()) await this.ensureDimension(dim);
+    for (const emb of edgeEmbs) {
+      for (const dim of emb.keys()) await this.ensureDimension(dim);
+    }
+  }
+
+  /** Build memory embedding column strings for SQL interpolation */
+  private buildMemoryEmbCols(embeddings: EmbeddingMap): string[] {
+    const cols: string[] = [];
+    for (const [dim, info] of this.dimensionRegistry) {
+      const vec = embeddings.get(dim);
+      const str = vec && !isZeroEmbedding(vec)
+        ? `[${vec.join(",")}]`
+        : this.zeroEmbeddingStr(dim);
+      cols.push(`${info.memoryCol}: ${str}`);
+    }
+    return cols;
+  }
+
   async store(
     memory: Memory,
     entities: Entity[],
     edges: ExtractedEdge[],
-    memoryEmbedding: number[],
-    edgeEmbeddings: number[][],
-    memoryEmbedding384?: number[],
-    edgeEmbeddings384?: number[][],
+    memoryEmbeddings: EmbeddingMap,
+    edgeEmbeddings: EmbeddingMap[],
   ): Promise<void> {
-    const embeddingStr = `[${memoryEmbedding.join(",")}]`;
-    const embedding384Str = memoryEmbedding384
-      ? `[${memoryEmbedding384.join(",")}]`
-      : this.zeroEmbedding384Str();
+    await this.ensureAllDimensions(memoryEmbeddings, edgeEmbeddings);
+
+    const embCols = this.buildMemoryEmbCols(memoryEmbeddings);
     const createdAt = memory.createdAt.toISOString();
 
     // LadybugDB: vector-indexed properties can't be updated with MERGE, use delete+create
@@ -216,7 +283,7 @@ export class LadybugProvider implements GraphProvider {
       `CREATE (m:Memory {
          id: $id, name: $name, text: $text, summary: $summary,
          category: $category, namespace: $namespace, status: $status, error: $error,
-         embedding: ${embeddingStr}, embedding384: ${embedding384Str},
+         ${embCols.join(", ")},
          createdAt: $createdAt, deletedAt: ''
        })`,
       {
@@ -262,8 +329,7 @@ export class LadybugProvider implements GraphProvider {
 
     for (let i = 0; i < edges.length; i++) {
       const edge = edges[i]!;
-      const embedding = edgeEmbeddings[i] ?? [];
-      const embedding384 = edgeEmbeddings384?.[i] ?? [];
+      const edgeEmb = edgeEmbeddings[i] ?? new Map();
       const sourceEntity = entities[edge.sourceIndex];
       const targetEntity = entities[edge.targetIndex];
 
@@ -276,8 +342,7 @@ export class LadybugProvider implements GraphProvider {
 
       await this.storeEdge(
         edge,
-        embedding,
-        embedding384,
+        edgeEmb,
         sourceEntity,
         targetEntity,
         memory.id,
@@ -288,8 +353,7 @@ export class LadybugProvider implements GraphProvider {
 
   private async storeEdge(
     edge: ExtractedEdge,
-    embedding: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
     sourceEntity: Entity,
     targetEntity: Entity,
     memoryId: string,
@@ -298,10 +362,6 @@ export class LadybugProvider implements GraphProvider {
     const sourceUuid = sourceEntity.uuid!;
     const targetUuid = targetEntity.uuid!;
     const edgeId = randomUUID();
-    const embStr = `[${embedding.join(",")}]`;
-    const emb384Str = embedding384.length > 0
-      ? `[${embedding384.join(",")}]`
-      : this.zeroEmbedding384Str();
     const now = new Date().toISOString();
     const sourceEntityWithScope = sourceEntity as Entity & {
       namespace?: string;
@@ -327,13 +387,13 @@ export class LadybugProvider implements GraphProvider {
         sourceUuid,
         targetUuid,
         memoryId,
+        embeddings,
       );
     } else {
       await this.createNewEdge(
         edge,
         edgeId,
-        embStr,
-        emb384Str,
+        embeddings,
         sourceUuid,
         targetUuid,
         memoryId,
@@ -349,12 +409,13 @@ export class LadybugProvider implements GraphProvider {
     sourceUuid: string,
     targetUuid: string,
     memoryId: string,
+    embeddings: EmbeddingMap,
   ): Promise<void> {
     const existingEpisodes = (existing.episodes as string[]) || [];
     const newEpisodes = [...existingEpisodes, memoryId];
     const existingFact = (existing.fact as string) || "";
-    const newFact =
-      edge.fact.length > existingFact.length ? edge.fact : existingFact;
+    const factChanged = edge.fact.length > existingFact.length;
+    const newFact = factChanged ? edge.fact : existingFact;
 
     await this.executeQuery(
       `MATCH (source:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(target:Entity {uuid: $targetUuid})
@@ -373,26 +434,43 @@ export class LadybugProvider implements GraphProvider {
       `MATCH (f:Fact {id: $factId, deletedAt: ''}) SET f.episodes = $episodes, f.text = $fact`,
       { factId: existing.id, episodes: newEpisodes, fact: newFact },
     );
+
+    // Re-embed when fact text changes to prevent stale vector search results
+    if (factChanged && embeddings.size > 0) {
+      await this.updateFactEmbeddings(existing.id as string, embeddings);
+    }
   }
 
   private async createNewEdge(
     edge: ExtractedEdge,
     edgeId: string,
-    embStr: string,
-    emb384Str: string,
+    embeddings: EmbeddingMap,
     sourceUuid: string,
     targetUuid: string,
     memoryId: string,
     namespace: string,
     createdAt: string,
   ): Promise<void> {
+    // Build embedding columns for RELATES_TO (only the primary/first registered dim)
+    // RELATES_TO only has factEmbedding column (2560-dim historically)
+    const firstDim = this.dimensionRegistry.keys().next().value;
+    const firstInfo = firstDim !== undefined ? this.dimensionRegistry.get(firstDim) : undefined;
+    const relEmbStr = firstDim !== undefined && firstInfo
+      ? (() => {
+          const vec = embeddings.get(firstDim);
+          return vec && !isZeroEmbedding(vec)
+            ? `[${vec.join(",")}]`
+            : this.zeroEmbeddingStr(firstDim);
+        })()
+      : `[${new Array(2560).fill(0).join(",")}]`;
+
     await this.executeQuery(
       `MATCH (source:Entity {uuid: $sourceUuid})
        MATCH (target:Entity {uuid: $targetUuid})
        CREATE (source)-[r:RELATES_TO {
          id: $id, relationType: $relationType, fact: $fact, sentiment: $sentiment,
          confidence: $confidence, confidenceReason: $confidenceReason,
-         factEmbedding: ${embStr}, episodes: $episodes, validAt: $validAt,
+         factEmbedding: ${relEmbStr}, episodes: $episodes, validAt: $validAt,
          invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
        }]->(target)`,
       {
@@ -412,12 +490,22 @@ export class LadybugProvider implements GraphProvider {
       },
     );
 
+    // Build embedding columns for Fact node (all registered dimensions)
+    const factEmbCols: string[] = [];
+    for (const [dim, info] of this.dimensionRegistry) {
+      const vec = embeddings.get(dim);
+      const str = vec && !isZeroEmbedding(vec)
+        ? `[${vec.join(",")}]`
+        : this.zeroEmbeddingStr(dim);
+      factEmbCols.push(`${info.factCol}: ${str}`);
+    }
+
     await this.executeQuery(
       `CREATE (f:Fact {
          id: $id, text: $text, relationType: $relationType, sourceUuid: $sourceUuid,
          targetUuid: $targetUuid, sentiment: $sentiment, confidence: $confidence,
-         confidenceReason: $confidenceReason, factEmbedding: ${embStr},
-         factEmbedding384: ${emb384Str},
+         confidenceReason: $confidenceReason,
+         ${factEmbCols.join(", ")},
          episodes: $episodes, validAt: $validAt, invalidAt: $invalidAt,
          namespace: $namespace, createdAt: $createdAt, deletedAt: ''
        })`,
@@ -490,7 +578,9 @@ export class LadybugProvider implements GraphProvider {
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
     const embeddingStr = `[${embedding.join(",")}]`;
-    const indexName = getActiveDimension() === OLLAMA_DIM ? "memory_vec_idx" : "memory_vec_384";
+    const activeDim = getActiveDimension();
+    const dimInfo = activeDim ? this.dimensionRegistry.get(activeDim) : undefined;
+    const indexName = dimInfo?.memoryIndex ?? "memory_vec_idx";
     const result = await this.conn.query(
       `CALL QUERY_VECTOR_INDEX('Memory', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
@@ -533,7 +623,9 @@ export class LadybugProvider implements GraphProvider {
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
     const embeddingStr = `[${embedding.join(",")}]`;
-    const indexName = getActiveDimension() === OLLAMA_DIM ? "fact_vec_idx" : "fact_vec_384";
+    const activeDim = getActiveDimension();
+    const dimInfo = activeDim ? this.dimensionRegistry.get(activeDim) : undefined;
+    const indexName = dimInfo?.factIndex ?? "fact_vec_idx";
     const result = await this.conn.query(
       `CALL QUERY_VECTOR_INDEX('Fact', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
@@ -791,11 +883,16 @@ export class LadybugProvider implements GraphProvider {
     const auditMemoryId = randomUUID();
     const auditText = `Invalidated fact "${invalidatedEdge.fact}" because: ${reason}`;
 
-    const zeroEmb = this.zeroEmbeddingStr();
+    // Build zero embedding columns for audit memory
+    const auditEmbCols: string[] = [];
+    for (const [dim, info] of this.dimensionRegistry) {
+      auditEmbCols.push(`${info.memoryCol}: ${this.zeroEmbeddingStr(dim)}`);
+    }
     await this.executeQuery(
       `CREATE (m:Memory {
          id: $id, name: $name, text: $text, summary: $summary, category: $category,
-         namespace: $namespace, status: 'completed', error: '', embedding: ${zeroEmb},
+         namespace: $namespace, status: 'completed', error: '',
+         ${auditEmbCols.join(", ")},
          createdAt: $createdAt, deletedAt: ''
        })`,
       {
@@ -813,11 +910,15 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async storeMemoryOnly(memory: Memory): Promise<void> {
-    const zeroEmb = this.zeroEmbeddingStr();
+    const embCols: string[] = [];
+    for (const [dim, info] of this.dimensionRegistry) {
+      embCols.push(`${info.memoryCol}: ${this.zeroEmbeddingStr(dim)}`);
+    }
     await this.executeQuery(
       `CREATE (m:Memory {
          id: $id, name: $name, text: $text, summary: $summary, category: $category,
-         namespace: $namespace, status: $status, error: $error, embedding: ${zeroEmb},
+         namespace: $namespace, status: $status, error: $error,
+         ${embCols.join(", ")},
          createdAt: $createdAt, deletedAt: ''
        })`,
       {
@@ -1053,17 +1154,17 @@ export class LadybugProvider implements GraphProvider {
     );
   }
 
-  async getGraphData(
-    _namespace?: string,
-    _nodeLimit?: number,
-  ): Promise<GraphData> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async getGraphData(namespace?: string, nodeLimit?: number): Promise<GraphData> {
     return { nodes: [], links: [] };
   }
 
   async findMemoriesNeedingEmbedding(
-    dimension: 2560 | 384,
+    dimension: number,
   ): Promise<Memory[]> {
-    const col = dimension === 2560 ? "embedding" : "embedding384";
+    const info = this.dimensionRegistry.get(dimension);
+    if (!info) return [];
+    const col = info.memoryCol;
     // Zero-vector sentinel: first element is 0.0 (real embeddings never have exactly 0)
     const result = await this.conn.query(
       `MATCH (m:Memory)
@@ -1087,9 +1188,11 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async findEdgesNeedingEmbedding(
-    dimension: 2560 | 384,
+    dimension: number,
   ): Promise<Array<{ id: string; fact: string }>> {
-    const col = dimension === 2560 ? "factEmbedding" : "factEmbedding384";
+    const info = this.dimensionRegistry.get(dimension);
+    if (!info) return [];
+    const col = info.factCol;
     const result = await this.conn.query(
       `MATCH (f:Fact)
        WHERE f.deletedAt = '' AND f.${col}[1] = 0.0 AND f.text IS NOT NULL AND f.text <> ''
@@ -1104,31 +1207,43 @@ export class LadybugProvider implements GraphProvider {
 
   async updateMemoryEmbeddings(
     memoryId: string,
-    embedding2560: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
   ): Promise<void> {
-    const has2560 = !isZeroEmbedding(embedding2560);
-    const has384 = !isZeroEmbedding(embedding384);
-    if (!has2560 && !has384) return;
+    // Check if any embedding is real (non-zero)
+    let hasAny = false;
+    for (const [, vec] of embeddings) {
+      if (!isZeroEmbedding(vec)) { hasAny = true; break; }
+    }
+    if (!hasAny) return;
+
+    // Ensure dimensions exist in schema
+    for (const dim of embeddings.keys()) {
+      await this.ensureDimension(dim);
+    }
 
     // Read existing memory fields (including current embeddings to preserve)
-    const result = await this.conn.query(
+    const embReturnCols = [...this.dimensionRegistry.entries()]
+      .map(([, info]) => `m.${info.memoryCol} as ${info.memoryCol}`)
+      .join(", ");
+    const result = await this.executeQuery(
       `MATCH (m:Memory {id: $id, deletedAt: ''})
        RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
               m.category as category, m.namespace as namespace, m.status as status,
-              m.error as error, m.embedding as embedding, m.embedding384 as embedding384,
-              m.createdAt as createdAt`,
+              m.error as error, ${embReturnCols}, m.createdAt as createdAt`,
       { id: memoryId },
     );
     const rows = await result.getAll();
     if (rows.length === 0) return;
     const m = rows[0]!;
 
-    // Use new embedding if real, otherwise preserve existing
-    const final2560 = has2560 ? embedding2560 : (m.embedding as number[]);
-    const final384 = has384 ? embedding384 : (m.embedding384 as number[]);
-    const emb2560Str = `[${final2560.join(",")}]`;
-    const emb384Str = `[${final384.join(",")}]`;
+    // Build embedding column strings, preserving existing when new is zero
+    const embCols: string[] = [];
+    for (const [dim, info] of this.dimensionRegistry) {
+      const newVec = embeddings.get(dim);
+      const hasNew = newVec && !isZeroEmbedding(newVec);
+      const finalVec = hasNew ? newVec : (m[info.memoryCol] as number[]);
+      embCols.push(`${info.memoryCol}: [${finalVec.join(",")}]`);
+    }
 
     // Delete + recreate (LadybugDB can't SET vector-indexed columns)
     await this.executeQuery(
@@ -1139,7 +1254,7 @@ export class LadybugProvider implements GraphProvider {
       `CREATE (m:Memory {
          id: $id, name: $name, text: $text, summary: $summary,
          category: $category, namespace: $namespace, status: $status, error: $error,
-         embedding: ${emb2560Str}, embedding384: ${emb384Str},
+         ${embCols.join(", ")},
          createdAt: $createdAt, deletedAt: ''
        })`,
       {
@@ -1158,21 +1273,31 @@ export class LadybugProvider implements GraphProvider {
 
   async updateFactEmbeddings(
     factId: string,
-    embedding2560: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
   ): Promise<void> {
-    const has2560 = !isZeroEmbedding(embedding2560);
-    const has384 = !isZeroEmbedding(embedding384);
-    if (!has2560 && !has384) return;
+    // Check if any embedding is real (non-zero)
+    let hasAny = false;
+    for (const [, vec] of embeddings) {
+      if (!isZeroEmbedding(vec)) { hasAny = true; break; }
+    }
+    if (!hasAny) return;
+
+    // Ensure dimensions exist in schema
+    for (const dim of embeddings.keys()) {
+      await this.ensureDimension(dim);
+    }
 
     // Read existing fact fields (including current embeddings to preserve)
-    const result = await this.conn.query(
+    const embReturnCols = [...this.dimensionRegistry.entries()]
+      .map(([, info]) => `f.${info.factCol} as ${info.factCol}`)
+      .join(", ");
+    const result = await this.executeQuery(
       `MATCH (f:Fact {id: $id, deletedAt: ''})
        RETURN f.id as id, f.text as text, f.relationType as relationType,
               f.sourceUuid as sourceUuid, f.targetUuid as targetUuid,
               f.sentiment as sentiment, f.confidence as confidence,
               f.confidenceReason as confidenceReason, f.episodes as episodes,
-              f.factEmbedding as factEmbedding, f.factEmbedding384 as factEmbedding384,
+              ${embReturnCols},
               f.validAt as validAt, f.invalidAt as invalidAt,
               f.namespace as namespace, f.createdAt as createdAt`,
       { id: factId },
@@ -1181,11 +1306,14 @@ export class LadybugProvider implements GraphProvider {
     if (rows.length === 0) return;
     const f = rows[0]!;
 
-    // Use new embedding if real, otherwise preserve existing
-    const final2560 = has2560 ? embedding2560 : (f.factEmbedding as number[]);
-    const final384 = has384 ? embedding384 : (f.factEmbedding384 as number[]);
-    const emb2560Str = `[${final2560.join(",")}]`;
-    const emb384Str = `[${final384.join(",")}]`;
+    // Build embedding column strings, preserving existing when new is zero
+    const embCols: string[] = [];
+    for (const [dim, info] of this.dimensionRegistry) {
+      const newVec = embeddings.get(dim);
+      const hasNew = newVec && !isZeroEmbedding(newVec);
+      const finalVec = hasNew ? newVec : (f[info.factCol] as number[]);
+      embCols.push(`${info.factCol}: [${finalVec.join(",")}]`);
+    }
 
     // Delete + recreate (LadybugDB can't SET vector-indexed columns)
     await this.executeQuery(
@@ -1196,8 +1324,8 @@ export class LadybugProvider implements GraphProvider {
       `CREATE (f:Fact {
          id: $id, text: $text, relationType: $relationType, sourceUuid: $sourceUuid,
          targetUuid: $targetUuid, sentiment: $sentiment, confidence: $confidence,
-         confidenceReason: $confidenceReason, factEmbedding: ${emb2560Str},
-         factEmbedding384: ${emb384Str},
+         confidenceReason: $confidenceReason,
+         ${embCols.join(", ")},
          episodes: $episodes, validAt: $validAt, invalidAt: $invalidAt,
          namespace: $namespace, createdAt: $createdAt, deletedAt: ''
        })`,

@@ -30,6 +30,48 @@ interface SearchResult {
   meta?: string;
 }
 
+function sentimentLabel(s: number) {
+  if (s > 0.3) return "positive";
+  if (s < -0.3) return "negative";
+  return "neutral";
+}
+
+function mapSearchResults(result: { memories: Array<{ id: string; name?: string; summary?: string; createdAt?: string }>; edges: Array<{ id: string; fact: string; sourceEntity: string; relationType: string; targetEntity: string; sentiment: number }>; entities: Array<{ name: string; type?: string; description?: string }> }): SearchResult[] {
+  const allResults: SearchResult[] = [];
+
+  for (const m of result.memories) {
+    allResults.push({
+      id: m.id,
+      type: "memory",
+      title: m.name || "Untitled Memory",
+      subtitle: m.summary ?? undefined,
+      meta: m.createdAt ? new Date(m.createdAt).toLocaleDateString() : undefined,
+    });
+  }
+
+  for (const e of result.edges) {
+    allResults.push({
+      id: e.id,
+      type: "edge",
+      title: e.fact,
+      subtitle: `${e.sourceEntity} → ${e.relationType} → ${e.targetEntity}`,
+      meta: sentimentLabel(e.sentiment),
+    });
+  }
+
+  for (const e of result.entities) {
+    allResults.push({
+      id: e.name,
+      type: "entity",
+      title: e.name,
+      subtitle: e.description ?? undefined,
+      meta: e.type ?? undefined,
+    });
+  }
+
+  return allResults;
+}
+
 type PaletteMode = "search" | "add";
 
 interface CommandPaletteProps {
@@ -126,42 +168,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
         data: { query: searchQuery, limit: 10 },
       });
 
-      const allResults: SearchResult[] = [];
-
-      // Add memories
-      for (const m of result.memories) {
-        allResults.push({
-          id: m.id,
-          type: "memory",
-          title: m.name || "Untitled Memory",
-          subtitle: m.summary ?? undefined,
-          meta: m.createdAt
-            ? new Date(m.createdAt).toLocaleDateString()
-            : undefined,
-        });
-      }
-
-      // Add edges (facts as relationships)
-      for (const e of result.edges) {
-        allResults.push({
-          id: e.id,
-          type: "edge",
-          title: e.fact,
-          subtitle: `${e.sourceEntity} → ${e.relationType} → ${e.targetEntity}`,
-          meta: e.sentiment > 0.3 ? "positive" : e.sentiment < -0.3 ? "negative" : "neutral",
-        });
-      }
-
-      // Add entities
-      for (const e of result.entities) {
-        allResults.push({
-          id: e.name, // Entities use name as ID
-          type: "entity",
-          title: e.name,
-          subtitle: e.description ?? undefined,
-          meta: e.type ?? undefined,
-        });
-      }
+      const allResults = mapSearchResults(result);
 
       // If no results, ask LLM
       if (allResults.length === 0) {

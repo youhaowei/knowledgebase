@@ -85,7 +85,8 @@ function formatEdge(e: { sourceEntityName: string; targetEntityName: string; rel
 }
 
 function formatEntity(e: { name: string; type: string; description?: string }) {
-  return `  ${e.name} (${e.type})${e.description ? ` — ${e.description}` : ""}`;
+  const desc = e.description ? ` — ${e.description}` : "";
+  return `  ${e.name} (${e.type})${desc}`;
 }
 
 // --- Command handlers (throw UsageError instead of process.exit) ---
@@ -164,7 +165,8 @@ async function handleForget(ctx: CmdContext) {
   const name = ctx.positional[1];
   if (!name) throw new UsageError("Usage: kb forget <name> --ns <namespace>");
   const result = await ops.forget(name, ctx.namespace);
-  out(ctx, ctx.json ? result : result.deleted ? `Deleted "${name}"` : `Not found: ${result.reason}`);
+  const msg = result.deleted ? `Deleted "${name}"` : `Not found: ${result.reason}`;
+  out(ctx, ctx.json ? result : msg);
 }
 
 async function handleForgetEdge(ctx: CmdContext) {
@@ -172,7 +174,8 @@ async function handleForgetEdge(ctx: CmdContext) {
   const reason = ctx.positional[2];
   if (!edgeId || !reason) throw new UsageError('Usage: kb forget-edge <edgeId> "<reason>"');
   const result = await ops.forgetEdge(edgeId, reason, ctx.namespace);
-  out(ctx, ctx.json ? result : result.invalidatedEdge ? `Invalidated edge ${edgeId}` : `Edge not found: ${edgeId}`);
+  const msg = result.invalidatedEdge ? `Invalidated edge ${edgeId}` : `Edge not found: ${edgeId}`;
+  out(ctx, ctx.json ? result : msg);
 }
 
 async function handleStats(ctx: CmdContext) {
@@ -262,7 +265,7 @@ async function repl() {
     }
 
     // Tokenize respecting quoted strings
-    const tokens = input.match(/(?:[^\s"]+|"[^"]*")/g)?.map(t => t.replace(/^"|"$/g, "")) ?? [];
+    const tokens = input.match(/(?:[^\s"]+|"[^"]*")/g)?.map(t => t.replace(/(?:^"|"$)/g, "")) ?? [];
     const parsed = parseArgs(tokens);
     // Inherit initial --namespace if not overridden in this command
     const ctx = ctxFrom(parsed, initialArgs);

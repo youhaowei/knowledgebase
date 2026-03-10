@@ -117,8 +117,7 @@ export async function stats(namespace = "default") {
 }
 
 export async function close() {
-  // Note: LadybugDB close() triggers a Bun segfault (native addon issue).
-  // Process exit handles cleanup, so we skip explicit close for now.
-  // TODO: re-enable when Bun fixes native addon cleanup
+  // LadybugDB close() triggers a Bun segfault (native addon issue).
+  // Process exit handles cleanup, so explicit close is skipped.
   // if (provider) await provider.close();
 }

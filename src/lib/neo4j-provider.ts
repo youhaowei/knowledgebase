@@ -9,6 +9,7 @@ import type {
   EntityFilter,
   EdgeFilter,
   MemoryFilter,
+  EmbeddingMap,
 } from "../types.js";
 import type {
   GraphProvider,
@@ -20,12 +21,30 @@ import type {
   Stats,
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
-import { getActiveDimension, OLLAMA_DIM, FALLBACK_DIM, isZeroEmbedding } from "./embedder.js";
-
-const ZERO_EMBEDDING_384 = new Array(FALLBACK_DIM).fill(0);
+import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
 
 export class Neo4jProvider implements GraphProvider {
   private driver: Driver;
+
+  /** Maps dimension → property/index names for Memory nodes and RELATES_TO rels */
+  private dimensionRegistry = new Map<number, {
+    memoryProp: string;
+    factProp: string;
+    memoryIndex: string;
+    factIndex: string;
+  }>();
+
+  /** Known dimensions registered at init time (backward compat) */
+  private static readonly KNOWN_DIMENSIONS: Array<{
+    dim: number;
+    memoryProp: string;
+    factProp: string;
+    memoryIndex: string;
+    factIndex: string;
+  }> = [
+    { dim: 2560, memoryProp: "embedding", factProp: "factEmbedding", memoryIndex: "memory_embedding", factIndex: "edge_factEmbedding" },
+    { dim: 384, memoryProp: "embedding384", factProp: "factEmbedding384", memoryIndex: "memory_embedding_384", factIndex: "edge_factEmbedding_384" },
+  ];
 
   constructor() {
     this.driver = neo4j.driver(
@@ -35,6 +54,45 @@ export class Neo4jProvider implements GraphProvider {
         process.env.NEO4J_PASSWORD ?? "password",
       ),
     );
+  }
+
+  /** Get dimension info from registry, throw if unknown */
+  private getDimInfo(dim: number) {
+    const info = this.dimensionRegistry.get(dim);
+    if (!info) throw new Error(`Unknown embedding dimension: ${dim}. Run ensureDimension() first.`);
+    return info;
+  }
+
+  /** Register a new dimension: create vector indexes if needed */
+  private async ensureDimension(dim: number, session: Session) {
+    if (this.dimensionRegistry.has(dim)) return;
+
+    const memoryProp = `embedding_${dim}`;
+    const factProp = `factEmbedding_${dim}`;
+    const memoryIndex = `memory_embedding_${dim}`;
+    const factIndex = `edge_factEmbedding_${dim}`;
+
+    await session.run(`
+      CREATE VECTOR INDEX ${memoryIndex} IF NOT EXISTS
+      FOR (m:Memory) ON (m.${memoryProp})
+      OPTIONS {indexConfig: {
+        \`vector.dimensions\`: ${dim},
+        \`vector.similarity_function\`: 'cosine'
+      }}
+    `);
+
+    await session.run(`
+      CREATE VECTOR INDEX ${factIndex} IF NOT EXISTS
+      FOR ()-[r:RELATES_TO]-()
+      ON (r.${factProp})
+      OPTIONS {indexConfig: {
+        \`vector.dimensions\`: ${dim},
+        \`vector.similarity_function\`: 'cosine'
+      }}
+    `);
+
+    this.dimensionRegistry.set(dim, { memoryProp, factProp, memoryIndex, factIndex });
+    console.error(`[neo4j] Registered new dimension: ${dim} (props: ${memoryProp}, ${factProp})`);
   }
 
   async init(): Promise<void> {
@@ -65,44 +123,34 @@ export class Neo4jProvider implements GraphProvider {
         FOR (m:Memory) ON (m.category)
       `);
 
-      await session.run(`
-        CREATE VECTOR INDEX memory_embedding IF NOT EXISTS
-        FOR (m:Memory) ON (m.embedding)
-        OPTIONS {indexConfig: {
-          \`vector.dimensions\`: 2560,
-          \`vector.similarity_function\`: 'cosine'
-        }}
-      `);
+      // Register known dimensions with their backward-compat property names
+      for (const known of Neo4jProvider.KNOWN_DIMENSIONS) {
+        await session.run(`
+          CREATE VECTOR INDEX ${known.memoryIndex} IF NOT EXISTS
+          FOR (m:Memory) ON (m.${known.memoryProp})
+          OPTIONS {indexConfig: {
+            \`vector.dimensions\`: ${known.dim},
+            \`vector.similarity_function\`: 'cosine'
+          }}
+        `);
 
-      await session.run(`
-        CREATE VECTOR INDEX edge_factEmbedding IF NOT EXISTS
-        FOR ()-[r:RELATES_TO]-()
-        ON (r.factEmbedding)
-        OPTIONS {indexConfig: {
-          \`vector.dimensions\`: 2560,
-          \`vector.similarity_function\`: 'cosine'
-        }}
-      `);
+        await session.run(`
+          CREATE VECTOR INDEX ${known.factIndex} IF NOT EXISTS
+          FOR ()-[r:RELATES_TO]-()
+          ON (r.${known.factProp})
+          OPTIONS {indexConfig: {
+            \`vector.dimensions\`: ${known.dim},
+            \`vector.similarity_function\`: 'cosine'
+          }}
+        `);
 
-      // 384-dim fallback vector indexes
-      await session.run(`
-        CREATE VECTOR INDEX memory_embedding_384 IF NOT EXISTS
-        FOR (m:Memory) ON (m.embedding384)
-        OPTIONS {indexConfig: {
-          \`vector.dimensions\`: 384,
-          \`vector.similarity_function\`: 'cosine'
-        }}
-      `);
-
-      await session.run(`
-        CREATE VECTOR INDEX edge_factEmbedding_384 IF NOT EXISTS
-        FOR ()-[r:RELATES_TO]-()
-        ON (r.factEmbedding384)
-        OPTIONS {indexConfig: {
-          \`vector.dimensions\`: 384,
-          \`vector.similarity_function\`: 'cosine'
-        }}
-      `);
+        this.dimensionRegistry.set(known.dim, {
+          memoryProp: known.memoryProp,
+          factProp: known.factProp,
+          memoryIndex: known.memoryIndex,
+          factIndex: known.factIndex,
+        });
+      }
 
       await session.run(`
         CREATE FULLTEXT INDEX edge_fact_text IF NOT EXISTS
@@ -139,14 +187,48 @@ export class Neo4jProvider implements GraphProvider {
     memory: Memory,
     entities: Entity[],
     edges: ExtractedEdge[],
-    memoryEmbedding: number[],
-    edgeEmbeddings: number[][],
-    memoryEmbedding384?: number[],
-    edgeEmbeddings384?: number[][],
+    memoryEmbeddings: EmbeddingMap,
+    edgeEmbeddings: EmbeddingMap[],
   ): Promise<void> {
     const session = this.driver.session();
     try {
+      // Auto-register any new dimensions
+      for (const dim of memoryEmbeddings.keys()) {
+        await this.ensureDimension(dim, session);
+      }
+      for (const edgeMap of edgeEmbeddings) {
+        for (const dim of edgeMap.keys()) {
+          await this.ensureDimension(dim, session);
+        }
+      }
+
       await session.executeWrite(async (tx) => {
+        // Build dynamic embedding SET clauses for memory
+        const memCreateSets: string[] = [];
+        const memMatchSets: string[] = [];
+        const memParams: Record<string, unknown> = {
+          id: memory.id,
+          name: memory.name,
+          text: memory.text,
+          summary: memory.summary,
+          category: memory.category ?? null,
+          namespace: memory.namespace,
+          status: memory.status ?? "completed",
+          error: memory.error ?? null,
+          createdAt: memory.createdAt.toISOString(),
+        };
+
+        for (const [dim, vec] of memoryEmbeddings) {
+          const { memoryProp } = this.getDimInfo(dim);
+          const paramName = `memEmb_${dim}`;
+          memCreateSets.push(`m.${memoryProp} = $${paramName}`);
+          memMatchSets.push(`m.${memoryProp} = $${paramName}`);
+          memParams[paramName] = vec;
+        }
+
+        const createEmbStr = memCreateSets.length ? ",\n            " + memCreateSets.join(",\n            ") : "";
+        const matchEmbStr = memMatchSets.length ? ",\n            " + memMatchSets.join(",\n            ") : "";
+
         await tx.run(
           `
           MERGE (m:Memory {id: $id})
@@ -158,31 +240,15 @@ export class Neo4jProvider implements GraphProvider {
             m.namespace = $namespace,
             m.status = $status,
             m.error = $error,
-            m.embedding = $embedding,
-            m.embedding384 = $embedding384,
-            m.createdAt = datetime($createdAt)
+            m.createdAt = datetime($createdAt)${createEmbStr}
           ON MATCH SET
             m.name = $name,
             m.summary = $summary,
             m.category = $category,
             m.status = $status,
-            m.error = $error,
-            m.embedding = $embedding,
-            m.embedding384 = $embedding384
+            m.error = $error${matchEmbStr}
           `,
-          {
-            id: memory.id,
-            name: memory.name,
-            text: memory.text,
-            summary: memory.summary,
-            category: memory.category ?? null,
-            namespace: memory.namespace,
-            status: memory.status ?? "completed",
-            error: memory.error ?? null,
-            embedding: memoryEmbedding,
-            embedding384: memoryEmbedding384 ?? ZERO_EMBEDDING_384,
-            createdAt: memory.createdAt.toISOString(),
-          },
+          memParams,
         );
 
         for (const entity of entities) {
@@ -205,13 +271,13 @@ export class Neo4jProvider implements GraphProvider {
           await tx.run(
             `
             MERGE (e:Entity {uuid: $uuid})
-            ON CREATE SET 
+            ON CREATE SET
               e.name = $name,
               e.type = $type,
               e.description = $description,
               e.namespace = $namespace,
               e.scope = $scope
-            ON MATCH SET 
+            ON MATCH SET
               e.description = COALESCE($description, e.description)
             `,
             {
@@ -226,69 +292,86 @@ export class Neo4jProvider implements GraphProvider {
         }
 
         for (let i = 0; i < edges.length; i++) {
-          const edge = edges[i]!;
-          const embedding = edgeEmbeddings[i] ?? [];
-          const embedding384 = edgeEmbeddings384?.[i] ?? ZERO_EMBEDDING_384;
-
-          const sourceEntity = entities[edge.sourceIndex];
-          const targetEntity = entities[edge.targetIndex];
-          if (!sourceEntity || !targetEntity) {
-            console.warn(
-              `Invalid edge indices: ${edge.sourceIndex} -> ${edge.targetIndex} for entities length ${entities.length}`,
-            );
-            continue;
-          }
-
-          const edgeId = randomUUID();
-          const sourceUuid = entities[edge.sourceIndex]?.uuid;
-          const targetUuid = entities[edge.targetIndex]?.uuid;
-
-          await tx.run(
-            `
-            MATCH (source:Entity)
-            WHERE (source.uuid = $sourceUuid OR (source.name = $sourceName AND source.namespace = $namespace))
-            MATCH (target:Entity)
-            WHERE (target.uuid = $targetUuid OR (target.name = $targetName AND target.namespace = $namespace))
-            MERGE (source)-[r:RELATES_TO {relationType: $relationType}]->(target)
-            ON CREATE SET
-              r.id = $id,
-              r.fact = $fact,
-              r.sentiment = $sentiment,
-              r.confidence = $confidence,
-              r.confidenceReason = $confidenceReason,
-              r.factEmbedding = $embedding,
-              r.factEmbedding384 = $embedding384,
-              r.episodes = [$memoryId],
-              r.validAt = CASE WHEN $validAt IS NOT NULL THEN datetime($validAt) ELSE null END,
-              r.invalidAt = null,
-              r.createdAt = datetime()
-            ON MATCH SET
-              r.episodes = r.episodes + $memoryId,
-              r.fact = CASE WHEN size($fact) > size(r.fact) THEN $fact ELSE r.fact END
-            `,
-            {
-              sourceUuid: sourceUuid ?? null,
-              sourceName: sourceEntity.name,
-              targetUuid: targetUuid ?? null,
-              targetName: targetEntity.name,
-              namespace: memory.namespace,
-              relationType: edge.relationType,
-              id: edgeId,
-              fact: edge.fact,
-              sentiment: edge.sentiment,
-              confidence: edge.confidence ?? 1,
-              confidenceReason: edge.confidenceReason ?? null,
-              embedding,
-              embedding384,
-              memoryId: memory.id,
-              validAt: edge.validAt ?? null,
-            },
-          );
+          await this.storeEdge(tx, edges[i]!, edgeEmbeddings[i] ?? new Map(), entities, memory);
         }
       });
     } finally {
       await session.close();
     }
+  }
+
+  private async storeEdge(
+    tx: ManagedTransaction,
+    edge: ExtractedEdge,
+    edgeEmbMap: EmbeddingMap,
+    entities: Entity[],
+    memory: Memory,
+  ) {
+    const sourceEntity = entities[edge.sourceIndex];
+    const targetEntity = entities[edge.targetIndex];
+    if (!sourceEntity || !targetEntity) {
+      console.warn(
+        `Invalid edge indices: ${edge.sourceIndex} -> ${edge.targetIndex} for entities length ${entities.length}`,
+      );
+      return;
+    }
+
+    const edgeId = randomUUID();
+
+    // Build dynamic embedding clauses for edge
+    const edgeCreateSets: string[] = [];
+    const edgeMatchSets: string[] = [];
+    const edgeParams: Record<string, unknown> = {
+      sourceUuid: sourceEntity.uuid ?? null,
+      sourceName: sourceEntity.name,
+      targetUuid: targetEntity.uuid ?? null,
+      targetName: targetEntity.name,
+      namespace: memory.namespace,
+      relationType: edge.relationType,
+      id: edgeId,
+      fact: edge.fact,
+      sentiment: edge.sentiment,
+      confidence: edge.confidence ?? 1,
+      confidenceReason: edge.confidenceReason ?? null,
+      memoryId: memory.id,
+      validAt: edge.validAt ?? null,
+    };
+
+    for (const [dim, vec] of edgeEmbMap) {
+      const { factProp } = this.getDimInfo(dim);
+      const paramName = `edgeEmb_${dim}`;
+      edgeCreateSets.push(`r.${factProp} = $${paramName}`);
+      // Core bug fix: update embeddings when fact text changes (longer description found)
+      edgeMatchSets.push(`r.${factProp} = CASE WHEN size($fact) > size(r.fact) THEN $${paramName} ELSE r.${factProp} END`);
+      edgeParams[paramName] = vec;
+    }
+
+    const edgeCreateEmbStr = edgeCreateSets.length ? ",\n              " + edgeCreateSets.join(",\n              ") : "";
+    const edgeMatchEmbStr = edgeMatchSets.length ? ",\n              " + edgeMatchSets.join(",\n              ") : "";
+
+    await tx.run(
+      `
+      MATCH (source:Entity)
+      WHERE (source.uuid = $sourceUuid OR (source.name = $sourceName AND source.namespace = $namespace))
+      MATCH (target:Entity)
+      WHERE (target.uuid = $targetUuid OR (target.name = $targetName AND target.namespace = $namespace))
+      MERGE (source)-[r:RELATES_TO {relationType: $relationType}]->(target)
+      ON CREATE SET
+        r.id = $id,
+        r.fact = $fact,
+        r.sentiment = $sentiment,
+        r.confidence = $confidence,
+        r.confidenceReason = $confidenceReason,
+        r.episodes = [$memoryId],
+        r.validAt = CASE WHEN $validAt IS NOT NULL THEN datetime($validAt) ELSE null END,
+        r.invalidAt = null,
+        r.createdAt = datetime()${edgeCreateEmbStr}
+      ON MATCH SET
+        r.episodes = r.episodes + $memoryId,
+        r.fact = CASE WHEN size($fact) > size(r.fact) THEN $fact ELSE r.fact END${edgeMatchEmbStr}
+      `,
+      edgeParams,
+    );
   }
 
   async search(
@@ -300,7 +383,8 @@ export class Neo4jProvider implements GraphProvider {
     try {
       let memories: Memory[] = [];
       if (embedding.length > 0) {
-        const memIndexName = getActiveDimension() === OLLAMA_DIM ? "memory_embedding" : "memory_embedding_384";
+        const activeDim = getActiveDimension();
+        const memIndexName = activeDim ? this.getDimInfo(activeDim).memoryIndex : "memory_embedding";
         const memoryResult = await session.run(
         `
         CALL db.index.vector.queryNodes('${memIndexName}', $limit, $embedding)
@@ -394,7 +478,8 @@ export class Neo4jProvider implements GraphProvider {
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
-      const vsIndexName = getActiveDimension() === OLLAMA_DIM ? "memory_embedding" : "memory_embedding_384";
+      const activeDim = getActiveDimension();
+      const vsIndexName = activeDim ? this.getDimInfo(activeDim).memoryIndex : "memory_embedding";
       const result = await session.run(
         `
         CALL db.index.vector.queryNodes('${vsIndexName}', $limit, $embedding)
@@ -456,7 +541,8 @@ export class Neo4jProvider implements GraphProvider {
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
-      const edgeIndexName = getActiveDimension() === OLLAMA_DIM ? "edge_factEmbedding" : "edge_factEmbedding_384";
+      const activeDim = getActiveDimension();
+      const edgeIndexName = activeDim ? this.getDimInfo(activeDim).factIndex : "edge_factEmbedding";
       const result = await session.run(
         `
         CALL db.index.vector.queryRelationships('${edgeIndexName}', $limit, $embedding)
@@ -1378,9 +1464,9 @@ export class Neo4jProvider implements GraphProvider {
   }
 
   async findMemoriesNeedingEmbedding(
-    dimension: 2560 | 384,
+    dimension: number,
   ): Promise<Memory[]> {
-    const col = dimension === 2560 ? "embedding" : "embedding384";
+    const col = this.getDimInfo(dimension).memoryProp;
     const session = this.driver.session();
     try {
       // IS NULL catches pre-migration nodes that lack the property entirely
@@ -1409,9 +1495,9 @@ export class Neo4jProvider implements GraphProvider {
   }
 
   async findEdgesNeedingEmbedding(
-    dimension: 2560 | 384,
+    dimension: number,
   ): Promise<Array<{ id: string; fact: string }>> {
-    const col = dimension === 2560 ? "factEmbedding" : "factEmbedding384";
+    const col = this.getDimInfo(dimension).factProp;
     const session = this.driver.session();
     try {
       const result = await session.run(
@@ -1431,25 +1517,23 @@ export class Neo4jProvider implements GraphProvider {
 
   async updateMemoryEmbeddings(
     memoryId: string,
-    embedding2560: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
   ): Promise<void> {
-    const has2560 = !isZeroEmbedding(embedding2560);
-    const has384 = !isZeroEmbedding(embedding384);
-    if (!has2560 && !has384) return;
+    const setClauses: string[] = [];
+    const params: Record<string, unknown> = { memoryId };
+
+    for (const [dim, vec] of embeddings) {
+      if (isZeroEmbedding(vec)) continue;
+      const { memoryProp } = this.getDimInfo(dim);
+      const paramName = `emb_${dim}`;
+      setClauses.push(`m.${memoryProp} = $${paramName}`);
+      params[paramName] = vec;
+    }
+
+    if (setClauses.length === 0) return;
 
     const session = this.driver.session();
     try {
-      const setClauses: string[] = [];
-      const params: Record<string, unknown> = { memoryId };
-      if (has2560) {
-        setClauses.push("m.embedding = $emb2560");
-        params.emb2560 = embedding2560;
-      }
-      if (has384) {
-        setClauses.push("m.embedding384 = $emb384");
-        params.emb384 = embedding384;
-      }
       await session.run(
         `MATCH (m:Memory {id: $memoryId})
          SET ${setClauses.join(", ")}`,
@@ -1462,25 +1546,23 @@ export class Neo4jProvider implements GraphProvider {
 
   async updateFactEmbeddings(
     factId: string,
-    embedding2560: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
   ): Promise<void> {
-    const has2560 = !isZeroEmbedding(embedding2560);
-    const has384 = !isZeroEmbedding(embedding384);
-    if (!has2560 && !has384) return;
+    const setClauses: string[] = [];
+    const params: Record<string, unknown> = { factId };
+
+    for (const [dim, vec] of embeddings) {
+      if (isZeroEmbedding(vec)) continue;
+      const { factProp } = this.getDimInfo(dim);
+      const paramName = `emb_${dim}`;
+      setClauses.push(`r.${factProp} = $${paramName}`);
+      params[paramName] = vec;
+    }
+
+    if (setClauses.length === 0) return;
 
     const session = this.driver.session();
     try {
-      const setClauses: string[] = [];
-      const params: Record<string, unknown> = { factId };
-      if (has2560) {
-        setClauses.push("r.factEmbedding = $emb2560");
-        params.emb2560 = embedding2560;
-      }
-      if (has384) {
-        setClauses.push("r.factEmbedding384 = $emb384");
-        params.emb384 = embedding384;
-      }
       await session.run(
         `MATCH (:Entity)-[r:RELATES_TO]->(:Entity)
          WHERE r.id = $factId

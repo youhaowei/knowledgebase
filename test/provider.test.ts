@@ -10,7 +10,7 @@ import { randomUUID } from "crypto";
 import type { GraphProvider } from "../src/lib/graph-provider";
 import { Neo4jProvider } from "../src/lib/neo4j-provider";
 import { LadybugProvider } from "../src/lib/ladybug-provider";
-import type { Memory, Entity, ExtractedEdge, StoredEntity } from "../src/types";
+import type { Memory, Entity, ExtractedEdge, StoredEntity, EmbeddingMap } from "../src/types";
 
 function makeTestEmbedding(seed: number): number[] {
   const embedding = new Array(2560).fill(0);
@@ -18,6 +18,14 @@ function makeTestEmbedding(seed: number): number[] {
     embedding[i] = Math.sin(seed * (i + 1)) * 0.5;
   }
   return embedding;
+}
+
+function makeTestEmbeddingMap(seed: number, dim = 2560): EmbeddingMap {
+  return new Map([[dim, makeTestEmbedding(seed)]]);
+}
+
+function makeTestEdgeEmbeddingMaps(seeds: number[], dim = 2560): EmbeddingMap[] {
+  return seeds.map((s) => makeTestEmbeddingMap(s, dim));
 }
 
 function createTestProvider(): GraphProvider {
@@ -103,15 +111,15 @@ describe("GraphProvider", () => {
         },
       ];
 
-      const memoryEmbedding = makeTestEmbedding(1);
-      const edgeEmbeddings = [makeTestEmbedding(2), makeTestEmbedding(3)];
+      const memoryEmbeddings = makeTestEmbeddingMap(1);
+      const edgeEmbeddingMaps = makeTestEdgeEmbeddingMaps([2, 3]);
 
       await provider.store(
         memory,
         entities,
         edges,
-        memoryEmbedding,
-        edgeEmbeddings,
+        memoryEmbeddings,
+        edgeEmbeddingMaps,
       );
 
       const result = await provider.get("Alice", testNamespace);
@@ -139,7 +147,7 @@ describe("GraphProvider", () => {
         globalMemory,
         entities,
         edges,
-        makeTestEmbedding(10),
+        makeTestEmbeddingMap(10),
         [],
       );
 
@@ -180,9 +188,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(400), [
-        makeTestEmbedding(401),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(400), makeTestEdgeEmbeddingMaps([401]));
 
       const result = await provider.get("DashFrame", testNamespace);
       expect(result.edges.length).toBeGreaterThanOrEqual(1);
@@ -218,9 +224,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(410), [
-        makeTestEmbedding(411),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(410), makeTestEdgeEmbeddingMaps([411]));
 
       const result = await provider.get("Bob", testNamespace);
       const storedEdge = result.edges.find((e) => e.relationType === "worksOn");
@@ -257,9 +261,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(20), [
-        makeTestEmbedding(21),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(20), makeTestEdgeEmbeddingMaps([21]));
 
       const result = await provider.search(
         makeTestEmbedding(20),
@@ -287,7 +289,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "Charlie Smith", type: "person" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(30), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(30), []);
 
       const result = await provider.search(
         makeTestEmbedding(30),
@@ -323,8 +325,8 @@ describe("GraphProvider", () => {
         createdAt: new Date(),
       };
 
-      await provider.store(memory1, [], [], makeTestEmbedding(40), []);
-      await provider.store(memory2, [], [], makeTestEmbedding(41), []);
+      await provider.store(memory1, [], [], makeTestEmbeddingMap(40), []);
+      await provider.store(memory2, [], [], makeTestEmbeddingMap(41), []);
 
       const results = await provider.vectorSearch(makeTestEmbedding(40), 10);
       expect(results.length).toBeGreaterThanOrEqual(1);
@@ -342,7 +344,7 @@ describe("GraphProvider", () => {
           status: "completed",
           createdAt: new Date(),
         };
-        await provider.store(memory, [], [], makeTestEmbedding(50 + i), []);
+        await provider.store(memory, [], [], makeTestEmbeddingMap(50 + i), []);
       }
 
       const results = await provider.vectorSearch(makeTestEmbedding(50), 2);
@@ -373,8 +375,8 @@ describe("GraphProvider", () => {
         createdAt: new Date(),
       };
 
-      await provider.store(memory1, [], [], makeTestEmbedding(60), []);
-      await provider.store(memory2, [], [], makeTestEmbedding(61), []);
+      await provider.store(memory1, [], [], makeTestEmbeddingMap(60), []);
+      await provider.store(memory2, [], [], makeTestEmbeddingMap(61), []);
 
       const results = await provider.vectorSearch(makeTestEmbedding(60), 10, {
         namespace: testNamespace,
@@ -418,9 +420,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(70), [
-        makeTestEmbedding(71),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(70), makeTestEdgeEmbeddingMaps([71]));
 
       const results = await provider.fullTextSearchEdges("infrastructure", 10);
       expect(results.length).toBeGreaterThanOrEqual(1);
@@ -479,11 +479,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(80), [
-        makeTestEmbedding(81),
-        makeTestEmbedding(82),
-        makeTestEmbedding(83),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(80), makeTestEdgeEmbeddingMaps([81, 82, 83]));
 
       const results = await provider.fullTextSearchEdges("coding", 2);
       expect(results.length).toBeLessThanOrEqual(2);
@@ -519,9 +515,7 @@ describe("GraphProvider", () => {
       ];
 
       const edgeEmbedding = makeTestEmbedding(300);
-      await provider.store(memory, entities, edges, makeTestEmbedding(299), [
-        edgeEmbedding,
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(299), [makeTestEmbeddingMap(300)]);
 
       const results = await provider.vectorSearchEdges(edgeEmbedding, 10);
       expect(results.length).toBeGreaterThanOrEqual(1);
@@ -558,9 +552,7 @@ describe("GraphProvider", () => {
       ];
 
       const edgeEmbedding = makeTestEmbedding(310);
-      await provider.store(memory, entities, edges, makeTestEmbedding(309), [
-        edgeEmbedding,
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(309), [makeTestEmbeddingMap(310)]);
 
       // Search with both matching text and similar embedding
       const result = await provider.search(edgeEmbedding, "Zustand state", 10);
@@ -619,15 +611,8 @@ describe("GraphProvider", () => {
           sentiment: 0.5,
         },
       ];
-      // Distant embedding — won't match vector search for embeddingA
-      const embeddingB = makeTestEmbedding(999);
-
-      await provider.store(memoryA, entitiesA, edgesA, makeTestEmbedding(319), [
-        embeddingA,
-      ]);
-      await provider.store(memoryB, entitiesB, edgesB, makeTestEmbedding(998), [
-        embeddingB,
-      ]);
+      await provider.store(memoryA, entitiesA, edgesA, makeTestEmbeddingMap(319), [makeTestEmbeddingMap(320)]);
+      await provider.store(memoryB, entitiesB, edgesB, makeTestEmbeddingMap(998), [makeTestEmbeddingMap(999)]);
 
       // Search with embeddingA and text that matches both edges
       const result = await provider.search(
@@ -677,9 +662,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(90), [
-        makeTestEmbedding(91),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(90), makeTestEdgeEmbeddingMaps([91]));
 
       const result = await provider.get("Eve", testNamespace);
       expect(result.entity).toBeDefined();
@@ -715,7 +698,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "Frank", type: "person" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(100), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(100), []);
 
       const results = await provider.findEntities({
         namespace: testNamespace,
@@ -772,9 +755,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(110), [
-        makeTestEmbedding(111),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(110), makeTestEdgeEmbeddingMaps([111]));
 
       const results = await provider.findEdges({ sourceEntityName: "Grace" });
       expect(results.length).toBeGreaterThanOrEqual(1);
@@ -795,7 +776,7 @@ describe("GraphProvider", () => {
         createdAt: new Date(),
       };
 
-      await provider.store(memory, [], [], makeTestEmbedding(120), []);
+      await provider.store(memory, [], [], makeTestEmbeddingMap(120), []);
 
       const results = await provider.findMemories({
         name: "Unique Memory Name 12345",
@@ -815,7 +796,7 @@ describe("GraphProvider", () => {
         createdAt: new Date(),
       };
 
-      await provider.store(memory, [], [], makeTestEmbedding(125), []);
+      await provider.store(memory, [], [], makeTestEmbeddingMap(125), []);
 
       const results = await provider.findMemories({ namespace: testNamespace });
       expect(results.length).toBeGreaterThanOrEqual(1);
@@ -840,7 +821,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "Henry", type: "person" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(130), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(130), []);
 
       const beforeForget = await provider.get("Henry", testNamespace);
       expect(beforeForget.entity).toBeDefined();
@@ -888,9 +869,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(140), [
-        makeTestEmbedding(141),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(140), makeTestEdgeEmbeddingMaps([141]));
 
       const edgesBefore = await provider.findEdges({
         sourceEntityName: "Ivan",
@@ -989,7 +968,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "StatsEntity", type: "concept" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(150), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(150), []);
 
       const stats = await provider.stats(testNamespace);
       expect(stats.memories).toBeGreaterThanOrEqual(1);
@@ -1013,7 +992,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "NSListEntity", type: "concept" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(160), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(160), []);
 
       const namespaces = await provider.listNamespaces();
       expect(Array.isArray(namespaces)).toBe(true);
@@ -1035,7 +1014,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "DeleteEntity", type: "concept" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(170), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(170), []);
 
       const beforeDelete = await provider.stats(testNamespace);
       expect(beforeDelete.memories).toBeGreaterThanOrEqual(1);
@@ -1074,9 +1053,7 @@ describe("GraphProvider", () => {
         },
       ];
 
-      await provider.store(memory, entities, edges, makeTestEmbedding(180), [
-        makeTestEmbedding(181),
-      ]);
+      await provider.store(memory, entities, edges, makeTestEmbeddingMap(180), makeTestEdgeEmbeddingMaps([181]));
 
       const graphData = await provider.getGraphData(testNamespace);
 
@@ -1104,7 +1081,7 @@ describe("GraphProvider", () => {
         createdAt: new Date(),
       };
 
-      await provider.store(memory, [], [], makeTestEmbedding(190), []);
+      await provider.store(memory, [], [], makeTestEmbeddingMap(190), []);
 
       const results = await provider.findMemories({ id: memory.id });
       expect(results.length).toBe(1);
@@ -1126,7 +1103,7 @@ describe("GraphProvider", () => {
         { uuid: randomUUID(), name: "田中太郎", type: "person" },
       ];
 
-      await provider.store(memory, entities, [], makeTestEmbedding(200), []);
+      await provider.store(memory, entities, [], makeTestEmbeddingMap(200), []);
 
       const result = await provider.get("田中太郎", testNamespace);
       expect(result.entity?.name).toBe("田中太郎");

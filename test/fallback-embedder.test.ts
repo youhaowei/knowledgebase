@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   embedFallback,
   isFallbackAvailable,
-  FALLBACK_DIM,
+  getFallbackDim,
 } from "../src/lib/fallback-embedder";
 
 describe("Fallback Embedder (transformers.js)", () => {
@@ -14,7 +14,11 @@ describe("Fallback Embedder (transformers.js)", () => {
   test("should generate 384-dim embeddings", { timeout: 30_000 }, async () => {
     const embedding = await embedFallback("Hello world");
     expect(Array.isArray(embedding)).toBe(true);
-    expect(embedding.length).toBe(FALLBACK_DIM);
+    expect(embedding.length).toBeGreaterThan(0);
+    // Dimension should be detected after first embedding
+    const dim = getFallbackDim();
+    expect(dim).not.toBeNull();
+    expect(embedding.length).toBe(dim);
 
     // Check if it's a real embedding (not all zeros)
     const available = await isFallbackAvailable();
@@ -58,7 +62,7 @@ describe("Fallback Embedder (transformers.js)", () => {
     ]);
 
     for (const result of results) {
-      expect(result.length).toBe(FALLBACK_DIM);
+      expect(result.length).toBeGreaterThan(0);
     }
   });
 });
