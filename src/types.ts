@@ -67,6 +67,17 @@ export const StoredEdge = z.object({
 });
 
 // =============================================================================
+// MEMORY CATEGORY TYPES
+// =============================================================================
+
+export const MemoryCategory = z.enum([
+  "preference",  // "I prefer Zustand over Redux"
+  "event",       // "Migrated to Bun on 2026-01-15"
+  "pattern",     // "Always run db:init after schema changes"
+  "general",     // Fallback for uncategorized
+]);
+
+// =============================================================================
 // EXTRACTION TYPES
 // =============================================================================
 
@@ -75,6 +86,7 @@ export const Extraction = z.object({
   entities: z.array(Entity),          // Extract entities first (indexed 0, 1, 2...)
   edges: z.array(ExtractedEdge),      // Edges reference entities by index
   summary: z.string(),
+  category: MemoryCategory.optional(), // LLM classifies; optional for resilience against non-compliance
 });
 
 // =============================================================================
@@ -86,7 +98,10 @@ export const Memory = z.object({
   name: z.string(),                    // User-provided or auto-generated from summary
   text: z.string(),                    // Original text
   summary: z.string(),                 // Claude-generated summary
+  category: MemoryCategory.optional(), // Classification (null for pre-category memories)
   namespace: z.string().default("default"),
+  status: z.enum(["pending", "processing", "completed", "failed"]).optional(),
+  error: z.string().optional(),
   createdAt: z.date(),
   createdBy: z.string().optional(),
 });
@@ -108,4 +123,5 @@ export type ExtractedEdge = z.infer<typeof ExtractedEdge>;
 export type StoredEdge = z.infer<typeof StoredEdge>;
 export type Extraction = z.infer<typeof Extraction>;
 export type Memory = z.infer<typeof Memory>;
+export type MemoryCategory = z.infer<typeof MemoryCategory>;
 export type Intent = z.infer<typeof Intent>;

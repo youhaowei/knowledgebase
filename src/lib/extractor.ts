@@ -93,8 +93,13 @@ const extractionSchema = {
       type: "string",
       description: "1-2 sentence summary of the key information",
     },
+    category: {
+      type: "string",
+      enum: ["preference", "event", "pattern", "general"],
+      description: "Memory category: preference (opinions/choices), event (time-specific happenings), pattern (recurring practices/rules), general (everything else)",
+    },
   },
-  required: ["entities", "edges", "summary"],
+  required: ["entities", "edges", "summary", "category"],
 };
 
 const extractionPrompt = (text: string) => `Extract structured knowledge from this text:
@@ -151,6 +156,12 @@ Your task:
    - {relationType: "rejected", sourceIndex: 0, targetIndex: 2, fact: "DashFrame rejected Redux due to boilerplate", sentiment: -0.8, confidence: 1.0, confidenceReason: "explicitly stated rejection"}
 
 3. **SUMMARY** - A concise 1-2 sentence summary.
+
+4. **CATEGORY** - Classify the overall memory into exactly one category:
+   - preference: Opinions, choices, likes/dislikes ("I prefer Zustand over Redux", "We chose Bun for speed")
+   - event: Time-specific happenings, milestones, incidents ("Migrated to Bun on Jan 15", "Deploy failed yesterday")
+   - pattern: Recurring practices, rules, how-tos ("Always run db:init after schema changes", "Use kebab-case for routes")
+   - general: Everything else that doesn't fit the above categories
 
 Return a JSON object matching the schema.`;
 

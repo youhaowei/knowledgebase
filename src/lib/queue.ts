@@ -66,8 +66,9 @@ export class Queue {
       try {
         // 1. Extract entities and edges using Claude/Gemini (Edge-as-Fact model)
         console.error(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
-        const { entities, edges, summary } = await extract(memory.text);
+        const { entities, edges, summary, category } = await extract(memory.text);
         memory.summary = summary;
+        memory.category = category ?? "general";
 
         console.error(`[Queue] Extracted ${entities.length} entities, ${edges.length} edges`);
 

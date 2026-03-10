@@ -93,6 +93,7 @@ export function createKnowledgebaseMcpServer() {
                     id: m.id,
                     name: m.name,
                     summary: m.summary,
+                    category: m.category,
                   })),
                   edges: result.edges.map((e) => ({
                     id: e.id,

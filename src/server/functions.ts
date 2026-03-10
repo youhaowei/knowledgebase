@@ -100,6 +100,7 @@ export const searchMemories = createServerFn()
         id: m.id,
         name: m.name,
         summary: m.summary,
+        category: m.category,
         createdAt: m.createdAt,
       })),
       edges: boostedEdges.map((e) => ({
@@ -151,6 +152,7 @@ export const getMemory = createServerFn()
             name: result.memory.name,
             text: result.memory.text,
             summary: result.memory.summary,
+            category: result.memory.category,
             createdAt: result.memory.createdAt,
           }
         : undefined,
@@ -440,6 +442,7 @@ export const streamingSearch = createServerFn()
           id: memory.id,
           name: memory.name,
           summary: memory.summary,
+          category: memory.category,
           createdAt: memory.createdAt,
         },
       };
