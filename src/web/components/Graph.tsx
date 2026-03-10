@@ -72,7 +72,6 @@ interface ForceLink extends LinkObject {
 }
 
 export function Graph({ nodes, links }: GraphProps) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
 

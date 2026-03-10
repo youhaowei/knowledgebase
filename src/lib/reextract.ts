@@ -17,6 +17,7 @@
 import { extract } from "./extractor";
 import { embedDual, checkAnyEmbedder } from "./embedder";
 import { createGraphProvider } from "./graph-provider";
+import type { EmbeddingMap } from "../types.js";
 
 async function reextractMemories(): Promise<void> {
   const { ollama, fallback, any } = await checkAnyEmbedder();
@@ -63,15 +64,12 @@ async function reextractMemories(): Promise<void> {
       const memEmb = await embedDual(memory.text);
 
       // Generate dual embeddings for each edge fact
-      const edgeEmbeddings: number[][] = [];
-      const edgeEmbeddings384: number[][] = [];
+      const edgeEmbeddings: EmbeddingMap[] = [];
       for (const edge of extraction.edges) {
         console.error(
           `         Embedding edge: ${edge.fact.slice(0, 50)}...`,
         );
-        const edgeEmb = await embedDual(edge.fact);
-        edgeEmbeddings.push(edgeEmb.ollama);
-        edgeEmbeddings384.push(edgeEmb.fallback);
+        edgeEmbeddings.push(await embedDual(edge.fact));
       }
 
       // Store via provider — handles entity MERGE, edge creation, embeddings
@@ -80,10 +78,8 @@ async function reextractMemories(): Promise<void> {
         memoryWithSummary,
         extraction.entities,
         extraction.edges,
-        memEmb.ollama,
+        memEmb,
         edgeEmbeddings,
-        memEmb.fallback,
-        edgeEmbeddings384,
       );
 
       console.error(

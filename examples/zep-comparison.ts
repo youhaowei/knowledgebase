@@ -56,29 +56,7 @@ async function zepRequest(endpoint: string, options: RequestInit = {}) {
   }
 }
 
-async function main() {
-  console.log("🔗 Connecting to Zep Cloud...\n");
-
-  // Step 1: Create a graph for our comparison
-  const graphId = `kb-compare-${Date.now()}`;
-
-  console.log(`📊 Creating graph: ${graphId}`);
-  try {
-    await zepRequest("/graph/create", {
-      method: "POST",
-      body: JSON.stringify({
-        graph_id: graphId,
-        name: "Knowledgebase Comparison",
-        description: "Comparing Zep/Graphiti extraction with our knowledgebase",
-      }),
-    });
-    console.log("   ✓ Graph created\n");
-  } catch (e) {
-    console.error("   ✗ Failed to create graph:", e);
-    return;
-  }
-
-  // Step 2: Add episodes (our sample data)
+async function addEpisodes(graphId: string) {
   console.log("📝 Adding episodes...");
   for (const episode of sampleEpisodes) {
     try {
@@ -96,12 +74,9 @@ async function main() {
       console.error(`   ✗ Failed to add ${episode.name}:`, e);
     }
   }
+}
 
-  console.log("\n⏳ Waiting for Zep to process episodes (45s)...");
-  console.log("   (Zep extracts entities, relations, and builds the graph)");
-  await new Promise((resolve) => setTimeout(resolve, 45000));
-
-  // Step 3: Retrieve and display the extracted nodes (entities)
+async function displayNodes(graphId: string) {
   console.log("\n🔍 Retrieving extracted nodes (entities)...\n");
   try {
     const nodes = await zepRequest(`/graph/node/graph/${graphId}`, {
@@ -122,8 +97,9 @@ async function main() {
   } catch (e) {
     console.error("Failed to get nodes:", e);
   }
+}
 
-  // Step 4: Retrieve and display the extracted edges (facts with relations)
+async function displayEdges(graphId: string) {
   console.log("\n🔗 Retrieving extracted edges (facts/relations)...\n");
   try {
     const edges = await zepRequest(`/graph/edge/graph/${graphId}`, {
@@ -136,7 +112,6 @@ async function main() {
       console.log("   (No edges extracted yet - processing may still be in progress)");
     }
     for (const edge of edgeList) {
-      // The edge.name is the relation type (e.g., "USES", "PREFERS", etc.)
       console.log(`  • [${edge.name}] ${edge.fact}`);
       if (edge.valid_at || edge.invalid_at) {
         console.log(
@@ -147,8 +122,9 @@ async function main() {
   } catch (e) {
     console.error("Failed to get edges:", e);
   }
+}
 
-  // Step 5: Test a search query
+async function testSearch(graphId: string) {
   console.log("\n🔎 Testing search: 'What does DashFrame use for state management?'\n");
   try {
     const searchResult = await zepRequest(`/graph/${graphId}/search`, {
@@ -172,8 +148,40 @@ async function main() {
   } catch (e) {
     console.error("Search failed:", e);
   }
+}
 
-  // Step 6: Compare with what our model would produce
+async function main() {
+  console.log("🔗 Connecting to Zep Cloud...\n");
+
+  const graphId = `kb-compare-${Date.now()}`;
+
+  console.log(`📊 Creating graph: ${graphId}`);
+  try {
+    await zepRequest("/graph/create", {
+      method: "POST",
+      body: JSON.stringify({
+        graph_id: graphId,
+        name: "Knowledgebase Comparison",
+        description: "Comparing Zep/Graphiti extraction with our knowledgebase",
+      }),
+    });
+    console.log("   ✓ Graph created\n");
+  } catch (e) {
+    console.error("   ✗ Failed to create graph:", e);
+    return;
+  }
+
+  await addEpisodes(graphId);
+
+  console.log("\n⏳ Waiting for Zep to process episodes (45s)...");
+  console.log("   (Zep extracts entities, relations, and builds the graph)");
+  await new Promise((resolve) => setTimeout(resolve, 45000));
+
+  await displayNodes(graphId);
+  await displayEdges(graphId);
+  await testSearch(graphId);
+
+  // Compare with what our model would produce
   console.log("\n" + "=".repeat(60));
   console.log("📊 COMPARISON: Zep/Graphiti vs Our Knowledgebase Model");
   console.log("=".repeat(60));

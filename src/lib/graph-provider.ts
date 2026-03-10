@@ -7,6 +7,7 @@ import type {
   EntityFilter,
   EdgeFilter,
   MemoryFilter,
+  EmbeddingMap,
 } from "../types.js";
 import { Neo4jProvider } from "./neo4j-provider.js";
 import { LadybugProvider } from "./ladybug-provider.js";
@@ -66,10 +67,8 @@ export interface GraphProvider {
     memory: Memory,
     entities: Entity[],
     edges: ExtractedEdge[],
-    memoryEmbedding: number[],
-    edgeEmbeddings: number[][],
-    memoryEmbedding384?: number[],
-    edgeEmbeddings384?: number[][],
+    memoryEmbeddings: EmbeddingMap,
+    edgeEmbeddings: EmbeddingMap[],
   ): Promise<void>;
 
   search(
@@ -139,25 +138,23 @@ export interface GraphProvider {
   }>;
 
   /** Find memories where the embedding for the given dimension is all zeros */
-  findMemoriesNeedingEmbedding(dimension: 2560 | 384): Promise<Memory[]>;
+  findMemoriesNeedingEmbedding(dimension: number): Promise<Memory[]>;
 
   /** Find edges (facts) where the embedding for the given dimension is all zeros */
   findEdgesNeedingEmbedding(
-    dimension: 2560 | 384,
+    dimension: number,
   ): Promise<Array<{ id: string; fact: string }>>;
 
-  /** Update just the embeddings on a Memory node. Skips zero-vector values to preserve existing data. */
+  /** Update embeddings on a Memory node. Skips empty/zero values to preserve existing data. */
   updateMemoryEmbeddings(
     memoryId: string,
-    embedding2560: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
   ): Promise<void>;
 
-  /** Update just the embeddings on a Fact node (and relationship in Neo4j). Skips zero-vector values to preserve existing data. */
+  /** Update embeddings on a Fact/edge. Skips empty/zero values to preserve existing data. */
   updateFactEmbeddings(
     factId: string,
-    embedding2560: number[],
-    embedding384: number[],
+    embeddings: EmbeddingMap,
   ): Promise<void>;
 }
 

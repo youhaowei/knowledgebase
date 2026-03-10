@@ -314,6 +314,50 @@ export const forgetEdge = createServerFn({ method: "POST" })
 
 import { prompt } from "unifai";
 
+function edgeSentimentLabel(s: number) {
+  if (s > 0.3) return " (positive)";
+  if (s < -0.3) return " (negative)";
+  return "";
+}
+
+function formatEdges(edges: Array<{ sourceEntityName: string; relationType: string; targetEntityName: string; fact: string; sentiment: number }>) {
+  return edges.map((edge) => {
+    const sentiment = edgeSentimentLabel(edge.sentiment);
+    return `- ${edge.sourceEntityName} → ${edge.relationType} → ${edge.targetEntityName}: ${edge.fact}${sentiment}`;
+  });
+}
+
+function formatMemories(memories: Array<{ name?: string; summary?: string }>) {
+  return memories
+    .filter((m) => m.summary)
+    .map((m) => `- ${m.name || "Memory"}: ${m.summary}`);
+}
+
+function formatEntities(entities: Array<{ name: string; type: string; description?: string; summary?: string }>) {
+  return entities.map((e) => {
+    const desc = e.description ? ` - ${e.description}` : "";
+    const summary = e.summary ? ` (${e.summary})` : "";
+    return `- ${e.name} (${e.type})${desc}${summary}`;
+  });
+}
+
+function buildSearchContext(searchResult: { edges: Array<{ sourceEntityName: string; relationType: string; targetEntityName: string; fact: string; sentiment: number }>; memories: Array<{ name?: string; summary?: string }>; entities: Array<{ name: string; type: string; description?: string; summary?: string }> }) {
+  const sections: string[] = [];
+
+  const edgeLines = formatEdges(searchResult.edges);
+  if (edgeLines.length > 0) sections.push("**Relevant Facts (as relationships):**\n" + edgeLines.join("\n"));
+
+  const memLines = formatMemories(searchResult.memories);
+  if (memLines.length > 0) sections.push("**Related Memories:**\n" + memLines.join("\n"));
+
+  const entLines = formatEntities(searchResult.entities);
+  if (entLines.length > 0) sections.push("**Related Entities:**\n" + entLines.join("\n"));
+
+  return sections.length > 0
+    ? sections.join("\n\n")
+    : "No directly relevant information found in the knowledge base.";
+}
+
 /**
  * Ask LLM to answer a question using knowledge graph context
  *
@@ -332,46 +376,7 @@ export const askLLM = createServerFn()
     const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
     const searchResult = await graph.search(embedding, data.question, 5);
 
-    // Build context from search results
-    const contextParts: string[] = [];
-
-    if (searchResult.edges.length > 0) {
-      contextParts.push("**Relevant Facts (as relationships):**");
-      for (const edge of searchResult.edges) {
-        const sentiment =
-          edge.sentiment > 0.3
-            ? " (positive)"
-            : edge.sentiment < -0.3
-              ? " (negative)"
-              : "";
-        contextParts.push(
-          `- ${edge.sourceEntityName} → ${edge.relationType} → ${edge.targetEntityName}: ${edge.fact}${sentiment}`,
-        );
-      }
-    }
-
-    if (searchResult.memories.length > 0) {
-      contextParts.push("\n**Related Memories:**");
-      for (const memory of searchResult.memories) {
-        if (memory.summary) {
-          contextParts.push(`- ${memory.name || "Memory"}: ${memory.summary}`);
-        }
-      }
-    }
-
-    if (searchResult.entities.length > 0) {
-      contextParts.push("\n**Related Entities:**");
-      for (const entity of searchResult.entities) {
-        const desc = entity.description ? ` - ${entity.description}` : "";
-        const summary = entity.summary ? ` (${entity.summary})` : "";
-        contextParts.push(`- ${entity.name} (${entity.type})${desc}${summary}`);
-      }
-    }
-
-    const context =
-      contextParts.length > 0
-        ? contextParts.join("\n")
-        : "No directly relevant information found in the knowledge base.";
+    const context = buildSearchContext(searchResult);
 
     // Query LLM with context
     const result = await prompt("claude", `You are a helpful assistant with access to a personal knowledge base.
@@ -395,7 +400,7 @@ Instructions:
 
     return {
       answer: answer || "I couldn't generate an answer. Please try rephrasing your question.",
-      hasContext: contextParts.length > 0,
+      hasContext: searchResult.edges.length > 0 || searchResult.memories.length > 0 || searchResult.entities.length > 0,
       edgesUsed: searchResult.edges.length,
       memoriesUsed: searchResult.memories.length,
       entitiesUsed: searchResult.entities.length,

@@ -6,8 +6,6 @@ import {
   embedDual,
   getActiveDimension,
   checkAnyEmbedder,
-  OLLAMA_DIM,
-  FALLBACK_DIM,
 } from "../src/lib/embedder";
 
 describe("Embedder", () => {
@@ -26,7 +24,7 @@ describe("Embedder", () => {
 
     const embedding = await embed("Hello world");
     expect(Array.isArray(embedding)).toBe(true);
-    expect(embedding.length).toBe(OLLAMA_DIM);
+    expect(embedding.length).toBeGreaterThan(0);
     expect(typeof embedding[0]).toBe("number");
   });
 
@@ -37,23 +35,23 @@ describe("Embedder", () => {
     expect(result).toHaveProperty("source");
     expect(Array.isArray(result.embedding)).toBe(true);
     expect(result.embedding.length).toBe(result.dimension);
-    expect([OLLAMA_DIM, FALLBACK_DIM]).toContain(result.dimension);
+    expect(result.dimension).toBeGreaterThan(0);
     expect(["ollama", "fallback"]).toContain(result.source);
   });
 
   test("embedDual returns both dimensions", async () => {
     const result = await embedDual("dual test");
-    expect(result).toHaveProperty("ollama");
-    expect(result).toHaveProperty("fallback");
-    expect(Array.isArray(result.ollama)).toBe(true);
-    expect(Array.isArray(result.fallback)).toBe(true);
-    expect(result.ollama.length).toBe(OLLAMA_DIM);
-    expect(result.fallback.length).toBe(FALLBACK_DIM);
+    expect(result instanceof Map).toBe(true);
+    expect(result.size).toBeGreaterThan(0);
+    for (const [dim, vec] of result) {
+      expect(dim).toBeGreaterThan(0);
+      expect(Array.isArray(vec)).toBe(true);
+    }
   });
 
   test("getActiveDimension returns valid dimension", () => {
     const dim = getActiveDimension();
-    expect([OLLAMA_DIM, FALLBACK_DIM]).toContain(dim);
+    expect(dim === null || dim > 0).toBe(true);
   });
 
   test("checkAnyEmbedder returns structured result", async () => {

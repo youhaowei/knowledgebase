@@ -98,6 +98,13 @@ export const Memory = z.object({
 export const Intent = z.enum(["factual", "decision", "general"]);
 
 // =============================================================================
+// EMBEDDING TYPES
+// =============================================================================
+
+/** Dimension-agnostic embedding storage: dimension → vector */
+export type EmbeddingMap = Map<number, number[]>;
+
+// =============================================================================
 // TYPE EXPORTS
 // =============================================================================
 

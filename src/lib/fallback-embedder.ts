@@ -9,8 +9,7 @@
 import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 
 const MODEL_ID = "Snowflake/snowflake-arctic-embed-xs";
-const FALLBACK_DIM = 384;
-const ZERO_EMBEDDING = new Array(FALLBACK_DIM).fill(0);
+let fallbackDim: number | null = null;
 
 let pipeline: FeatureExtractionPipeline | null = null;
 let initPromise: Promise<FeatureExtractionPipeline | null> | null = null;
@@ -18,7 +17,10 @@ let initFailed = false;
 let initWarned = false;
 let embedWarned = false;
 
-export { FALLBACK_DIM };
+/** Get the detected fallback embedding dimension (null if not yet detected) */
+export function getFallbackDim(): number | null {
+  return fallbackDim;
+}
 
 async function loadPipeline(): Promise<FeatureExtractionPipeline | null> {
   try {
@@ -29,7 +31,7 @@ async function loadPipeline(): Promise<FeatureExtractionPipeline | null> {
       dtype: "fp32",
     });
     console.error(
-      `[fallback-embedder] Loaded ${MODEL_ID} (${FALLBACK_DIM}-dim)`,
+      `[fallback-embedder] Loaded ${MODEL_ID}`,
     );
     return pipe as FeatureExtractionPipeline;
   } catch (err) {
@@ -63,14 +65,19 @@ export async function isFallbackAvailable(): Promise<boolean> {
   return pipe !== null;
 }
 
-/** Generate a 384-dim embedding using transformers.js. Returns zero-vector on failure. */
+/** Generate an embedding using transformers.js. Returns empty array on failure. */
 export async function embedFallback(text: string): Promise<number[]> {
   const pipe = await ensurePipeline();
-  if (!pipe) return [...ZERO_EMBEDDING];
+  if (!pipe) return [];
 
   try {
     const output = await pipe(text, { pooling: "cls", normalize: true });
-    return Array.from(output.data as Float32Array);
+    const result = Array.from(output.data as Float32Array);
+    if (fallbackDim === null && result.length > 0) {
+      fallbackDim = result.length;
+      console.error(`[fallback-embedder] Detected dimension: ${fallbackDim}`);
+    }
+    return result;
   } catch (err) {
     if (!embedWarned) {
       console.warn(
@@ -78,6 +85,6 @@ export async function embedFallback(text: string): Promise<number[]> {
       );
       embedWarned = true;
     }
-    return [...ZERO_EMBEDDING];
+    return [];
   }
 }
