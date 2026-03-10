@@ -37,6 +37,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .test-ladybug
 memories.json
 .sisyphus/
+.ladybug
 .ladybug/
 .ladybug-*
 .lbug/
