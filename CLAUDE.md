@@ -100,6 +100,19 @@ User text → Queue → Claude extraction → Dual embeddings → GraphProvider 
 
 9. **Dual vector indexes** - Both 2560-dim (Ollama) and 384-dim (fallback) indexes coexist per node type. Ingestion populates both; search routes by active embedder. `getActiveDimension()` gates index selection.
 
+10. **Name-based dedup** - `addMemory()` checks for existing memory with same name+namespace before creating. Returns `{ existing: true }` if found. Used by retro integration to prevent duplicate findings.
+
+### Retro Integration
+
+cc-retro (`~/Projects/cc-retro`) auto-syncs findings to KB via `kb add --ns retro --name retro-{id}`:
+
+- **Sync flow**: `retro log` → `syncToKb()` → `kb add` (fire-and-forget, captures memory ID)
+- **Namespace**: All retro findings use `namespace="retro"` for isolation
+- **Dedup**: Same finding name (`retro-{id}`) won't create duplicate memories
+- **KB memory ID**: Stored in `findings.kb_memory_id` column for cross-reference
+- **Fallback**: If KB unavailable, finding still saved to SQLite — sync is best-effort
+- **Search helpers**: `src/lib/retro-search.ts` has `findSimilarFindings()` and `findRecurringPatterns()`
+
 ### Storage Backend
 
 Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implementations:
@@ -117,6 +130,7 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 | `src/lib/ladybug-provider.ts` | LadybugDB implementation (default) |
 | `src/lib/neo4j-provider.ts` | Neo4j implementation (optional) |
 | `src/lib/extractor.ts` | Claude/Gemini-powered entity/edge extraction |
+| `src/lib/retro-search.ts` | Retro-specific search: similarity dedup + recurring patterns |
 | `src/lib/embedder.ts` | Dual-mode embedding (Ollama 2560-dim + fallback 384-dim) |
 | `src/lib/fallback-embedder.ts` | HuggingFace transformers.js fallback (384-dim, zero-dependency) |
 | `src/lib/queue.ts` | Async processing pipeline |
