@@ -96,7 +96,10 @@ async function handleAdd(ctx: CmdContext) {
   if (!text) throw new UsageError("Usage: kb add <text> [--name <name>] [--ns <namespace>]");
   const name = ctx.flags["--name"];
   const result = await ops.addMemory(text, name, ctx.namespace);
-  out(ctx, ctx.json ? result : `Queued memory ${result.id}`);
+  const msg = result.existing
+    ? `Memory already exists: ${result.id}`
+    : `Queued memory ${result.id}`;
+  out(ctx, ctx.json ? result : msg);
 }
 
 async function handleSearch(ctx: CmdContext) {

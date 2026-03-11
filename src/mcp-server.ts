@@ -57,7 +57,9 @@ export function createKnowledgebaseMcpServer() {
               text: JSON.stringify({
                 success: true,
                 id: result.id,
-                message: "Memory queued for processing",
+                message: result.existing
+                  ? "Memory already exists with this name"
+                  : "Memory queued for processing",
               }),
             },
           ],
