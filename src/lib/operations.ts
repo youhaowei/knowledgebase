@@ -20,7 +20,8 @@ import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 let provider: GraphProvider;
 let queue: Queue;
 
-async function getProvider() {
+/** Shared provider singleton. Exported for modules that need direct provider access. */
+export async function getProvider() {
   if (!provider) {
     provider = await createGraphProvider();
     queue = new Queue(provider);
@@ -42,7 +43,17 @@ export async function addMemory(
   text: string,
   name?: string,
   namespace = "default",
-): Promise<{ id: string; queued: boolean }> {
+): Promise<{ id: string; queued: boolean; existing?: boolean }> {
+  // Dedup by exact name match within namespace.
+  // Uses CONTAINS query + post-filter because the provider doesn't support exact match.
+  // High limit (200) to handle prefix collisions (e.g., "retro-1" CONTAINS-matches "retro-10"..."retro-199").
+  if (name) {
+    const gp = await getProvider();
+    const candidates = await gp.findMemories({ name, namespace }, 200);
+    const exact = candidates.find((m) => m.name === name);
+    if (exact) return { id: exact.id, queued: false, existing: true };
+  }
+
   const q = await getQueue();
   const memory: Memory = {
     id: randomUUID(),
