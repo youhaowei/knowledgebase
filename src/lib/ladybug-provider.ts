@@ -1,5 +1,8 @@
 import { Database, Connection } from "lbug";
 import { randomUUID } from "crypto";
+import { homedir } from "os";
+import { join, dirname } from "path";
+import { mkdirSync } from "fs";
 import type {
   Memory,
   Entity,
@@ -29,7 +32,8 @@ export class LadybugProvider implements GraphProvider {
   private dataPath: string;
 
   constructor(dataPath?: string) {
-    this.dataPath = dataPath ?? process.env.LADYBUG_DATA_PATH ?? "./.ladybug";
+    this.dataPath = dataPath ?? process.env.LADYBUG_DATA_PATH ?? join(homedir(), ".kb", "ladybug");
+    mkdirSync(dirname(this.dataPath), { recursive: true });
     this.db = new Database(this.dataPath);
   }
 
