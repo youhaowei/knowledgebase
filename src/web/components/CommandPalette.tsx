@@ -254,7 +254,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
 
     setIsLoading(true);
     try {
-      await addMemory({ data: { text: addText, name: addName || undefined } });
+      await addMemory({ data: { text: addText, name: addName || undefined, namespace: activeNamespace ?? "default" } });
       setMessage({ type: "success", text: "Memory queued for processing" });
       setAddText("");
       setAddName("");

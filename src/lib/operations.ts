@@ -18,16 +18,18 @@ import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 
-let provider: GraphProvider;
+let providerPromise: Promise<GraphProvider> | null = null;
 let queue: Queue;
 
 /** Shared provider singleton. Exported for modules that need direct provider access. */
 export async function getProvider() {
-  if (!provider) {
-    provider = await createGraphProvider();
-    queue = new Queue(provider);
+  if (!providerPromise) {
+    providerPromise = createGraphProvider().then((p) => {
+      queue = new Queue(p);
+      return p;
+    });
   }
-  return provider;
+  return providerPromise;
 }
 
 async function getQueue() {
