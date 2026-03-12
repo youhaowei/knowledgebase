@@ -1,46 +1,20 @@
 /**
  * TanStack Start Server Functions
  *
- * Edge-as-Fact knowledge graph API using native server functions.
- * Provides:
- * - add: Save memories → extract entities + edges (mutation)
- * - search: Semantic search on memories AND edge facts (query + streaming)
- * - get: Exact lookup by name (query)
- * - forget: Remove entities (mutation)
- * - forgetEdge: Invalidate edge with reason (mutation) - creates audit trail
- * - graph: Full graph data for visualization (query)
- * - stats: Statistics (query)
+ * Thin wrappers around the operations layer (src/lib/operations.ts)
+ * that add input validation and response shaping for the Web UI.
  */
 
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { Graph } from "../lib/graph.js";
-import { Queue } from "../lib/queue.js";
-import { embedWithDimension, isZeroEmbedding } from "../lib/embedder.js";
-import { randomUUID } from "crypto";
-import { classifyIntent, boostEdgesByIntent } from "../lib/intents.js";
-
-// Shared instances (singleton pattern for server-side)
-const graph = new Graph();
-const queue = new Queue(graph);
+import * as ops from "../lib/operations.js";
 
 // ============================================================================
 // Queries (GET by default)
 // ============================================================================
 
-/**
- * Get all graph data for visualization with computed metrics
- *
- * Returns Entity nodes and RELATES_TO edges for visualization.
- *
- * Node types:
- * - Entity: people, orgs, projects, technologies, concepts
- *
- * Edge types:
- * - RELATES_TO: Facts as relationships between entities with relationType, sentiment
- */
 export const getGraphData = createServerFn().handler(async () => {
-  const result = await graph.getGraphData();
+  const result = await ops.getGraphData();
   return {
     nodes: result.nodes,
     edges: result.links.map((link) => ({
@@ -55,31 +29,10 @@ export const getGraphData = createServerFn().handler(async () => {
   };
 });
 
-/**
- * Get graph statistics
- *
- * Returns counts of:
- * - memories: Input episodes/text
- * - entities: Extracted named things (people, tech, etc.)
- * - edges: Facts as relationships between entities
- */
 export const getStats = createServerFn().handler(async () => {
-  const stats = await graph.stats();
-  return {
-    memories: stats.memories,
-    entities: stats.entities,
-    edges: stats.edges,
-  };
+  return ops.stats();
 });
 
-/**
- * Search the knowledge graph using semantic similarity
- *
- * Searches both memory embeddings AND edge fact text,
- * returning relevant memories, edges, and entities.
- *
- * Includes guidance for agents to ask users about contradictory/outdated results.
- */
 const searchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),
@@ -88,14 +41,10 @@ const searchSchema = z.object({
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
   .handler(async ({ data }) => {
-    const embResult = await embedWithDimension(data.query);
-    const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
-    const result = await graph.search(embedding, data.query, data.limit);
-    const intent = classifyIntent(data.query);
-    const boostedEdges = boostEdgesByIntent(result.edges, intent);
+    const result = await ops.search(data.query, undefined, data.limit);
 
     return {
-      intent,
+      intent: result.intent,
       memories: result.memories.map((m) => ({
         id: m.id,
         name: m.name,
@@ -103,7 +52,7 @@ export const searchMemories = createServerFn()
         category: m.category,
         createdAt: m.createdAt,
       })),
-      edges: boostedEdges.map((e) => ({
+      edges: result.edges.map((e) => ({
         id: e.id,
         sourceEntity: e.sourceEntityName,
         targetEntity: e.targetEntityName,
@@ -121,17 +70,10 @@ export const searchMemories = createServerFn()
         description: e.description,
         summary: e.summary,
       })),
-      guidance:
-        "If any of these facts appear contradictory or outdated, please ask the user whether to invalidate them using the forget tool with a reason.",
+      guidance: result.guidance,
     };
   });
 
-/**
- * Get a memory or entity by exact name
- *
- * If name matches a Memory, returns the memory and all edges extracted from it.
- * If name matches an Entity, returns the entity and all edges involving it.
- */
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
 });
@@ -139,7 +81,7 @@ const getMemorySchema = z.object({
 export const getMemory = createServerFn()
   .inputValidator((data: unknown) => getMemorySchema.parse(data))
   .handler(async ({ data }) => {
-    const result = await graph.get(data.name);
+    const result = await ops.getByName(data.name);
 
     if (!result.memory && !result.entity) {
       throw new Error(`Nothing found with name "${data.name}"`);
@@ -180,33 +122,24 @@ export const getMemory = createServerFn()
     };
   });
 
-/**
- * Health check endpoint
- */
 export const getHealth = createServerFn().handler(async () => {
+  const pending = await ops.getQueueStatus();
   return {
     status: "ok",
     timestamp: new Date().toISOString(),
-    queuePending: queue.pending(),
+    queuePending: pending,
   };
 });
 
-/**
- * Get queue status
- */
 export const getQueueStatus = createServerFn().handler(async () => {
-  return {
-    pending: queue.pending(),
-  };
+  const pending = await ops.getQueueStatus();
+  return { pending };
 });
 
 // ============================================================================
 // Mutations (POST)
 // ============================================================================
 
-/**
- * Add a new memory to the knowledge graph
- */
 const addMemorySchema = z.object({
   text: z.string().min(1, "Text is required"),
   name: z.string().optional(),
@@ -216,70 +149,39 @@ const addMemorySchema = z.object({
 export const addMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => addMemorySchema.parse(data))
   .handler(async ({ data }) => {
-    const memory = {
-      id: randomUUID(),
-      name: data.name ?? "",
-      text: data.text,
-      summary: "",
-      namespace: data.namespace,
-      createdAt: new Date(),
-    };
-
-    // Queue for async processing (fire and forget)
-    queue.add(memory).catch((error) => {
-      console.error("Queue processing error:", error);
-    });
-
-    const pending = queue.pending(memory.namespace);
+    const result = await ops.addMemory(data.text, data.name, data.namespace);
+    const pending = await ops.getQueueStatus(data.namespace);
     const pendingInfo = pending > 0 ? ` (${pending} pending)` : "";
 
     return {
       success: true,
-      message: `Memory queued for processing${pendingInfo}`,
-      memoryId: memory.id,
+      message: result.existing
+        ? `Memory already exists`
+        : `Memory queued for processing${pendingInfo}`,
+      memoryId: result.id,
     };
   });
 
-/**
- * Remove a memory or entity by name
- *
- * If a Memory is deleted, edges stay but lose provenance from this memory.
- * If an Entity is deleted, all edges involving it are also deleted.
- */
 const forgetMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
+  namespace: z.string().default("default"),
 });
 
 export const forgetMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => forgetMemorySchema.parse(data))
   .handler(async ({ data }) => {
-    const result = await graph.forget(data.name);
+    const result = await ops.forget(data.name, data.namespace);
 
-    if (!result.deletedMemory && !result.deletedEntity) {
+    if (!result.deleted) {
       throw new Error(`Nothing found with name "${data.name}"`);
     }
 
-    const deleted = [];
-    if (result.deletedMemory) deleted.push("memory");
-    if (result.deletedEntity) deleted.push("entity");
-
     return {
       success: true,
-      message: `Removed ${deleted.join(" and ")} "${data.name}"`,
-      deletedMemory: result.deletedMemory,
-      deletedEntity: result.deletedEntity,
+      message: `Removed "${data.name}"`,
     };
   });
 
-/**
- * Invalidate an edge (fact) with reason
- *
- * This creates an audit trail by:
- * 1. Setting invalidAt on the edge (soft delete)
- * 2. Creating an audit Memory recording the decision and reason
- *
- * Use this when a fact is contradictory or outdated.
- */
 const forgetEdgeSchema = z.object({
   edgeId: z.string().min(1, "Edge ID is required"),
   reason: z.string().min(1, "Reason is required for audit trail"),
@@ -289,7 +191,7 @@ const forgetEdgeSchema = z.object({
 export const forgetEdge = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => forgetEdgeSchema.parse(data))
   .handler(async ({ data }) => {
-    const result = await graph.forgetEdge(data.edgeId, data.reason, data.namespace);
+    const result = await ops.forgetEdge(data.edgeId, data.reason, data.namespace);
 
     if (!result.invalidatedEdge) {
       throw new Error(`Edge not found: "${data.edgeId}"`);
@@ -311,7 +213,7 @@ export const forgetEdge = createServerFn({ method: "POST" })
   });
 
 // ============================================================================
-// LLM-Powered Answer (when no direct results found)
+// LLM-Powered Answer
 // ============================================================================
 
 import { prompt } from "unifai";
@@ -322,37 +224,25 @@ function edgeSentimentLabel(s: number) {
   return "";
 }
 
-function formatEdges(edges: Array<{ sourceEntityName: string; relationType: string; targetEntityName: string; fact: string; sentiment: number }>) {
-  return edges.map((edge) => {
+function buildSearchContext(searchResult: Awaited<ReturnType<typeof ops.search>>) {
+  const sections: string[] = [];
+
+  const edgeLines = searchResult.edges.map((edge) => {
     const sentiment = edgeSentimentLabel(edge.sentiment);
     return `- ${edge.sourceEntityName} → ${edge.relationType} → ${edge.targetEntityName}: ${edge.fact}${sentiment}`;
   });
-}
+  if (edgeLines.length > 0) sections.push("**Relevant Facts (as relationships):**\n" + edgeLines.join("\n"));
 
-function formatMemories(memories: Array<{ name?: string; summary?: string }>) {
-  return memories
+  const memLines = searchResult.memories
     .filter((m) => m.summary)
     .map((m) => `- ${m.name || "Memory"}: ${m.summary}`);
-}
+  if (memLines.length > 0) sections.push("**Related Memories:**\n" + memLines.join("\n"));
 
-function formatEntities(entities: Array<{ name: string; type: string; description?: string; summary?: string }>) {
-  return entities.map((e) => {
+  const entLines = searchResult.entities.map((e) => {
     const desc = e.description ? ` - ${e.description}` : "";
     const summary = e.summary ? ` (${e.summary})` : "";
     return `- ${e.name} (${e.type})${desc}${summary}`;
   });
-}
-
-function buildSearchContext(searchResult: { edges: Array<{ sourceEntityName: string; relationType: string; targetEntityName: string; fact: string; sentiment: number }>; memories: Array<{ name?: string; summary?: string }>; entities: Array<{ name: string; type: string; description?: string; summary?: string }> }) {
-  const sections: string[] = [];
-
-  const edgeLines = formatEdges(searchResult.edges);
-  if (edgeLines.length > 0) sections.push("**Relevant Facts (as relationships):**\n" + edgeLines.join("\n"));
-
-  const memLines = formatMemories(searchResult.memories);
-  if (memLines.length > 0) sections.push("**Related Memories:**\n" + memLines.join("\n"));
-
-  const entLines = formatEntities(searchResult.entities);
   if (entLines.length > 0) sections.push("**Related Entities:**\n" + entLines.join("\n"));
 
   return sections.length > 0
@@ -360,12 +250,6 @@ function buildSearchContext(searchResult: { edges: Array<{ sourceEntityName: str
     : "No directly relevant information found in the knowledge base.";
 }
 
-/**
- * Ask LLM to answer a question using knowledge graph context
- *
- * When search returns no direct results, this uses the LLM to
- * synthesize an answer from the available knowledge.
- */
 const askLLMSchema = z.object({
   question: z.string().min(1, "Question is required"),
 });
@@ -373,14 +257,9 @@ const askLLMSchema = z.object({
 export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
   .handler(async ({ data }) => {
-    // First, search for relevant context
-    const embResult = await embedWithDimension(data.question);
-    const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
-    const searchResult = await graph.search(embedding, data.question, 5);
-
+    const searchResult = await ops.search(data.question, undefined, 5);
     const context = buildSearchContext(searchResult);
 
-    // Query LLM with context
     const result = await prompt("claude", `You are a helpful assistant with access to a personal knowledge base.
 
 Context from the knowledge base:
@@ -410,15 +289,9 @@ Instructions:
   });
 
 // ============================================================================
-// Streaming (NEW - not available in tRPC easily)
+// Streaming
 // ============================================================================
 
-/**
- * Streaming search - yields results one at a time
- *
- * Perfect for real-time UI updates as results come in.
- * Yields memories first, then edges, then entities, finally guidance.
- */
 const streamingSearchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),
@@ -427,19 +300,13 @@ const streamingSearchSchema = z.object({
 export const streamingSearch = createServerFn()
   .inputValidator((data: unknown) => streamingSearchSchema.parse(data))
   .handler(async function* ({ data }) {
-    const embResult = await embedWithDimension(data.query);
-    const embedding = isZeroEmbedding(embResult.embedding) ? [] : embResult.embedding;
-    const result = await graph.search(embedding, data.query, data.limit);
-    const intent = classifyIntent(data.query);
-    const boostedEdges = boostEdgesByIntent(result.edges, intent);
+    const result = await ops.search(data.query, undefined, data.limit);
 
-    // Yield intent classification first
     yield {
       type: "intent" as const,
-      data: { intent },
+      data: { intent: result.intent },
     };
 
-    // Yield memories one at a time for streaming UI
     for (const memory of result.memories) {
       yield {
         type: "memory" as const,
@@ -453,8 +320,7 @@ export const streamingSearch = createServerFn()
       };
     }
 
-    // Then yield boosted edges
-    for (const edge of boostedEdges) {
+    for (const edge of result.edges) {
       yield {
         type: "edge" as const,
         data: {
@@ -472,7 +338,6 @@ export const streamingSearch = createServerFn()
       };
     }
 
-    // Then yield entities
     for (const entity of result.entities) {
       yield {
         type: "entity" as const,
@@ -485,12 +350,8 @@ export const streamingSearch = createServerFn()
       };
     }
 
-    // Finally yield guidance for contradiction handling
     yield {
       type: "guidance" as const,
-      data: {
-        message:
-          "If any of these facts appear contradictory or outdated, please ask the user whether to invalidate them using the forget tool with a reason.",
-      },
+      data: { message: result.guidance },
     };
   });

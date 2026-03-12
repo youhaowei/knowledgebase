@@ -15,6 +15,7 @@ import { Queue } from "./queue.js";
 import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
+import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 
 let provider: GraphProvider;
@@ -85,8 +86,9 @@ export async function search(
   const intent = classifyIntent(query);
 
   return {
-    ...result,
+    memories: result.memories,
     edges: boostEdgesByIntent(result.edges, intent),
+    entities: result.entities,
     intent,
     guidance:
       "If any facts appear contradictory, use forgetEdge to invalidate with a reason.",
@@ -97,12 +99,13 @@ export async function getByName(
   name: string,
   namespace?: string,
 ): Promise<{
+  memory?: Memory;
   entity?: StoredEntity;
   edges: StoredEdge[];
 }> {
   const gp = await getProvider();
   const result = await gp.get(name, namespace ?? "default");
-  return { entity: result.entity, edges: result.edges };
+  return { memory: result.memory, entity: result.entity, edges: result.edges };
 }
 
 export async function forget(
@@ -125,6 +128,11 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
 export async function stats(namespace = "default") {
   const gp = await getProvider();
   return gp.stats(namespace);
+}
+
+export async function getGraphData(namespace?: string, nodeLimit?: number): Promise<GraphData> {
+  const gp = await getProvider();
+  return gp.getGraphData(namespace, nodeLimit);
 }
 
 export async function close() {

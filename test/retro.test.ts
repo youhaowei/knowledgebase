@@ -1,10 +1,15 @@
-import { describe, test, expect, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { rmSync } from "fs";
 
 const CLI = ["bun", "run", "src/cli.ts"];
 const TEST_ENV = ["--env", "retro-test"];
 
 const BUN_NATIVE_SEGFAULT = 133;
+
+function cleanTestDb() {
+  rmSync(".ladybug-retro-test", { recursive: true, force: true });
+  rmSync(".ladybug-retro-test.wal", { force: true });
+}
 
 async function run(...args: string[]) {
   const proc = Bun.spawn([...CLI, ...TEST_ENV, ...args], {
@@ -24,10 +29,10 @@ function expectSuccess(exitCode: number) {
   expect(exitCode === 0 || exitCode === BUN_NATIVE_SEGFAULT).toBe(true);
 }
 
-afterAll(() => {
-  rmSync(".ladybug-retro-test", { recursive: true, force: true });
-  rmSync(".ladybug-retro-test.wal", { force: true });
-});
+// Clean before AND after: beforeAll handles stale data from previous runs
+// that survived a Bun segfault (which prevents afterAll from running).
+beforeAll(cleanTestDb);
+afterAll(cleanTestDb);
 
 describe("retro namespace operations", () => {
   test("add with --ns retro queues a memory", async () => {
