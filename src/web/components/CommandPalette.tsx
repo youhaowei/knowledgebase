@@ -17,7 +17,8 @@ import {
   FileText,
   Tag,
 } from "lucide-react";
-import { searchMemories, addMemory, askLLM } from "@/server/functions";
+import { searchMemories, addMemory, askLLM, listNamespaces } from "@/server/functions";
+import { DetailPanel } from "./DetailPanel";
 
 // Result types for the unified search
 type ResultType = "memory" | "edge" | "entity" | "llm";
@@ -28,6 +29,17 @@ interface SearchResult {
   title: string;
   subtitle?: string;
   meta?: string;
+  /** Original name from the data (may be empty for unnamed memories) */
+  name?: string;
+  /** Structured edge data (avoids reconstructing from display strings) */
+  edgeData?: {
+    sourceEntity: string;
+    targetEntity: string;
+    relationType: string;
+    fact: string;
+    sentiment: number;
+    confidence: number;
+  };
 }
 
 function sentimentLabel(s: number) {
@@ -36,7 +48,7 @@ function sentimentLabel(s: number) {
   return "neutral";
 }
 
-function mapSearchResults(result: { memories: Array<{ id: string; name?: string; summary?: string; createdAt?: string }>; edges: Array<{ id: string; fact: string; sourceEntity: string; relationType: string; targetEntity: string; sentiment: number }>; entities: Array<{ name: string; type?: string; description?: string }> }): SearchResult[] {
+function mapSearchResults(result: { memories: Array<{ id: string; name?: string; summary?: string; createdAt?: string | Date }>; edges: Array<{ id: string; fact: string; sourceEntity: string; relationType: string; targetEntity: string; sentiment: number; confidence: number }>; entities: Array<{ name: string; type?: string; description?: string }> }): SearchResult[] {
   const allResults: SearchResult[] = [];
 
   for (const m of result.memories) {
@@ -44,6 +56,7 @@ function mapSearchResults(result: { memories: Array<{ id: string; name?: string;
       id: m.id,
       type: "memory",
       title: m.name || "Untitled Memory",
+      name: m.name ?? undefined,
       subtitle: m.summary ?? undefined,
       meta: m.createdAt ? new Date(m.createdAt).toLocaleDateString() : undefined,
     });
@@ -56,6 +69,14 @@ function mapSearchResults(result: { memories: Array<{ id: string; name?: string;
       title: e.fact,
       subtitle: `${e.sourceEntity} → ${e.relationType} → ${e.targetEntity}`,
       meta: sentimentLabel(e.sentiment),
+      edgeData: {
+        sourceEntity: e.sourceEntity,
+        targetEntity: e.targetEntity,
+        relationType: e.relationType,
+        fact: e.fact,
+        sentiment: e.sentiment,
+        confidence: e.confidence,
+      },
     });
   }
 
@@ -91,6 +112,9 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
     text: string;
   } | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [activeNamespace, setActiveNamespace] = useState<string | undefined>(undefined);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -105,6 +129,8 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
     setAddName("");
     setMessage(null);
     setSelectedIndex(0);
+    setSelectedResult(null);
+    setActiveNamespace(undefined);
   }, []);
 
   const closePalette = useCallback(() => {
@@ -114,6 +140,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
     setAddText("");
     setAddName("");
     setMessage(null);
+    setSelectedResult(null);
   }, []);
 
   // Keyboard shortcut: Cmd+K to open
@@ -128,16 +155,27 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
           openPalette("search");
         }
       }
-      // Escape to close
+      // Escape to close (or go back from detail panel)
       if (e.key === "Escape" && isOpen) {
         e.preventDefault();
-        closePalette();
+        if (selectedResult) {
+          setSelectedResult(null);
+        } else {
+          closePalette();
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, openPalette, closePalette]);
+  }, [isOpen, selectedResult, openPalette, closePalette]);
+
+  // Fetch namespaces when palette opens
+  useEffect(() => {
+    if (isOpen) {
+      listNamespaces().then(setNamespaces).catch(() => {});
+    }
+  }, [isOpen]);
 
   // Focus input when opened
   useEffect(() => {
@@ -165,7 +203,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
 
     try {
       const result = await searchMemories({
-        data: { query: searchQuery, limit: 10 },
+        data: { query: searchQuery, limit: 10, namespace: activeNamespace },
       });
 
       const allResults = mapSearchResults(result);
@@ -196,7 +234,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [activeNamespace]);
 
   // Debounced search
   useEffect(() => {
@@ -246,8 +284,7 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
         setSelectedIndex((prev) => Math.max(prev - 1, 0));
       } else if (e.key === "Enter" && results[selectedIndex]) {
         e.preventDefault();
-        // Could navigate to detail view or copy
-        console.log("Selected:", results[selectedIndex]);
+        setSelectedResult(results[selectedIndex]!);
       }
     }
   };
@@ -331,8 +368,45 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
               </button>
             </div>
 
+            {/* Namespace filter chips */}
+            {mode === "search" && !selectedResult && namespaces.length > 1 && (
+              <div className="flex items-center gap-2 px-5 py-2 border-b border-border overflow-x-auto">
+                <button
+                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
+                    activeNamespace === undefined
+                      ? "bg-glow-cyan-dim text-glow-cyan"
+                      : "bg-surface/50 text-text-tertiary hover:text-text-secondary"
+                  }`}
+                  onClick={() => setActiveNamespace(undefined)}
+                >
+                  All
+                </button>
+                {namespaces.map((ns) => (
+                  <button
+                    key={ns}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${
+                      activeNamespace === ns
+                        ? "bg-glow-cyan-dim text-glow-cyan"
+                        : "bg-surface/50 text-text-tertiary hover:text-text-secondary"
+                    }`}
+                    onClick={() => setActiveNamespace(ns)}
+                  >
+                    {ns}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Detail Panel (replaces search when a result is selected) */}
+            {mode === "search" && selectedResult && (
+              <DetailPanel
+                result={selectedResult}
+                onBack={() => setSelectedResult(null)}
+              />
+            )}
+
             {/* Search Mode */}
-            {mode === "search" && (
+            {mode === "search" && !selectedResult && (
               <div>
                 {/* Search input */}
                 <div className="relative">
@@ -418,7 +492,10 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
                             ? "bg-glow-cyan-dim/40 border-l-2 border-l-glow-cyan"
                             : "hover:bg-elevated/50 border-l-2 border-l-transparent"
                         }`}
-                        onClick={() => setSelectedIndex(index)}
+                        onClick={() => {
+                          setSelectedIndex(index);
+                          setSelectedResult(result);
+                        }}
                         style={{ animationDelay: `${index * 50}ms` }}
                       >
                         <div
@@ -527,24 +604,35 @@ export function CommandPalette({ onRefreshData }: CommandPaletteProps) {
             {/* Footer hint */}
             <div className="px-5 py-3 border-t border-border bg-surface/30 flex items-center justify-between text-[10px] text-text-tertiary">
               <div className="flex items-center gap-4">
-                <span className="flex items-center gap-1">
-                  <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
-                    ↑↓
-                  </kbd>
-                  Navigate
-                </span>
-                <span className="flex items-center gap-1">
-                  <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
-                    ↵
-                  </kbd>
-                  Select
-                </span>
-                <span className="flex items-center gap-1">
-                  <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
-                    esc
-                  </kbd>
-                  Close
-                </span>
+                {selectedResult ? (
+                  <span className="flex items-center gap-1">
+                    <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
+                      esc
+                    </kbd>
+                    Back
+                  </span>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-1">
+                      <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
+                        ↑↓
+                      </kbd>
+                      Navigate
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
+                        ↵
+                      </kbd>
+                      Select
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <kbd className="px-1.5 py-0.5 bg-elevated rounded text-[9px] font-mono">
+                        esc
+                      </kbd>
+                      Close
+                    </span>
+                  </>
+                )}
               </div>
               <span className="font-medium tracking-wide uppercase opacity-60">
                 Knowledgebase

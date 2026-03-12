@@ -33,15 +33,20 @@ export const getStats = createServerFn().handler(async () => {
   return ops.stats();
 });
 
+export const listNamespaces = createServerFn().handler(async () => {
+  return ops.listNamespaces();
+});
+
 const searchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),
+  namespace: z.string().optional(),
 });
 
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
   .handler(async ({ data }) => {
-    const result = await ops.search(data.query, undefined, data.limit);
+    const result = await ops.search(data.query, data.namespace, data.limit);
 
     return {
       intent: result.intent,

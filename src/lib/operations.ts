@@ -82,13 +82,26 @@ export async function search(
 }> {
   const gp = await getProvider();
   const { embedding } = await embedWithDimension(query);
-  const result = await gp.search(isZeroEmbedding(embedding) ? [] : embedding, query, limit);
+  // Fetch extra results when filtering by namespace (provider searches all namespaces)
+  const fetchLimit = namespace ? limit * 3 : limit;
+  const result = await gp.search(isZeroEmbedding(embedding) ? [] : embedding, query, fetchLimit);
   const intent = classifyIntent(query);
 
+  // Post-filter by namespace when specified (provider doesn't support namespace-scoped search)
+  const memories = namespace
+    ? result.memories.filter((m) => m.namespace === namespace).slice(0, limit)
+    : result.memories;
+  const edges = namespace
+    ? result.edges.filter((e) => e.namespace === namespace).slice(0, limit)
+    : result.edges;
+  const entities = namespace
+    ? result.entities.filter((e) => e.namespace === namespace).slice(0, limit)
+    : result.entities;
+
   return {
-    memories: result.memories,
-    edges: boostEdgesByIntent(result.edges, intent),
-    entities: result.entities,
+    memories,
+    edges: boostEdgesByIntent(edges, intent),
+    entities,
     intent,
     guidance:
       "If any facts appear contradictory, use forgetEdge to invalidate with a reason.",
@@ -128,6 +141,11 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
 export async function stats(namespace = "default") {
   const gp = await getProvider();
   return gp.stats(namespace);
+}
+
+export async function listNamespaces(): Promise<string[]> {
+  const gp = await getProvider();
+  return gp.listNamespaces();
 }
 
 export async function getGraphData(namespace?: string, nodeLimit?: number): Promise<GraphData> {
