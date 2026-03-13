@@ -8,6 +8,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import * as ops from "../lib/operations.js";
+import { analyticsContext } from "../lib/analytics.js";
 
 // ============================================================================
 // Queries (GET by default)
@@ -29,9 +30,9 @@ export const getGraphData = createServerFn().handler(async () => {
   };
 });
 
-export const getStats = createServerFn().handler(async () => {
-  return ops.stats();
-});
+export const getStats = createServerFn().handler(() =>
+  analyticsContext.run({ source: "web" }, () => ops.stats()),
+);
 
 export const listNamespaces = createServerFn().handler(async () => {
   return ops.listNamespaces();
@@ -45,7 +46,7 @@ const searchSchema = z.object({
 
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
-  .handler(async ({ data }) => {
+  .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.search(data.query, data.namespace, data.limit);
 
     return {
@@ -77,7 +78,7 @@ export const searchMemories = createServerFn()
       })),
       guidance: result.guidance,
     };
-  });
+  }));
 
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -85,7 +86,7 @@ const getMemorySchema = z.object({
 
 export const getMemory = createServerFn()
   .inputValidator((data: unknown) => getMemorySchema.parse(data))
-  .handler(async ({ data }) => {
+  .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.getByName(data.name);
 
     if (!result.memory && !result.entity) {
@@ -125,7 +126,7 @@ export const getMemory = createServerFn()
         createdAt: e.createdAt,
       })),
     };
-  });
+  }));
 
 export const getHealth = createServerFn().handler(async () => {
   const pending = await ops.getQueueStatus();
@@ -153,7 +154,7 @@ const addMemorySchema = z.object({
 
 export const addMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => addMemorySchema.parse(data))
-  .handler(async ({ data }) => {
+  .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.addMemory(data.text, data.name, data.namespace);
     const pending = await ops.getQueueStatus(data.namespace);
     const pendingInfo = pending > 0 ? ` (${pending} pending)` : "";
@@ -165,7 +166,7 @@ export const addMemory = createServerFn({ method: "POST" })
         : `Memory queued for processing${pendingInfo}`,
       memoryId: result.id,
     };
-  });
+  }));
 
 const forgetMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -174,7 +175,7 @@ const forgetMemorySchema = z.object({
 
 export const forgetMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => forgetMemorySchema.parse(data))
-  .handler(async ({ data }) => {
+  .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.forget(data.name, data.namespace);
 
     if (!result.deleted) {
@@ -185,7 +186,7 @@ export const forgetMemory = createServerFn({ method: "POST" })
       success: true,
       message: `Removed "${data.name}"`,
     };
-  });
+  }));
 
 const forgetEdgeSchema = z.object({
   edgeId: z.string().min(1, "Edge ID is required"),
@@ -195,7 +196,7 @@ const forgetEdgeSchema = z.object({
 
 export const forgetEdge = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => forgetEdgeSchema.parse(data))
-  .handler(async ({ data }) => {
+  .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.forgetEdge(data.edgeId, data.reason, data.namespace);
 
     if (!result.invalidatedEdge) {
@@ -215,7 +216,7 @@ export const forgetEdge = createServerFn({ method: "POST" })
       },
       auditMemoryId: result.auditMemoryId,
     };
-  });
+  }));
 
 // ============================================================================
 // LLM-Powered Answer
@@ -261,7 +262,7 @@ const askLLMSchema = z.object({
 
 export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
-  .handler(async ({ data }) => {
+  .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const searchResult = await ops.search(data.question, undefined, 5);
     const context = buildSearchContext(searchResult);
 
@@ -291,7 +292,7 @@ Instructions:
       memoriesUsed: searchResult.memories.length,
       entitiesUsed: searchResult.entities.length,
     };
-  });
+  }));
 
 // ============================================================================
 // Streaming
@@ -305,7 +306,9 @@ const streamingSearchSchema = z.object({
 export const streamingSearch = createServerFn()
   .inputValidator((data: unknown) => streamingSearchSchema.parse(data))
   .handler(async function* ({ data }) {
-    const result = await ops.search(data.query, undefined, data.limit);
+    const result = await analyticsContext.run({ source: "web" }, () =>
+      ops.search(data.query, undefined, data.limit),
+    );
 
     yield {
       type: "intent" as const,

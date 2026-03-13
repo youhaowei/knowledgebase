@@ -23,7 +23,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i]!;
-    if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit") {
+    if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op") {
       const key = arg === "--ns" ? "--namespace" : arg;
       flags[key] = argv[++i] ?? "";
     } else if (arg === "--json" || arg === "-i") {
@@ -50,6 +50,7 @@ if (envName) {
 // --- Dynamic imports (after env is set) ---
 
 const ops = await import("./lib/operations.js");
+const { analyticsContext } = await import("./lib/analytics.js");
 
 // --- Context for command execution ---
 
@@ -195,6 +196,82 @@ async function handleStats(ctx: CmdContext) {
   if (pending > 0) console.log(`  Pending:  ${pending}`);
 }
 
+async function handleAnalytics(ctx: CmdContext) {
+  const { getOperationSummary, getSourceBreakdown, getEventTotals } = await import("./lib/analytics.js");
+  const sinceFlag = ctx.flags["--since"];
+  const opFilter = ctx.flags["--op"];
+
+  // Parse --since into a date filter (e.g., "7d", "24h", "30d")
+  let sinceDate: string | null = null;
+  if (sinceFlag) {
+    const match = sinceFlag.match(/^(\d+)([dhm])$/);
+    if (!match) throw new UsageError("--since format: <n>d, <n>h, or <n>m (e.g., 7d, 24h, 30m)");
+    const [, amount, unit] = match;
+    const num = parseInt(amount!, 10);
+    if (num > 365 * 24 * 60) throw new UsageError("--since value too large (max ~1 year)");
+    const ms = num * ({ d: 86400000, h: 3600000, m: 60000 }[unit!] ?? 0);
+    sinceDate = new Date(Date.now() - ms).toISOString();
+  }
+
+  const conditions: string[] = [];
+  const params: (string | number | null)[] = [];
+
+  if (sinceDate) {
+    conditions.push("ts >= ?");
+    params.push(sinceDate);
+  }
+  if (opFilter) {
+    conditions.push("operation = ?");
+    params.push(opFilter);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const summary = getOperationSummary(where, params);
+
+  if (ctx.json) {
+    const sourceBreakdown = getSourceBreakdown(where, params);
+    const totals = getEventTotals(where, params);
+    out(ctx, { summary, sourceBreakdown, ...totals });
+    return;
+  }
+
+  if (summary.length === 0) {
+    console.log("No analytics events recorded yet.");
+    return;
+  }
+
+  // Header
+  const { total: cnt, earliest, latest } = getEventTotals(where, params);
+  console.log(`\nAnalytics Summary (${cnt} events, ${earliest ? String(earliest).slice(0, 10) : "?"} to ${latest ? String(latest).slice(0, 10) : "?"})`);
+  if (sinceFlag) console.log(`  Filtered: last ${sinceFlag}`);
+  if (opFilter) console.log(`  Operation: ${opFilter}`);
+
+  // Operation breakdown
+  console.log(`\n  Operation          Count  Avg ms   Min ms   Max ms   Errors`);
+  console.log(`  ${"─".repeat(65)}`);
+  for (const row of summary) {
+    const op = String(row.operation).padEnd(18);
+    const count = String(row.count).padStart(5);
+    const avg = row.avg_ms != null ? String(row.avg_ms).padStart(7) : "    n/a";
+    const min = row.min_ms != null ? String(row.min_ms).padStart(8) : "     n/a";
+    const max = row.max_ms != null ? String(row.max_ms).padStart(8) : "     n/a";
+    const errors = String(row.errors).padStart(8);
+    console.log(`  ${op} ${count} ${avg} ${min} ${max} ${errors}`);
+  }
+
+  // Source breakdown
+  const sources = getSourceBreakdown(where, params);
+  if (sources.length > 0) {
+    console.log(`\n  Sources:`);
+    for (const row of sources) {
+      console.log(`    ${row.source}: ${row.count}`);
+    }
+  }
+
+  console.log("");
+}
+
 function showHelp() {
   console.log(`
 Knowledgebase CLI
@@ -208,6 +285,7 @@ Commands:
   forget <name>                 Remove entity
   forget-edge <id> <reason>     Invalidate an edge with reason
   stats                         Show statistics
+  analytics                     Usage analytics summary
 
 Flags:
   --ns, --namespace <name>      Namespace (default: "default")
@@ -215,6 +293,8 @@ Flags:
   --name <name>                 Name for add command
   --limit <n>                   Result limit for search (default: 10)
   --json                        Output raw JSON
+  --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)
+  --op <operation>              Analytics operation filter
   -i                            Interactive mode
 
 Interactive: Run 'kb' or 'kb -i' for a REPL.
@@ -225,17 +305,23 @@ Interactive: Run 'kb' or 'kb -i' for a REPL.
 
 async function runCommand(ctx: CmdContext) {
   const cmd = ctx.positional[0];
-  switch (cmd) {
-    case "add": return handleAdd(ctx);
-    case "search": return handleSearch(ctx);
-    case "get": return handleGet(ctx);
-    case "forget": return handleForget(ctx);
-    case "forget-edge": return handleForgetEdge(ctx);
-    case "stats": return handleStats(ctx);
-    case "help": return showHelp();
-    default:
-      throw new UsageError(`Unknown command: ${cmd}. Run 'kb help' for usage.`);
-  }
+  const dispatch = () => {
+    switch (cmd) {
+      case "add": return handleAdd(ctx);
+      case "search": return handleSearch(ctx);
+      case "get": return handleGet(ctx);
+      case "forget": return handleForget(ctx);
+      case "forget-edge": return handleForgetEdge(ctx);
+      case "stats": return handleStats(ctx);
+      case "analytics": return handleAnalytics(ctx);
+      case "help": return showHelp();
+      default:
+        throw new UsageError(`Unknown command: ${cmd}. Run 'kb help' for usage.`);
+    }
+  };
+  // Analytics and help don't need source tracking
+  if (cmd === "help" || cmd === "analytics") return dispatch();
+  return analyticsContext.run({ source: "cli" }, dispatch);
 }
 
 // --- Interactive REPL ---

@@ -13,6 +13,7 @@ import { extract } from "./extractor.js";
 import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
+import { track } from "./analytics.js";
 
 type QueueEntry = {
   memory: Memory;
@@ -64,11 +65,19 @@ export class Queue {
       const { memory, resolve, reject } = entry;
 
       try {
+        const ns = memory.namespace;
+
         // 1. Extract entities and edges using Claude/Gemini (Edge-as-Fact model)
         console.error(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
+        const extractStart = performance.now();
         const { entities, edges, summary, category } = await extract(memory.text);
         memory.summary = summary;
         memory.category = category ?? "general";
+        track("queue.extract", {
+          namespace: ns,
+          duration_ms: performance.now() - extractStart,
+          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, category: memory.category },
+        });
 
         console.error(`[Queue] Extracted ${entities.length} entities, ${edges.length} edges`);
 
@@ -81,6 +90,7 @@ export class Queue {
 
         // 3. Generate dual embeddings for memory text (all available dimensions)
         console.error(`[Queue] Generating memory embeddings (dual)...`);
+        const embedStart = performance.now();
         const memEmb = await embedDual(memory.text);
 
         // 4. Generate dual embeddings for each edge's fact description
@@ -89,15 +99,34 @@ export class Queue {
         for (const edge of edges) {
           edgeEmbeddings.push(await embedDual(edge.fact));
         }
+        const embedDuration = performance.now() - embedStart;
+        const dimensions = memEmb.size > 0 ? [...memEmb.keys()] : [];
+        track("queue.embed", {
+          namespace: ns,
+          duration_ms: embedDuration,
+          meta: { memoryId: memory.id, edgeCount: edges.length, dimensions },
+        });
 
         // 5. Store everything (entities + RELATES_TO edges) with all embedding dimensions
         console.error(`[Queue] Storing...`);
+        const storeStart = performance.now();
         await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
+        track("queue.store", {
+          namespace: ns,
+          duration_ms: performance.now() - storeStart,
+          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length },
+        });
 
         console.error(`[Queue] Memory ${memory.id} processed successfully`);
         resolve();
       } catch (error) {
         console.error(`[Queue] Error processing memory ${memory.id}:`, error);
+        track("queue.error", {
+          namespace: memory.namespace,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          meta: { memoryId: memory.id },
+        });
         reject(error as Error);
       }
     }

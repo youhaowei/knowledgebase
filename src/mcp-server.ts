@@ -17,6 +17,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as ops from "@/lib/operations.js";
+import { analyticsContext } from "@/lib/analytics.js";
 
 function errorResult(err: unknown) {
   return {
@@ -28,6 +29,11 @@ function errorResult(err: unknown) {
     ],
     isError: true as const,
   };
+}
+
+/** Wrap an MCP tool handler with analytics source context */
+function withMcpSource<A, R>(fn: (args: A) => Promise<R>) {
+  return (args: A) => analyticsContext.run({ source: "mcp" }, () => fn(args));
 }
 
 export function createKnowledgebaseMcpServer() {
@@ -47,7 +53,7 @@ export function createKnowledgebaseMcpServer() {
         .default("default")
         .describe("Namespace for isolation (e.g., project name)"),
     },
-    async ({ text, name, namespace }) => {
+    withMcpSource(async ({ text, name, namespace }) => {
       try {
         const result = await ops.addMemory(text, name, namespace);
         return {
@@ -67,7 +73,7 @@ export function createKnowledgebaseMcpServer() {
       } catch (err) {
         return errorResult(err);
       }
-    },
+    }),
   );
 
   server.tool(
@@ -81,7 +87,7 @@ export function createKnowledgebaseMcpServer() {
         .describe("Namespace to search within"),
       limit: z.number().default(10).describe("Max results"),
     },
-    async ({ query, namespace, limit }) => {
+    withMcpSource(async ({ query, namespace, limit }) => {
       try {
         const result = await ops.search(query, namespace, limit);
         return {
@@ -124,7 +130,7 @@ export function createKnowledgebaseMcpServer() {
       } catch (err) {
         return errorResult(err);
       }
-    },
+    }),
   );
 
   server.tool(
@@ -137,7 +143,7 @@ export function createKnowledgebaseMcpServer() {
         .default("default")
         .describe("Namespace to search in"),
     },
-    async ({ name, namespace }) => {
+    withMcpSource(async ({ name, namespace }) => {
       try {
         const result = await ops.getByName(name, namespace);
         if (!result.entity) {
@@ -155,7 +161,7 @@ export function createKnowledgebaseMcpServer() {
       } catch (err) {
         return errorResult(err);
       }
-    },
+    }),
   );
 
   server.tool(
@@ -168,7 +174,7 @@ export function createKnowledgebaseMcpServer() {
         .default("default")
         .describe("Namespace to remove from"),
     },
-    async ({ name, namespace }) => {
+    withMcpSource(async ({ name, namespace }) => {
       try {
         const result = await ops.forget(name, namespace);
         if (!result.deleted) {
@@ -186,7 +192,7 @@ export function createKnowledgebaseMcpServer() {
       } catch (err) {
         return errorResult(err);
       }
-    },
+    }),
   );
 
   server.tool(
@@ -202,7 +208,7 @@ export function createKnowledgebaseMcpServer() {
         .default("default")
         .describe("Namespace of the edge"),
     },
-    async ({ edgeId, reason, namespace }) => {
+    withMcpSource(async ({ edgeId, reason, namespace }) => {
       try {
         const result = await ops.forgetEdge(edgeId, reason, namespace);
         if (!result.invalidatedEdge) {
@@ -237,7 +243,7 @@ export function createKnowledgebaseMcpServer() {
       } catch (err) {
         return errorResult(err);
       }
-    },
+    }),
   );
 
   return server;
