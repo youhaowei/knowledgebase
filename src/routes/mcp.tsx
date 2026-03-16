@@ -7,7 +7,7 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webstandard.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createKnowledgebaseMcpServer } from "@/mcp-server";
 
 type Session = {
