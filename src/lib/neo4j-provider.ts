@@ -211,6 +211,9 @@ export class Neo4jProvider implements GraphProvider {
           name: memory.name,
           text: memory.text,
           summary: memory.summary,
+          abstract: memory.abstract ?? "",
+          schemaVersion: memory.schemaVersion ?? "0.0.0",
+          versionedAt: memory.versionedAt ?? new Date().toISOString(),
           category: memory.category ?? null,
           namespace: memory.namespace,
           status: memory.status ?? "completed",
@@ -236,6 +239,9 @@ export class Neo4jProvider implements GraphProvider {
             m.name = $name,
             m.text = $text,
             m.summary = $summary,
+            m.abstract = $abstract,
+            m.schemaVersion = $schemaVersion,
+            m.versionedAt = $versionedAt,
             m.category = $category,
             m.namespace = $namespace,
             m.status = $status,
@@ -244,6 +250,9 @@ export class Neo4jProvider implements GraphProvider {
           ON MATCH SET
             m.name = $name,
             m.summary = $summary,
+            m.abstract = $abstract,
+            m.schemaVersion = $schemaVersion,
+            m.versionedAt = $versionedAt,
             m.category = $category,
             m.status = $status,
             m.error = $error${matchEmbStr}
@@ -393,6 +402,9 @@ export class Neo4jProvider implements GraphProvider {
                node.name as name,
                node.text as text,
                node.summary as summary,
+               node.abstract as abstract,
+               node.schemaVersion as schemaVersion,
+               node.versionedAt as versionedAt,
                node.category as category,
                node.namespace as namespace,
                node.status as status,
@@ -409,6 +421,9 @@ export class Neo4jProvider implements GraphProvider {
         name: r.get("name"),
         text: r.get("text"),
         summary: r.get("summary"),
+        abstract: r.get("abstract") || "",
+        schemaVersion: r.get("schemaVersion") || "0.0.0",
+        versionedAt: r.get("versionedAt") || undefined,
         category: r.get("category") ?? undefined,
         namespace: r.get("namespace"),
         status: r.get("status") ?? "completed",
@@ -489,6 +504,9 @@ export class Neo4jProvider implements GraphProvider {
                node.name as name,
                node.text as text,
                node.summary as summary,
+               node.abstract as abstract,
+               node.schemaVersion as schemaVersion,
+               node.versionedAt as versionedAt,
                node.category as category,
                node.namespace as namespace,
                node.status as status,
@@ -504,6 +522,9 @@ export class Neo4jProvider implements GraphProvider {
         name: r.get("name"),
         text: r.get("text"),
         summary: r.get("summary"),
+        abstract: r.get("abstract") || "",
+        schemaVersion: r.get("schemaVersion") || "0.0.0",
+        versionedAt: r.get("versionedAt") || undefined,
         category: r.get("category") ?? undefined,
         namespace: r.get("namespace"),
         status: r.get("status") ?? "completed",
@@ -675,6 +696,9 @@ export class Neo4jProvider implements GraphProvider {
                m.name as name,
                m.text as text,
                m.summary as summary,
+               m.abstract as abstract,
+               m.schemaVersion as schemaVersion,
+               m.versionedAt as versionedAt,
                m.category as category,
                m.namespace as namespace,
                m.status as status,
@@ -691,6 +715,9 @@ export class Neo4jProvider implements GraphProvider {
             name: memoryRecord.get("name"),
             text: memoryRecord.get("text"),
             summary: memoryRecord.get("summary"),
+            abstract: memoryRecord.get("abstract") || "",
+            schemaVersion: memoryRecord.get("schemaVersion") || "0.0.0",
+            versionedAt: memoryRecord.get("versionedAt") || undefined,
             category: memoryRecord.get("category") ?? undefined,
             namespace: memoryRecord.get("namespace"),
             status: memoryRecord.get("status") ?? "completed",
@@ -916,6 +943,9 @@ export class Neo4jProvider implements GraphProvider {
               name: $name,
               text: $text,
               summary: $summary,
+              abstract: '',
+              schemaVersion: '0.0.0',
+              versionedAt: $versionedAt,
               category: null,
               namespace: $namespace,
               status: 'completed',
@@ -928,6 +958,7 @@ export class Neo4jProvider implements GraphProvider {
               name: `Invalidation: ${invalidatedEdge.fact.slice(0, 50)}...`,
               text: auditText,
               summary: auditText,
+              versionedAt: new Date().toISOString(),
               namespace,
             },
           );
@@ -950,6 +981,9 @@ export class Neo4jProvider implements GraphProvider {
           name: $name,
           text: $text,
           summary: $summary,
+          abstract: $abstract,
+          schemaVersion: $schemaVersion,
+          versionedAt: $versionedAt,
           category: $category,
           namespace: $namespace,
           status: $status,
@@ -963,6 +997,9 @@ export class Neo4jProvider implements GraphProvider {
           name: memory.name,
           text: memory.text,
           summary: memory.summary,
+          abstract: memory.abstract ?? "",
+          schemaVersion: memory.schemaVersion ?? "0.0.0",
+          versionedAt: memory.versionedAt ?? new Date().toISOString(),
           category: memory.category ?? null,
           namespace: memory.namespace,
           status: memory.status,
@@ -1021,6 +1058,9 @@ export class Neo4jProvider implements GraphProvider {
           name: m.properties.name,
           text: m.properties.text,
           summary: m.properties.summary,
+          abstract: m.properties.abstract || "",
+          schemaVersion: m.properties.schemaVersion || "0.0.0",
+          versionedAt: m.properties.versionedAt || undefined,
           category: m.properties.category ?? undefined,
           namespace: m.properties.namespace,
           status: m.properties.status ?? "pending",
@@ -1233,6 +1273,9 @@ export class Neo4jProvider implements GraphProvider {
                m.name as name,
                m.text as text,
                m.summary as summary,
+               m.abstract as abstract,
+               m.schemaVersion as schemaVersion,
+               m.versionedAt as versionedAt,
                m.category as category,
                m.namespace as namespace,
                m.status as status,
@@ -1248,6 +1291,9 @@ export class Neo4jProvider implements GraphProvider {
         name: r.get("name"),
         text: r.get("text"),
         summary: r.get("summary"),
+        abstract: r.get("abstract") || "",
+        schemaVersion: r.get("schemaVersion") || "0.0.0",
+        versionedAt: r.get("versionedAt") || undefined,
         category: r.get("category") ?? undefined,
         namespace: r.get("namespace"),
         status: r.get("status") ?? "completed",
@@ -1475,6 +1521,7 @@ export class Neo4jProvider implements GraphProvider {
          WHERE (m.${col} IS NULL OR m.${col}[0] = 0.0)
            AND m.text IS NOT NULL AND m.text <> ''
          RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
+                m.abstract as abstract, m.schemaVersion as schemaVersion, m.versionedAt as versionedAt,
                 m.category as category, m.namespace as namespace, m.status as status,
                 m.error as error, m.createdAt as createdAt`,
       );
@@ -1483,6 +1530,9 @@ export class Neo4jProvider implements GraphProvider {
         name: r.get("name") ?? "",
         text: r.get("text"),
         summary: r.get("summary") ?? "",
+        abstract: r.get("abstract") || "",
+        schemaVersion: r.get("schemaVersion") || "0.0.0",
+        versionedAt: r.get("versionedAt") || undefined,
         category: r.get("category") ?? undefined,
         namespace: r.get("namespace") ?? "",
         status: r.get("status") ?? "completed",
@@ -1611,6 +1661,36 @@ export class Neo4jProvider implements GraphProvider {
         outgoing: outgoingResult.records[0]?.get("updated")?.toNumber() ?? 0,
         incoming: incomingResult.records[0]?.get("updated")?.toNumber() ?? 0,
       };
+    } finally {
+      await session.close();
+    }
+  }
+
+  async updateMemorySummary(
+    memoryId: string,
+    fields: { abstract: string; summary: string; schemaVersion: string; versionedAt: string },
+  ): Promise<void> {
+    const session = this.driver.session();
+    try {
+      await session.run(
+        `MATCH (m:Memory {id: $id}) WHERE m.deletedAt IS NULL OR m.deletedAt = ''
+         SET m.abstract = $abstract, m.summary = $summary,
+             m.schemaVersion = $schemaVersion, m.versionedAt = $versionedAt`,
+        { id: memoryId, ...fields },
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async countMemories(namespace: string): Promise<number> {
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (m:Memory) WHERE m.namespace = $ns AND (m.deletedAt IS NULL OR m.deletedAt = '') AND m.name <> '__ns_rollup__' RETURN count(m) as count`,
+        { ns: namespace },
+      );
+      return Number(result.records[0]?.get("count") ?? 0);
     } finally {
       await session.close();
     }

@@ -156,6 +156,15 @@ export interface GraphProvider {
     factId: string,
     embeddings: EmbeddingMap,
   ): Promise<void>;
+
+  /** Update summary fields on a Memory (for self-evolving regeneration). */
+  updateMemorySummary(
+    memoryId: string,
+    fields: { abstract: string; summary: string; schemaVersion: string; versionedAt: string },
+  ): Promise<void>;
+
+  /** Count memories in a namespace (for rollup threshold). */
+  countMemories(namespace: string): Promise<number>;
 }
 
 export async function createGraphProvider(): Promise<GraphProvider> {

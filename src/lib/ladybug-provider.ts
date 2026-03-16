@@ -206,6 +206,11 @@ export class LadybugProvider implements GraphProvider {
       `ALTER TABLE RELATES_TO ADD confidenceReason STRING DEFAULT ''`,
     );
 
+    // Migration: add tiered summary fields
+    await this.tryQuery(`ALTER TABLE Memory ADD abstract STRING DEFAULT ''`);
+    await this.tryQuery(`ALTER TABLE Memory ADD schemaVersion STRING DEFAULT '0.0.0'`);
+    await this.tryQuery(`ALTER TABLE Memory ADD versionedAt STRING DEFAULT ''`);
+
     // Migration: add 384-dim fallback embedding columns
     await this.tryQuery(
       `ALTER TABLE Memory ADD embedding384 DOUBLE[384] DEFAULT ${this.zeroEmbeddingStr(384)}`,
@@ -285,8 +290,9 @@ export class LadybugProvider implements GraphProvider {
     );
     await this.executeQuery(
       `CREATE (m:Memory {
-         id: $id, name: $name, text: $text, summary: $summary,
+         id: $id, name: $name, text: $text, abstract: $abstract, summary: $summary,
          category: $category, namespace: $namespace, status: $status, error: $error,
+         schemaVersion: $schemaVersion, versionedAt: $versionedAt,
          ${embCols.join(", ")},
          createdAt: $createdAt, deletedAt: ''
        })`,
@@ -294,11 +300,14 @@ export class LadybugProvider implements GraphProvider {
         id: memory.id,
         name: memory.name,
         text: memory.text,
+        abstract: memory.abstract ?? "",
         summary: memory.summary,
         category: memory.category ?? "",
         namespace: memory.namespace,
         status: memory.status ?? "completed",
         error: memory.error ?? "",
+        schemaVersion: memory.schemaVersion ?? "0.0.0",
+        versionedAt: memory.versionedAt ?? new Date().toISOString(),
         createdAt,
       },
     );
@@ -601,10 +610,13 @@ export class LadybugProvider implements GraphProvider {
       name: r.name as string,
       text: r.text as string,
       summary: r.summary as string,
+      abstract: (r.abstract as string) || "",
       category: ((r.category as string) || undefined) as Memory["category"],
       namespace: r.namespace as string,
       status: (r.status as Memory["status"]) ?? "completed",
       error: (r.error as string) || undefined,
+      schemaVersion: (r.schemaVersion as string) || "0.0.0",
+      versionedAt: (r.versionedAt as string) || undefined,
       createdAt: new Date(r.createdAt as string),
     }));
   }
@@ -703,10 +715,13 @@ export class LadybugProvider implements GraphProvider {
             name: memRows[0].name as string,
             text: memRows[0].text as string,
             summary: memRows[0].summary as string,
+            abstract: (memRows[0].abstract as string) || "",
             category: ((memRows[0].category as string) || undefined) as Memory["category"],
             namespace: memRows[0].namespace as string,
             status: (memRows[0].status as Memory["status"]) ?? "completed",
             error: (memRows[0].error as string) || undefined,
+            schemaVersion: (memRows[0].schemaVersion as string) || "0.0.0",
+            versionedAt: (memRows[0].versionedAt as string) || undefined,
             createdAt: new Date(memRows[0].createdAt as string),
           }
         : undefined;
@@ -920,8 +935,9 @@ export class LadybugProvider implements GraphProvider {
     }
     await this.executeQuery(
       `CREATE (m:Memory {
-         id: $id, name: $name, text: $text, summary: $summary, category: $category,
-         namespace: $namespace, status: $status, error: $error,
+         id: $id, name: $name, text: $text, abstract: $abstract, summary: $summary,
+         category: $category, namespace: $namespace, status: $status, error: $error,
+         schemaVersion: $schemaVersion, versionedAt: $versionedAt,
          ${embCols.join(", ")},
          createdAt: $createdAt, deletedAt: ''
        })`,
@@ -929,11 +945,14 @@ export class LadybugProvider implements GraphProvider {
         id: memory.id,
         name: memory.name,
         text: memory.text,
+        abstract: memory.abstract ?? "",
         summary: memory.summary,
         category: memory.category ?? "",
         namespace: memory.namespace,
         status: memory.status,
         error: memory.error ?? "",
+        schemaVersion: memory.schemaVersion ?? "0.0.0",
+        versionedAt: memory.versionedAt ?? new Date().toISOString(),
         createdAt: memory.createdAt.toISOString(),
       },
     );
@@ -972,10 +991,13 @@ export class LadybugProvider implements GraphProvider {
         name: m.name as string,
         text: m.text as string,
         summary: m.summary as string,
+        abstract: (m.abstract as string) || "",
         category: ((m.category as string) || undefined) as Memory["category"],
         namespace: m.namespace as string,
         status: (m.status as Memory["status"]) ?? "pending",
         error: (m.error as string) || undefined,
+        schemaVersion: (m.schemaVersion as string) || "0.0.0",
+        versionedAt: (m.versionedAt as string) || undefined,
         createdAt: new Date(m.createdAt as string),
       };
     });
@@ -1090,10 +1112,13 @@ export class LadybugProvider implements GraphProvider {
       name: r.name as string,
       text: r.text as string,
       summary: r.summary as string,
+      abstract: (r.abstract as string) || "",
       category: ((r.category as string) || undefined) as Memory["category"],
       namespace: r.namespace as string,
       status: (r.status as Memory["status"]) ?? "completed",
       error: (r.error as string) || undefined,
+      schemaVersion: (r.schemaVersion as string) || "0.0.0",
+      versionedAt: (r.versionedAt as string) || undefined,
       createdAt: new Date(r.createdAt as string),
     }));
   }
@@ -1173,9 +1198,10 @@ export class LadybugProvider implements GraphProvider {
     const result = await this.conn.query(
       `MATCH (m:Memory)
        WHERE m.deletedAt = '' AND m.${col}[1] = 0.0 AND m.text IS NOT NULL AND m.text <> ''
-       RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
-              m.category as category, m.namespace as namespace, m.status as status,
-              m.error as error, m.createdAt as createdAt`,
+       RETURN m.id as id, m.name as name, m.text as text, m.abstract as abstract,
+              m.summary as summary, m.category as category, m.namespace as namespace,
+              m.status as status, m.error as error, m.schemaVersion as schemaVersion,
+              m.versionedAt as versionedAt, m.createdAt as createdAt`,
     );
     const rows = await result.getAll();
     return rows.map((r) => ({
@@ -1183,10 +1209,13 @@ export class LadybugProvider implements GraphProvider {
       name: r.name as string,
       text: r.text as string,
       summary: r.summary as string,
+      abstract: (r.abstract as string) || "",
       category: ((r.category as string) || undefined) as Memory["category"],
       namespace: r.namespace as string,
       status: (r.status as Memory["status"]) ?? "completed",
       error: (r.error as string) || undefined,
+      schemaVersion: (r.schemaVersion as string) || "0.0.0",
+      versionedAt: (r.versionedAt as string) || undefined,
       createdAt: new Date(r.createdAt as string),
     }));
   }
@@ -1375,5 +1404,26 @@ export class LadybugProvider implements GraphProvider {
     const entities = Number(entityRows[0]?.count ?? 0);
 
     return { memories, entities, facts };
+  }
+
+  async updateMemorySummary(
+    memoryId: string,
+    fields: { abstract: string; summary: string; schemaVersion: string; versionedAt: string },
+  ): Promise<void> {
+    await this.executeQuery(
+      `MATCH (m:Memory {id: $id, deletedAt: ''})
+       SET m.abstract = $abstract, m.summary = $summary,
+           m.schemaVersion = $schemaVersion, m.versionedAt = $versionedAt`,
+      { id: memoryId, ...fields },
+    );
+  }
+
+  async countMemories(namespace: string): Promise<number> {
+    const result = await this.conn.query(
+      `MATCH (m:Memory) WHERE m.namespace = $ns AND m.deletedAt = '' AND m.name <> '__ns_rollup__' RETURN count(m) as count`,
+      { ns: namespace },
+    );
+    const rows = await result.getAll();
+    return Number(rows[0]?.count ?? 0);
   }
 }
