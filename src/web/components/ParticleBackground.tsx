@@ -21,24 +21,22 @@ interface Particle {
   alpha: number;
 }
 
-// Neon cyber color palette for particles
+// Monochrome palette — subtle so it doesn't compete with the knowledge graph
 const PARTICLE_COLORS = [
-  "#00f5d4", // cyan
-  "#6482b4", // blue/slate
-  "#ffc300", // amber
-  "#00c4a7", // teal
+  "#3a4555", // dark slate
+  "#2d3848", // darker slate
+  "#4a5568", // muted gray
 ];
 
-// Configuration
-const PARTICLE_COUNT = 70;
-const CONNECTION_DISTANCE = 120;
-const PARTICLE_MIN_RADIUS = 1;
-const PARTICLE_MAX_RADIUS = 3;
-const PARTICLE_MIN_SPEED = 0.1;
-const PARTICLE_MAX_SPEED = 0.3;
-const PARTICLE_MIN_ALPHA = 0.15;
-const PARTICLE_MAX_ALPHA = 0.4;
-const CONNECTION_ALPHA = 0.15;
+const PARTICLE_COUNT = 50;
+const CONNECTION_DISTANCE = 100;
+const PARTICLE_MIN_RADIUS = 0.5;
+const PARTICLE_MAX_RADIUS = 1.5;
+const PARTICLE_MIN_SPEED = 0.05;
+const PARTICLE_MAX_SPEED = 0.15;
+const PARTICLE_MIN_ALPHA = 0.1;
+const PARTICLE_MAX_ALPHA = 0.2;
+const CONNECTION_ALPHA = 0.06;
 
 export function ParticleBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);

@@ -119,9 +119,9 @@ export function Graph({ nodes, links }: GraphProps) {
       const fg = graphRef.current;
       const n = graphData.nodes.length;
 
-      fg.d3Force("charge")?.strength(-250 - n * 2);
-      fg.d3Force("link")?.distance(100);
-      fg.d3Force("center")?.strength(0.04);
+      fg.d3Force("charge")?.strength(-200 - n);
+      fg.d3Force("link")?.distance(80);
+      fg.d3Force("center")?.strength(0.1); // Strong centering pulls clusters together
 
       setTimeout(() => {
         fg.zoomToFit(400, 50);
@@ -151,7 +151,7 @@ export function Graph({ nodes, links }: GraphProps) {
     ctx.fill();
 
     // Draw label below node (only if zoomed in enough)
-    if (globalScale > 0.4) {
+    if (globalScale > 0.3) {
       ctx.font = `600 ${fontSize}px Sans-Serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
