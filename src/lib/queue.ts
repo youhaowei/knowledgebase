@@ -14,6 +14,11 @@ import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
 import { track } from "./analytics.js";
+import { summarySchema } from "./versions.js";
+import {
+  semver,
+  isoFrom,
+} from "../../libs/wystack/packages/version/src/index";
 
 type QueueEntry = {
   memory: Memory;
@@ -70,9 +75,12 @@ export class Queue {
         // 1. Extract entities and edges using Claude/Gemini (Edge-as-Fact model)
         console.error(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
         const extractStart = performance.now();
-        const { entities, edges, summary, category } = await extract(memory.text);
+        const { entities, edges, abstract, summary, category } = await extract(memory.text);
+        memory.abstract = abstract;
         memory.summary = summary;
         memory.category = category ?? "general";
+        memory.schemaVersion = String(summarySchema.current);
+        memory.versionedAt = new Date().toISOString();
         track("queue.extract", {
           namespace: ns,
           duration_ms: performance.now() - extractStart,
@@ -118,6 +126,12 @@ export class Queue {
         });
 
         console.error(`[Queue] Memory ${memory.id} processed successfully`);
+
+        // 6. Self-evolving: regenerate one stale memory per cycle (fire-and-forget)
+        this.regenerateOneStale(ns).catch((err: unknown) =>
+          console.error(`[Queue] Self-evolving maintenance error:`, err),
+        );
+
         resolve();
       } catch (error) {
         console.error(`[Queue] Error processing memory ${memory.id}:`, error);
@@ -132,6 +146,38 @@ export class Queue {
     }
 
     this.processing.delete(namespace);
+  }
+
+  /**
+   * Self-evolving: find one stale memory in this namespace and regenerate its summary.
+   * Checks version lag, then time-based staleness. Processes at most one per call.
+   */
+  private async regenerateOneStale(namespace: string): Promise<void> {
+    const memories = await this.graph.findMemories({ namespace }, 50);
+    const staleMemory = memories.find((m) => {
+      if (m.name === "__ns_rollup__") return false;
+      const result = summarySchema.checkStaleness({
+        schemaVersion: semver(m.schemaVersion || "0.0.0"),
+        versionedAt: isoFrom(m.versionedAt || new Date(0).toISOString()),
+      });
+      return result.stale;
+    });
+
+    if (!staleMemory) return;
+
+    console.error(`[Queue] Regenerating stale memory ${staleMemory.id} (${staleMemory.name})...`);
+    const { abstract: newAbstract, summary: newSummary } = await extract(staleMemory.text);
+    await this.graph.updateMemorySummary(staleMemory.id, {
+      abstract: newAbstract,
+      summary: newSummary,
+      schemaVersion: String(summarySchema.current),
+      versionedAt: new Date().toISOString(),
+    });
+    track("queue.regenerate", {
+      namespace,
+      meta: { memoryId: staleMemory.id, reason: "self-evolving" },
+    });
+    console.error(`[Queue] Regenerated stale memory ${staleMemory.id}`);
   }
 
   /**
