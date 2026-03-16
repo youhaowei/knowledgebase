@@ -119,10 +119,9 @@ export function Graph({ nodes, links }: GraphProps) {
       const fg = graphRef.current;
       const n = graphData.nodes.length;
 
-      // Moderate repulsion — enough to spread but not scatter
-      fg.d3Force("charge")?.strength(-200 - n);
-      fg.d3Force("link")?.distance(90);
-      fg.d3Force("center")?.strength(0.05);
+      fg.d3Force("charge")?.strength(-250 - n * 2);
+      fg.d3Force("link")?.distance(100);
+      fg.d3Force("center")?.strength(0.04);
 
       setTimeout(() => {
         fg.zoomToFit(400, 50);
