@@ -236,9 +236,14 @@ const reextractState = {
   current: 0,
   total: 0,
   currentName: "",
+  phase: "" as "" | "extracting" | "embedding-memory" | "embedding-edges" | "storing",
+  edgeCurrent: 0,
+  edgeTotal: 0,
   success: 0,
   failed: 0,
   errors: [] as string[],
+  lastEntities: 0,
+  lastEdges: 0,
 };
 
 export const getReextractStatus = createServerFn().handler(async () => ({ ...reextractState }));
@@ -264,13 +269,26 @@ export const reextractAll = createServerFn({ method: "POST" }).handler(async () 
       const memory = memories[i]!;
       reextractState.current = i + 1;
       reextractState.currentName = memory.name || memory.id;
+      reextractState.phase = "extracting";
+      reextractState.edgeCurrent = 0;
+      reextractState.edgeTotal = 0;
       try {
         const extraction = await extract(memory.text);
+        reextractState.lastEntities = extraction.entities.length;
+        reextractState.lastEdges = extraction.edges.length;
+        reextractState.edgeTotal = extraction.edges.length;
+
+        reextractState.phase = "embedding-memory";
         const memEmb = await embedDual(memory.text);
+
+        reextractState.phase = "embedding-edges";
         const edgeEmbeddings = [];
-        for (const edge of extraction.edges) {
-          edgeEmbeddings.push(await embedDual(edge.fact));
+        for (let j = 0; j < extraction.edges.length; j++) {
+          reextractState.edgeCurrent = j + 1;
+          edgeEmbeddings.push(await embedDual(extraction.edges[j]!.fact));
         }
+
+        reextractState.phase = "storing";
         await gp.store(
           { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
           extraction.entities,

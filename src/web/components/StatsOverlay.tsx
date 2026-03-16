@@ -30,8 +30,13 @@ export function StatsOverlay({
     current: number;
     total: number;
     currentName: string;
+    phase: string;
+    edgeCurrent: number;
+    edgeTotal: number;
     success: number;
     failed: number;
+    lastEntities: number;
+    lastEdges: number;
   } | null>(null);
 
   const startReextract = useCallback(async () => {
@@ -127,24 +132,43 @@ export function StatsOverlay({
 
         {/* Re-extract progress */}
         {reextractStatus?.running && (
-          <div className="mt-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[11px] text-text-secondary truncate max-w-[200px]">
+          <div className="mt-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl space-y-1.5">
+            {/* Memory name + count */}
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-text-primary font-medium truncate max-w-[200px]">
                 {reextractStatus.currentName}
               </span>
               <span className="text-[11px] text-text-tertiary ml-2">
                 {reextractStatus.current}/{reextractStatus.total}
               </span>
             </div>
-            <div className="h-1 bg-elevated rounded-full overflow-hidden">
+
+            {/* Overall progress bar */}
+            <div className="h-1.5 bg-elevated rounded-full overflow-hidden">
               <div
                 className="h-full bg-glow-cyan rounded-full transition-all duration-500"
                 style={{ width: `${(reextractStatus.current / reextractStatus.total) * 100}%` }}
               />
             </div>
-            {reextractStatus.failed > 0 && (
-              <span className="text-[10px] text-red-400 mt-1 block">{reextractStatus.failed} failed</span>
-            )}
+
+            {/* Phase detail */}
+            <div className="flex items-center justify-between text-[10px] text-text-tertiary">
+              <span>
+                {reextractStatus.phase === "extracting" && "Extracting entities & edges..."}
+                {reextractStatus.phase === "embedding-memory" && "Embedding memory text..."}
+                {reextractStatus.phase === "embedding-edges" && `Embedding edges ${reextractStatus.edgeCurrent}/${reextractStatus.edgeTotal}...`}
+                {reextractStatus.phase === "storing" && "Storing to graph..."}
+              </span>
+              {reextractStatus.lastEntities > 0 && (
+                <span>{reextractStatus.lastEntities} entities, {reextractStatus.lastEdges} edges</span>
+              )}
+            </div>
+
+            {/* Stats so far */}
+            <div className="flex gap-3 text-[10px]">
+              <span className="text-glow-cyan">{reextractStatus.success} done</span>
+              {reextractStatus.failed > 0 && <span className="text-red-400">{reextractStatus.failed} failed</span>}
+            </div>
           </div>
         )}
 
