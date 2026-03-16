@@ -1,19 +1,28 @@
 /**
- * StatsOverlay - Minimal floating stats display
+ * StatsOverlay - Minimal floating stats display with namespace selector
  *
  * Shows key metrics in a subtle overlay in the top-left corner.
- * Doesn't distract from the main graph visualization.
+ * Includes a namespace dropdown to filter the graph and stats.
  */
 
-import { Brain, Link2, Users } from "lucide-react";
+import { Brain, Link2, Users, ChevronDown } from "lucide-react";
 import type { Stats } from "./types";
 
 interface StatsOverlayProps {
   stats: Stats | null;
   nodeCount: number;
+  namespaces: string[];
+  selectedNamespace: string | undefined;
+  onNamespaceChange: (ns: string | undefined) => void;
 }
 
-export function StatsOverlay({ stats, nodeCount }: StatsOverlayProps) {
+export function StatsOverlay({
+  stats,
+  nodeCount,
+  namespaces,
+  selectedNamespace,
+  onNamespaceChange,
+}: StatsOverlayProps) {
   if (!stats) return null;
 
   const items = [
@@ -42,22 +51,42 @@ export function StatsOverlay({ stats, nodeCount }: StatsOverlayProps) {
         </div>
       </div>
 
-      {/* Stats pills */}
-      <div className="flex gap-2">
-        {items.map((item) => (
-          <div
-            key={item.label}
-            className="flex items-center gap-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl transition-all duration-300 hover:border-border-glow group"
+      {/* Namespace selector + Stats pills */}
+      <div className="flex flex-col gap-2">
+        {/* Namespace dropdown */}
+        <div className="relative">
+          <select
+            value={selectedNamespace ?? ""}
+            onChange={(e) => onNamespaceChange(e.target.value || undefined)}
+            className="appearance-none w-full px-3 py-2 pr-8 bg-surface/60 backdrop-blur-xl border border-border rounded-xl text-xs font-medium text-text-secondary hover:border-border-glow transition-colors cursor-pointer focus:outline-none focus:border-glow-cyan"
           >
-            <item.icon className="w-3.5 h-3.5 text-text-tertiary group-hover:text-glow-cyan transition-colors" />
-            <span className="font-display text-sm font-semibold text-text-primary">
-              {item.value}
-            </span>
-            <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary hidden sm:inline">
-              {item.label}
-            </span>
-          </div>
-        ))}
+            <option value="">All namespaces</option>
+            {namespaces.map((ns) => (
+              <option key={ns} value={ns}>
+                {ns}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-tertiary pointer-events-none" />
+        </div>
+
+        {/* Stats pills */}
+        <div className="flex gap-2">
+          {items.map((item) => (
+            <div
+              key={item.label}
+              className="flex items-center gap-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl transition-all duration-300 hover:border-border-glow group"
+            >
+              <item.icon className="w-3.5 h-3.5 text-text-tertiary group-hover:text-glow-cyan transition-colors" />
+              <span className="font-display text-sm font-semibold text-text-primary">
+                {item.value}
+              </span>
+              <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary hidden sm:inline">
+                {item.label}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

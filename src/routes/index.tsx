@@ -4,7 +4,7 @@ import { GraphClient } from "@/web/components/GraphClient";
 import { CommandPalette } from "@/web/components/CommandPalette";
 import { StatsOverlay } from "@/web/components/StatsOverlay";
 import { ParticleBackground } from "@/web/components/ParticleBackground";
-import { getGraphData, getStats } from "@/server/functions";
+import { getGraphData, getStats, listNamespaces } from "@/server/functions";
 import type { GraphNode, GraphLink, Stats } from "@/web/components/types";
 
 // Type for raw graph data from server (edge-as-fact model)
@@ -105,62 +105,70 @@ function processGraphData(graphData: RawGraphData) {
  */
 export const Route = createFileRoute("/")({
   loader: async () => {
-    const [graphData, stats] = await Promise.all([getGraphData(), getStats()]);
-    return { graphData, stats };
+    const [graphData, stats, namespaces] = await Promise.all([
+      getGraphData({ data: {} }),
+      getStats({ data: {} }),
+      listNamespaces(),
+    ]);
+    return { graphData, stats, namespaces };
   },
   component: Home,
 });
 
 function Home() {
-  // Get SSR data from loader - available immediately, no loading state!
   const loaderData = Route.useLoaderData();
 
-  // Process initial data from loader
   const initialProcessed = processGraphData(loaderData.graphData);
 
-  // State for dynamic updates (polling)
   const [nodes, setNodes] = useState<GraphNode[]>(initialProcessed.itemNodes);
   const [links, setLinks] = useState<GraphLink[]>(initialProcessed.validLinks);
   const [stats, setStats] = useState<Stats>(loaderData.stats);
+  const [namespaces, setNamespaces] = useState<string[]>(loaderData.namespaces);
+  const [selectedNamespace, setSelectedNamespace] = useState<string | undefined>(undefined);
 
-  // Refresh function for polling and post-mutation updates
-  const refreshData = useCallback(async () => {
+  const refreshData = useCallback(async (ns?: string) => {
     try {
-      const [graphData, statsData] = await Promise.all([
-        getGraphData(),
-        getStats(),
+      const filter = ns ? { data: { namespace: ns } } : { data: {} };
+      const [graphData, statsData, nsList] = await Promise.all([
+        getGraphData(filter),
+        getStats(filter),
+        listNamespaces(),
       ]);
 
       const processed = processGraphData(graphData);
 
-      // Only update state if data actually changed (prevents unnecessary re-renders)
       setNodes((prev) => {
         const newSerialized = JSON.stringify(processed.itemNodes);
-        const prevSerialized = JSON.stringify(prev);
-        return newSerialized === prevSerialized ? prev : processed.itemNodes;
+        return newSerialized === JSON.stringify(prev) ? prev : processed.itemNodes;
       });
 
       setLinks((prev) => {
         const newSerialized = JSON.stringify(processed.validLinks);
-        const prevSerialized = JSON.stringify(prev);
-        return newSerialized === prevSerialized ? prev : processed.validLinks;
+        return newSerialized === JSON.stringify(prev) ? prev : processed.validLinks;
       });
 
       setStats((prev) => {
         const newSerialized = JSON.stringify(statsData);
-        const prevSerialized = JSON.stringify(prev);
-        return newSerialized === prevSerialized ? prev : statsData;
+        return newSerialized === JSON.stringify(prev) ? prev : statsData;
       });
+
+      setNamespaces(nsList);
     } catch (error) {
       console.error("Failed to refresh data:", error);
     }
   }, []);
 
-  // Polling for updates (keeps graph in sync)
-  useEffect(() => {
-    const interval = setInterval(refreshData, 5000);
-    return () => clearInterval(interval);
+  // Refresh when namespace changes
+  const handleNamespaceChange = useCallback((ns: string | undefined) => {
+    setSelectedNamespace(ns);
+    refreshData(ns);
   }, [refreshData]);
+
+  // Polling for updates
+  useEffect(() => {
+    const interval = setInterval(() => refreshData(selectedNamespace), 5000);
+    return () => clearInterval(interval);
+  }, [refreshData, selectedNamespace]);
 
   return (
     <>
@@ -172,10 +180,16 @@ function Home() {
         <GraphClient nodes={nodes} links={links} />
 
         {/* Stats overlay in top-left corner */}
-        <StatsOverlay stats={stats} nodeCount={nodes.length} />
+        <StatsOverlay
+          stats={stats}
+          nodeCount={nodes.length}
+          namespaces={namespaces}
+          selectedNamespace={selectedNamespace}
+          onNamespaceChange={handleNamespaceChange}
+        />
 
         {/* Spotlight-style command palette at bottom */}
-        <CommandPalette onRefreshData={refreshData} />
+        <CommandPalette onRefreshData={() => refreshData(selectedNamespace)} />
       </div>
     </>
   );

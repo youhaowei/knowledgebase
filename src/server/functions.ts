@@ -14,25 +14,33 @@ import { analyticsContext } from "../lib/analytics.js";
 // Queries (GET by default)
 // ============================================================================
 
-export const getGraphData = createServerFn().handler(async () => {
-  const result = await ops.getGraphData();
-  return {
-    nodes: result.nodes,
-    edges: result.links.map((link) => ({
-      source: link.source,
-      target: link.target,
-      relationType: link.relationType,
-      fact: link.fact,
-      sentiment: link.sentiment,
-      confidence: link.confidence,
-      edgeId: link.edgeId,
-    })),
-  };
+const namespaceFilterSchema = z.object({
+  namespace: z.string().optional(),
 });
 
-export const getStats = createServerFn().handler(() =>
-  analyticsContext.run({ source: "web" }, () => ops.stats()),
-);
+export const getGraphData = createServerFn()
+  .inputValidator((data: unknown) => namespaceFilterSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const result = await ops.getGraphData(data.namespace || undefined);
+    return {
+      nodes: result.nodes,
+      edges: result.links.map((link) => ({
+        source: link.source,
+        target: link.target,
+        relationType: link.relationType,
+        fact: link.fact,
+        sentiment: link.sentiment,
+        confidence: link.confidence,
+        edgeId: link.edgeId,
+      })),
+    };
+  });
+
+export const getStats = createServerFn()
+  .inputValidator((data: unknown) => namespaceFilterSchema.parse(data ?? {}))
+  .handler(({ data }) =>
+    analyticsContext.run({ source: "web" }, () => ops.stats(data.namespace || undefined)),
+  );
 
 export const listNamespaces = createServerFn().handler(async () => {
   return ops.listNamespaces();
