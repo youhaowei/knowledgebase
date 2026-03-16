@@ -325,81 +325,10 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     // Note: The highlight sets update refs, React handles re-renders through state changes
   }, [graphData.links]);
 
-  // Draw cluster hulls: outer namespace hulls + inner sub-cluster hulls
-  const paintClusters = useCallback((ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const allNodes = graphData.nodes.filter((n) => n.x != null && n.y != null);
-
-    // Layer 1: Namespace hulls (outer, larger, dimmer)
-    const nsClusters = new Map<string, ForceNode[]>();
-    for (const node of allNodes) {
-      const ns = nodes.find((orig) => orig.name === node.id)?.namespace ?? "default";
-      if (!nsClusters.has(ns)) nsClusters.set(ns, []);
-      nsClusters.get(ns)!.push(node);
-    }
-
-    let nsIdx = 0;
-    for (const [ns, nsNodes] of nsClusters) {
-      if (nsNodes.length < 2) { nsIdx++; continue; }
-      const cx = nsNodes.reduce((s, n) => s + n.x!, 0) / nsNodes.length;
-      const cy = nsNodes.reduce((s, n) => s + n.y!, 0) / nsNodes.length;
-      const maxDist = Math.max(...nsNodes.map((n) => Math.sqrt((n.x! - cx) ** 2 + (n.y! - cy) ** 2)));
-      const radius = maxDist + 40;
-
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
-      ctx.fillStyle = CLUSTER_COLORS[nsIdx % CLUSTER_COLORS.length].replace("0.06", "0.03");
-      ctx.fill();
-      ctx.strokeStyle = CLUSTER_COLORS[nsIdx % CLUSTER_COLORS.length].replace("0.06", "0.08");
-      ctx.lineWidth = 1;
-      ctx.setLineDash([6, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Namespace label
-      const fontSize = Math.max(11, 13 / globalScale);
-      ctx.font = `600 ${fontSize}px Sans-Serif`;
-      ctx.textAlign = "center";
-      ctx.fillStyle = "rgba(136, 146, 166, 0.35)";
-      ctx.fillText(ns, cx, cy - radius + fontSize + 4);
-      nsIdx++;
-    }
-
-    // Layer 2: Connected component sub-clusters (inner, smaller, brighter)
-    const subClusters = new Map<number, ForceNode[]>();
-    for (const node of allNodes) {
-      const cid = node.clusterId ?? 0;
-      if (!subClusters.has(cid)) subClusters.set(cid, []);
-      subClusters.get(cid)!.push(node);
-    }
-
-    for (const [cid, clusterNodes] of subClusters) {
-      if (clusterNodes.length < 3) continue;
-      const cx = clusterNodes.reduce((s, n) => s + n.x!, 0) / clusterNodes.length;
-      const cy = clusterNodes.reduce((s, n) => s + n.y!, 0) / clusterNodes.length;
-      const maxDist = Math.max(...clusterNodes.map((n) => Math.sqrt((n.x! - cx) ** 2 + (n.y! - cy) ** 2)));
-      const radius = maxDist + 20;
-
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
-      ctx.fillStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
-      ctx.fill();
-      ctx.strokeStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length].replace("0.06", "0.15");
-      ctx.lineWidth = 0.5;
-      ctx.setLineDash([3, 3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Sub-cluster label (topic name)
-      const label = graphData.clusterLabels[cid] ?? "";
-      if (label && globalScale > 0.3) {
-        const fs = Math.max(8, 9 / globalScale);
-        ctx.font = `400 ${fs}px Sans-Serif`;
-        ctx.textAlign = "center";
-        ctx.fillStyle = "rgba(136, 146, 166, 0.3)";
-        ctx.fillText(label, cx, cy - radius + fs + 2);
-      }
-    }
-  }, [graphData.nodes, graphData.clusterLabels, nodes]);
+  // Minimal cluster indicator: just a faint label at each sub-cluster center
+  const paintClusters = useCallback((_ctx: CanvasRenderingContext2D, _globalScale: number) => {
+    // Intentionally minimal — proper cluster visualization is tracked as a separate task
+  }, []);
 
   if (nodes.length === 0) {
     return (
