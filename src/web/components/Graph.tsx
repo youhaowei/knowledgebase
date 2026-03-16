@@ -122,19 +122,45 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
         edgeId: l.edgeId || "",
       }));
 
-    // Assign cluster IDs by namespace
-    const namespaceList = [...new Set(forceNodes.map((n) => {
-      const ns = nodes.find((orig) => orig.name === n.id)?.namespace ?? "default";
-      return ns;
-    }))].sort();
-    const nsToCluster = new Map(namespaceList.map((ns, i) => [ns, i]));
-
-    for (const node of forceNodes) {
-      const ns = nodes.find((orig) => orig.name === node.id)?.namespace ?? "default";
-      node.clusterId = nsToCluster.get(ns) ?? 0;
+    // Build adjacency for connected components
+    const adj = new Map<string, Set<string>>();
+    for (const n of forceNodes) adj.set(n.id, new Set());
+    for (const l of forceLinks) {
+      const s = typeof l.source === "string" ? l.source : (l.source as ForceNode).id;
+      const t = typeof l.target === "string" ? l.target : (l.target as ForceNode).id;
+      adj.get(s)?.add(t);
+      adj.get(t)?.add(s);
     }
 
-    return { nodes: forceNodes, links: forceLinks, namespaceList };
+    // Detect connected components (sub-clusters)
+    const visited = new Set<string>();
+    let nextClusterId = 0;
+    const clusterLabels: string[] = [];
+    for (const node of forceNodes) {
+      if (visited.has(node.id)) continue;
+      const component: ForceNode[] = [];
+      const queue = [node.id];
+      while (queue.length) {
+        const id = queue.pop()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+        const n = forceNodes.find((f) => f.id === id);
+        if (n) { n.clusterId = nextClusterId; component.push(n); }
+        for (const neighbor of adj.get(id) ?? []) {
+          if (!visited.has(neighbor)) queue.push(neighbor);
+        }
+      }
+      const sorted = [...component].sort((a, b) => b.degree - a.degree);
+      clusterLabels.push(sorted[0]?.name ?? `cluster-${nextClusterId}`);
+      nextClusterId++;
+    }
+
+    // Build namespace list for outer hulls
+    const namespaceList = [...new Set(
+      forceNodes.map((n) => nodes.find((orig) => orig.name === n.id)?.namespace ?? "default")
+    )].sort();
+
+    return { nodes: forceNodes, links: forceLinks, clusterLabels, namespaceList };
   }, [nodes, links]);
 
   // Configure forces and fit to view when graph mounts
@@ -299,48 +325,81 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     // Note: The highlight sets update refs, React handles re-renders through state changes
   }, [graphData.links]);
 
-  // Draw namespace cluster hulls behind nodes
+  // Draw cluster hulls: outer namespace hulls + inner sub-cluster hulls
   const paintClusters = useCallback((ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const clusters = new Map<number, ForceNode[]>();
-    for (const node of graphData.nodes) {
-      if (node.x == null || node.y == null) continue;
-      const cid = node.clusterId ?? 0;
-      if (!clusters.has(cid)) clusters.set(cid, []);
-      clusters.get(cid)!.push(node);
+    const allNodes = graphData.nodes.filter((n) => n.x != null && n.y != null);
+
+    // Layer 1: Namespace hulls (outer, larger, dimmer)
+    const nsClusters = new Map<string, ForceNode[]>();
+    for (const node of allNodes) {
+      const ns = nodes.find((orig) => orig.name === node.id)?.namespace ?? "default";
+      if (!nsClusters.has(ns)) nsClusters.set(ns, []);
+      nsClusters.get(ns)!.push(node);
     }
 
-    for (const [cid, clusterNodes] of clusters) {
-      if (clusterNodes.length < 2) continue;
+    let nsIdx = 0;
+    for (const [ns, nsNodes] of nsClusters) {
+      if (nsNodes.length < 2) { nsIdx++; continue; }
+      const cx = nsNodes.reduce((s, n) => s + n.x!, 0) / nsNodes.length;
+      const cy = nsNodes.reduce((s, n) => s + n.y!, 0) / nsNodes.length;
+      const maxDist = Math.max(...nsNodes.map((n) => Math.sqrt((n.x! - cx) ** 2 + (n.y! - cy) ** 2)));
+      const radius = maxDist + 40;
 
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = CLUSTER_COLORS[nsIdx % CLUSTER_COLORS.length].replace("0.06", "0.03");
+      ctx.fill();
+      ctx.strokeStyle = CLUSTER_COLORS[nsIdx % CLUSTER_COLORS.length].replace("0.06", "0.08");
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Namespace label
+      const fontSize = Math.max(11, 13 / globalScale);
+      ctx.font = `600 ${fontSize}px Sans-Serif`;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "rgba(136, 146, 166, 0.35)";
+      ctx.fillText(ns, cx, cy - radius + fontSize + 4);
+      nsIdx++;
+    }
+
+    // Layer 2: Connected component sub-clusters (inner, smaller, brighter)
+    const subClusters = new Map<number, ForceNode[]>();
+    for (const node of allNodes) {
+      const cid = node.clusterId ?? 0;
+      if (!subClusters.has(cid)) subClusters.set(cid, []);
+      subClusters.get(cid)!.push(node);
+    }
+
+    for (const [cid, clusterNodes] of subClusters) {
+      if (clusterNodes.length < 3) continue;
       const cx = clusterNodes.reduce((s, n) => s + n.x!, 0) / clusterNodes.length;
       const cy = clusterNodes.reduce((s, n) => s + n.y!, 0) / clusterNodes.length;
-      const maxDist = Math.max(...clusterNodes.map((n) =>
-        Math.sqrt((n.x! - cx) ** 2 + (n.y! - cy) ** 2)
-      ));
-      const radius = maxDist + 35;
+      const maxDist = Math.max(...clusterNodes.map((n) => Math.sqrt((n.x! - cx) ** 2 + (n.y! - cy) ** 2)));
+      const radius = maxDist + 20;
 
-      // Fill
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
       ctx.fillStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
       ctx.fill();
-
-      // Dashed border
-      ctx.strokeStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length].replace("0.06", "0.12");
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length].replace("0.06", "0.15");
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([3, 3]);
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Namespace label at top of cluster
-      const nsName = graphData.namespaceList[cid] ?? "default";
-      const fontSize = Math.max(10, 12 / globalScale);
-      ctx.font = `500 ${fontSize}px Sans-Serif`;
-      ctx.textAlign = "center";
-      ctx.fillStyle = "rgba(136, 146, 166, 0.5)";
-      ctx.fillText(nsName, cx, cy - radius + fontSize + 2);
+      // Sub-cluster label (topic name)
+      const label = graphData.clusterLabels[cid] ?? "";
+      if (label && globalScale > 0.3) {
+        const fs = Math.max(8, 9 / globalScale);
+        ctx.font = `400 ${fs}px Sans-Serif`;
+        ctx.textAlign = "center";
+        ctx.fillStyle = "rgba(136, 146, 166, 0.3)";
+        ctx.fillText(label, cx, cy - radius + fs + 2);
+      }
     }
-  }, [graphData.nodes, graphData.namespaceList]);
+  }, [graphData.nodes, graphData.clusterLabels, nodes]);
 
   if (nodes.length === 0) {
     return (
