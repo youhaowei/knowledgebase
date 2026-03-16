@@ -12,12 +12,14 @@
 
 import { createGraphProvider, type GraphProvider } from "./graph-provider.js";
 import { Queue } from "./queue.js";
-import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
+import { embedWithDimension, embedDual, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 import { tracked } from "./analytics.js";
+import { extract } from "./extractor.js";
+import { summarySchema } from "./versions.js";
 
 let providerPromise: Promise<GraphProvider> | null = null;
 let queue: Queue;
@@ -64,12 +66,20 @@ export async function addMemory(
       id: randomUUID(),
       name: name ?? "",
       text,
+      abstract: "",
       summary: "",
       namespace,
       status: "pending",
+      schemaVersion: "0.0.0",
       createdAt: new Date(),
     };
     await q.add(memory);
+
+    // Trigger namespace rollup check (fire-and-forget)
+    maybeRegenerateRollup(namespace).catch((err) =>
+      console.error(`[Rollup] Error checking rollup:`, err),
+    );
+
     return { id: memory.id, queued: true };
   }, (result) => ({
     textLength: text.length,
@@ -196,6 +206,76 @@ export async function getGraphData(namespace?: string, nodeLimit?: number): Prom
     const gp = await getProvider();
     return gp.getGraphData(namespace, nodeLimit);
   });
+}
+
+/**
+ * Generate or regenerate a namespace rollup summary.
+ * Stored as a special Memory with name "__ns_rollup__".
+ * Called after every 5th memory in a namespace.
+ */
+export async function generateNamespaceRollup(namespace: string): Promise<void> {
+  const gp = await getProvider();
+  const memories = await gp.findMemories({ namespace }, 200);
+  const regularMemories = memories.filter((m) => m.name !== "__ns_rollup__");
+
+  if (regularMemories.length < 5) return; // Not enough content to summarize
+
+  // Concatenate L1 summaries as input
+  const allSummaries = regularMemories
+    .map((m) => `### ${m.name}\n${m.summary}`)
+    .join("\n\n");
+
+  // Extract produces abstract (L0) + summary (L1) from the concatenated text
+  const { abstract, summary } = await extract(
+    `Namespace "${namespace}" contains ${regularMemories.length} memories:\n\n${allSummaries}`,
+  );
+
+  const rollupId = `__ns_rollup__:${namespace}`;
+  const now = new Date();
+
+  // Check if rollup already exists
+  const existing = memories.find((m) => m.name === "__ns_rollup__");
+
+  if (existing) {
+    // Update existing rollup
+    await gp.updateMemorySummary(existing.id, {
+      abstract,
+      summary,
+      schemaVersion: String(summarySchema.current),
+      versionedAt: now.toISOString(),
+    });
+  } else {
+    // Create new rollup memory
+    const rollupMemory: Memory = {
+      id: rollupId,
+      name: "__ns_rollup__",
+      text: allSummaries,
+      abstract,
+      summary,
+      category: "general",
+      namespace,
+      status: "completed",
+      schemaVersion: String(summarySchema.current),
+      versionedAt: now.toISOString(),
+      createdAt: now,
+    };
+    const emb = await embedDual(abstract);
+    await gp.store(rollupMemory, [], [], emb, []);
+  }
+
+  console.error(`[Rollup] Generated rollup for namespace "${namespace}" (${regularMemories.length} memories)`);
+}
+
+/**
+ * Check if a namespace rollup needs regeneration and trigger if so.
+ * Called after memory ingestion.
+ */
+export async function maybeRegenerateRollup(namespace: string): Promise<void> {
+  const gp = await getProvider();
+  const count = await gp.countMemories(namespace);
+  if (count > 0 && count % 5 === 0) {
+    await generateNamespaceRollup(namespace);
+  }
 }
 
 export async function close() {
