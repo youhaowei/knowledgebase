@@ -10,7 +10,6 @@
  * - Lazy DB init — no cost until first event
  */
 
-import { Database } from "bun:sqlite";
 import { AsyncLocalStorage } from "async_hooks";
 import { join } from "path";
 import { homedir } from "os";
@@ -36,7 +35,20 @@ const TABLE_DDL = `CREATE TABLE IF NOT EXISTS events (
 const IDX_TS = "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)";
 const IDX_OP = "CREATE INDEX IF NOT EXISTS idx_events_op ON events(operation)";
 
-let db: Database | null = null;
+// bun:sqlite is lazy-loaded to avoid breaking Vite SSR
+// (Vite's Node.js-based SSR can't resolve bun: protocol at module scan time)
+let Database: typeof import("bun:sqlite").Database | null = null;
+let db: import("bun:sqlite").Database | null = null;
+
+function loadSqlite() {
+  if (Database) return Database;
+  try {
+    Database = require("bun:sqlite").Database;
+    return Database;
+  } catch {
+    return null;
+  }
+}
 
 function getDbPath() {
   if (process.env.__ANALYTICS_DB_PATH) return process.env.__ANALYTICS_DB_PATH;
@@ -44,12 +56,12 @@ function getDbPath() {
   return join(base, "analytics.db");
 }
 
-function getDb(): Database | null {
+function getDb() {
   if (db) return db;
+  const Db = loadSqlite();
+  if (!Db) return null;
   try {
-    // Use local variable — only assign to module singleton after full init succeeds.
-    // Prevents a partial init (e.g., table creation fails) from poisoning all future calls.
-    const instance = new Database(getDbPath(), { create: true });
+    const instance = new Db(getDbPath(), { create: true });
     instance.run("PRAGMA journal_mode=WAL");
     instance.run(TABLE_DDL);
     instance.run(IDX_TS);
