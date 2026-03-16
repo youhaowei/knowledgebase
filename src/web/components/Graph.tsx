@@ -143,9 +143,9 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
       const fg = graphRef.current;
       const n = graphData.nodes.length;
 
-      fg.d3Force("charge")?.strength(-200 - n);
-      fg.d3Force("link")?.distance(80);
-      fg.d3Force("center")?.strength(0.1); // Strong centering pulls clusters together
+      fg.d3Force("charge")?.strength(-200 - n * 1.5);
+      fg.d3Force("link")?.distance(90);
+      fg.d3Force("center")?.strength(0.08);
 
       setTimeout(() => {
         fg.zoomToFit(400, 50);
@@ -155,13 +155,13 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
 
   // Custom node rendering
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const size = 7 + node.importance * 10; // 7-17px radius based on importance
+    const size = 4 + node.importance * 6; // 4-10px radius based on importance
     const fontSize = 11 / globalScale;
 
     // Outer glow
     ctx.save();
     ctx.shadowColor = node.color;
-    ctx.shadowBlur = 8 + node.importance * 12;
+    ctx.shadowBlur = 4 + node.importance * 6;
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = node.color;
