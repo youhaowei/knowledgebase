@@ -97,6 +97,7 @@ describe("Type Validation", () => {
           fact: "Alice prefers TypeScript",
         },
       ],
+      abstract: "Alice prefers TypeScript over other languages",
       summary: "Alice prefers TypeScript",
       category: "preference" as const,
     };
@@ -105,12 +106,14 @@ describe("Type Validation", () => {
     expect(parsed.entities.length).toBe(2);
     expect(parsed.edges.length).toBe(1);
     expect(parsed.category).toBe("preference");
+    expect(parsed.abstract).toBe("Alice prefers TypeScript over other languages");
   });
 
   test("should accept Extraction without category (optional for LLM resilience)", () => {
     const parsed = Extraction.parse({
       entities: [],
       edges: [],
+      abstract: "test abstract",
       summary: "test",
     });
     expect(parsed.category).toBeUndefined();
@@ -182,6 +185,7 @@ describe("MemoryCategory", () => {
     const extractionResult = Extraction.parse({
       entities: [],
       edges: [],
+      abstract: "test abstract",
       summary: "test",
     });
     const category = extractionResult.category ?? "general";
