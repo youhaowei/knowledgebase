@@ -312,11 +312,10 @@ export class LadybugProvider implements GraphProvider {
       },
     );
 
+    // Dedup entities by name+namespace: find existing or create new
     for (const entity of entities) {
-      if (!entity.uuid) {
-        (entity as Entity & { uuid: string }).uuid = randomUUID();
-      }
       const entityWithScope = entity as Entity & {
+        uuid?: string;
         namespace?: string;
         scope?: string;
       };
@@ -324,20 +323,36 @@ export class LadybugProvider implements GraphProvider {
       const entityScope = entityWithScope.scope ?? "project";
       const finalNamespace = entityScope === "global" ? "" : entityNamespace;
 
-      await this.executeQuery(
-        `MERGE (e:Entity {uuid: $uuid, deletedAt: ''})
-         ON CREATE SET e.name = $name, e.type = $type, e.description = $description,
-           e.namespace = $namespace, e.scope = $scope
-         ON MATCH SET e.description = COALESCE($description, e.description)`,
-        {
-          uuid: entity.uuid,
-          name: entity.name,
-          type: entity.type,
-          description: entity.description ?? "",
-          namespace: finalNamespace,
-          scope: entityScope,
-        },
+      // Check if entity already exists
+      const existing = await this.executeQuery(
+        `MATCH (e:Entity {name: $name, namespace: $namespace, deletedAt: ''}) RETURN e.uuid as uuid`,
+        { name: entity.name, namespace: finalNamespace },
       );
+
+      if (existing[0]?.uuid) {
+        // Reuse existing uuid, update fields
+        entityWithScope.uuid = existing[0].uuid as string;
+        await this.executeQuery(
+          `MATCH (e:Entity {uuid: $uuid, deletedAt: ''})
+           SET e.type = $type, e.description = COALESCE($description, e.description)`,
+          { uuid: entityWithScope.uuid, type: entity.type, description: entity.description ?? "" },
+        );
+      } else {
+        // Create new entity
+        if (!entityWithScope.uuid) entityWithScope.uuid = randomUUID();
+        await this.executeQuery(
+          `CREATE (e:Entity {uuid: $uuid, name: $name, type: $type, description: $description,
+             namespace: $namespace, scope: $scope, deletedAt: ''})`,
+          {
+            uuid: entityWithScope.uuid,
+            name: entity.name,
+            type: entity.type,
+            description: entity.description ?? "",
+            namespace: finalNamespace,
+            scope: entityScope,
+          },
+        );
+      }
     }
 
     for (let i = 0; i < edges.length; i++) {
