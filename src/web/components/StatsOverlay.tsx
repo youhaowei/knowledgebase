@@ -5,8 +5,10 @@
  * Includes a namespace dropdown to filter the graph and stats.
  */
 
-import { Brain, Link2, Users, ChevronDown } from "lucide-react";
+import { useState, useCallback } from "react";
+import { Brain, Link2, Users, ChevronDown, RefreshCw } from "lucide-react";
 import type { Stats } from "./types";
+import { reextractAll, getReextractStatus } from "@/server/functions";
 
 interface StatsOverlayProps {
   stats: Stats | null;
@@ -23,6 +25,29 @@ export function StatsOverlay({
   selectedNamespace,
   onNamespaceChange,
 }: StatsOverlayProps) {
+  const [reextractStatus, setReextractStatus] = useState<{
+    running: boolean;
+    current: number;
+    total: number;
+    currentName: string;
+    success: number;
+    failed: number;
+  } | null>(null);
+
+  const startReextract = useCallback(async () => {
+    await reextractAll();
+    // Start polling
+    const poll = setInterval(async () => {
+      const status = await getReextractStatus();
+      setReextractStatus(status);
+      if (!status.running && status.total > 0) {
+        clearInterval(poll);
+        // Keep result visible for 5s then clear
+        setTimeout(() => setReextractStatus(null), 5000);
+      }
+    }, 1000);
+  }, []);
+
   if (!stats) return null;
 
   const items = [
@@ -86,7 +111,52 @@ export function StatsOverlay({
               </span>
             </div>
           ))}
+
+          {/* Re-extract button */}
+          <button
+            onClick={startReextract}
+            disabled={reextractStatus?.running}
+            className="flex items-center gap-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl transition-all duration-300 hover:border-glow-cyan disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-text-tertiary ${reextractStatus?.running ? "animate-spin text-glow-cyan" : ""}`} />
+            <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary">
+              {reextractStatus?.running ? "Extracting..." : "Re-extract"}
+            </span>
+          </button>
         </div>
+
+        {/* Re-extract progress */}
+        {reextractStatus?.running && (
+          <div className="mt-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] text-text-secondary truncate max-w-[200px]">
+                {reextractStatus.currentName}
+              </span>
+              <span className="text-[11px] text-text-tertiary ml-2">
+                {reextractStatus.current}/{reextractStatus.total}
+              </span>
+            </div>
+            <div className="h-1 bg-elevated rounded-full overflow-hidden">
+              <div
+                className="h-full bg-glow-cyan rounded-full transition-all duration-500"
+                style={{ width: `${(reextractStatus.current / reextractStatus.total) * 100}%` }}
+              />
+            </div>
+            {reextractStatus.failed > 0 && (
+              <span className="text-[10px] text-red-400 mt-1 block">{reextractStatus.failed} failed</span>
+            )}
+          </div>
+        )}
+
+        {/* Re-extract result */}
+        {reextractStatus && !reextractStatus.running && reextractStatus.total > 0 && (
+          <div className="mt-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-glow-cyan/30 rounded-xl">
+            <span className="text-[11px] text-glow-cyan">
+              Done: {reextractStatus.success}/{reextractStatus.total} extracted
+              {reextractStatus.failed > 0 && `, ${reextractStatus.failed} failed`}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

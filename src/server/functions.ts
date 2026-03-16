@@ -230,37 +230,65 @@ export const forgetEdge = createServerFn({ method: "POST" })
 // Admin Operations
 // ============================================================================
 
+// Re-extraction state (in-memory, lives for the server process lifetime)
+const reextractState = {
+  running: false,
+  current: 0,
+  total: 0,
+  currentName: "",
+  success: 0,
+  failed: 0,
+  errors: [] as string[],
+};
+
+export const getReextractStatus = createServerFn().handler(async () => ({ ...reextractState }));
+
 export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
-  const { extract } = await import("../lib/extractor.js");
-  const { embedDual } = await import("../lib/embedder.js");
-  const gp = await ops.getProvider();
-  const memories = await gp.findMemories({});
+  if (reextractState.running) return { started: false, reason: "already running" };
 
-  let success = 0;
-  let failed = 0;
+  // Start async — don't await, return immediately
+  (async () => {
+    const { extract } = await import("../lib/extractor.js");
+    const { embedDual } = await import("../lib/embedder.js");
+    const gp = await ops.getProvider();
+    const memories = await gp.findMemories({});
 
-  for (const memory of memories) {
-    try {
-      const extraction = await extract(memory.text);
-      const memEmb = await embedDual(memory.text);
-      const edgeEmbeddings = [];
-      for (const edge of extraction.edges) {
-        edgeEmbeddings.push(await embedDual(edge.fact));
+    reextractState.running = true;
+    reextractState.current = 0;
+    reextractState.total = memories.length;
+    reextractState.success = 0;
+    reextractState.failed = 0;
+    reextractState.errors = [];
+
+    for (let i = 0; i < memories.length; i++) {
+      const memory = memories[i]!;
+      reextractState.current = i + 1;
+      reextractState.currentName = memory.name || memory.id;
+      try {
+        const extraction = await extract(memory.text);
+        const memEmb = await embedDual(memory.text);
+        const edgeEmbeddings = [];
+        for (const edge of extraction.edges) {
+          edgeEmbeddings.push(await embedDual(edge.fact));
+        }
+        await gp.store(
+          { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
+          extraction.entities,
+          extraction.edges,
+          memEmb,
+          edgeEmbeddings,
+        );
+        reextractState.success++;
+      } catch (err) {
+        reextractState.failed++;
+        reextractState.errors.push(`${memory.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      await gp.store(
-        { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
-        extraction.entities,
-        extraction.edges,
-        memEmb,
-        edgeEmbeddings,
-      );
-      success++;
-    } catch (err) {
-      failed++;
     }
-  }
+    reextractState.running = false;
+    reextractState.currentName = "";
+  })();
 
-  return { success, failed, total: memories.length };
+  return { started: true, total: reextractState.total };
 });
 
 // ============================================================================
