@@ -169,15 +169,13 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
 
   // Custom node rendering — adapts to zoom level
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    // Scale node size inversely with zoom — bigger when zoomed out, smaller when zoomed in
-    const baseSize = 3 + node.importance * 4;
-    const zoomCompensation = Math.max(0.6, Math.min(2, 1 / globalScale));
+    const baseSize = 5 + node.importance * 6;
+    const zoomCompensation = Math.max(0.7, Math.min(2.5, 1.2 / globalScale));
     const size = baseSize * zoomCompensation;
 
-    // Outer glow — stronger when zoomed out to stay visible
     ctx.save();
     ctx.shadowColor = node.color;
-    ctx.shadowBlur = (2 + node.importance * 3) * zoomCompensation;
+    ctx.shadowBlur = (3 + node.importance * 5) * zoomCompensation;
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = node.color;
@@ -190,11 +188,10 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     ctx.fillStyle = "rgba(255,255,255,0.12)";
     ctx.fill();
 
-    // Labels — adaptive: zoomed out shows only high-importance, zoomed in shows all
-    const showLabel = globalScale > 1.2 || (globalScale > 0.4 && node.importance > 0.5) || (globalScale > 0.15 && node.importance > 0.8);
+    const showLabel = globalScale > 0.8 || (globalScale > 0.3 && node.importance > 0.3) || (globalScale > 0.1 && node.importance > 0.6);
     if (showLabel) {
-      const fontSize = Math.min(14, Math.max(8, 11 / globalScale));
-      const alpha = globalScale > 1 ? 0.95 : 0.6 + node.importance * 0.35;
+      const fontSize = Math.min(16, Math.max(10, 13 / globalScale));
+      const alpha = globalScale > 0.8 ? 0.95 : 0.5 + node.importance * 0.45;
       ctx.font = `600 ${fontSize}px Sans-Serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
