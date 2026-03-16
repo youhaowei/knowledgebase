@@ -6,16 +6,11 @@
  * - Extracts edges (facts) as relationships between entities
  * - Each edge has relationType, sentiment, and natural language description
  *
- * Supports multiple LLM backends:
- * - Claude: Uses unifai prompt() API with OAuth subscription (no API costs)
- * - Gemini: Uses Gemini CLI in sandbox mode (free with Google account)
- *
- * Set EXTRACTOR_BACKEND env var to choose: "claude" (default) or "gemini"
+ * Uses Claude via unifai (OAuth subscription, no API costs).
  */
 
 import { prompt } from "unifai";
 import { Extraction } from "../types.js";
-import { extractWithGemini } from "./extractor-gemini.js";
 
 // JSON schema for edge-based extraction
 const extractionSchema = {
@@ -185,62 +180,11 @@ async function extractWithClaude(text: string): Promise<Extraction> {
   return Extraction.parse(result.structuredOutput);
 }
 
-// Cache for gemini availability check
-let geminiAvailable: boolean | null = null;
-
-async function isGeminiAvailable(): Promise<boolean> {
-  if (geminiAvailable !== null) return geminiAvailable;
-
-  try {
-    const proc = Bun.spawn(["which", "gemini"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    await proc.exited;
-    geminiAvailable = proc.exitCode === 0;
-  } catch {
-    geminiAvailable = false;
-  }
-
-  return geminiAvailable;
-}
-
 /**
- * Main extraction function - auto-detects best available backend
- *
- * Priority:
- * 1. EXTRACTOR_BACKEND env var if set ("claude" or "gemini")
- * 2. Gemini CLI if available (free with Google account)
- * 3. Claude (via unifai) as fallback
+ * Extract structured knowledge from text using Claude (via unifai).
  */
 export async function extract(text: string): Promise<Extraction> {
-  const backendOverride = process.env.EXTRACTOR_BACKEND;
-
-  // Explicit override
-  if (backendOverride === "claude") {
-    console.error("Using Claude (via unifai) for extraction (explicit)...");
-    return extractWithClaude(text);
-  }
-  if (backendOverride === "gemini") {
-    console.error("Using Gemini CLI for extraction (explicit)...");
-    return extractWithGemini(text);
-  }
-
-  // Auto-detect: prefer Gemini if available
-  if (await isGeminiAvailable()) {
-    console.error("Using Gemini CLI for extraction (auto-detected)...");
-    try {
-      return await extractWithGemini(text);
-    } catch (error) {
-      console.warn("Gemini extraction failed, falling back to Claude:", error);
-      return extractWithClaude(text);
-    }
-  }
-
-  // Fallback to Claude
-  console.error("Using Claude (via unifai) for extraction (fallback)...");
   return extractWithClaude(text);
 }
 
-// Export for Gemini extractor to use
 export { extractionSchema, extractionPrompt };
