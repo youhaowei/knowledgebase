@@ -50,16 +50,6 @@ function getSentimentCategory(sentiment: number): "positive" | "neutral" | "nega
   return "neutral";
 }
 
-// Cluster colors (muted, translucent backgrounds)
-const CLUSTER_COLORS = [
-  "rgba(0, 245, 212, 0.06)",  // cyan
-  "rgba(247, 37, 133, 0.06)", // magenta
-  "rgba(255, 195, 0, 0.06)",  // amber
-  "rgba(123, 44, 191, 0.06)", // violet
-  "rgba(0, 196, 167, 0.06)",  // teal
-  "rgba(100, 130, 180, 0.06)", // slate
-];
-
 // Extended node type for force graph
 interface ForceNode extends NodeObject {
   id: string;
@@ -169,25 +159,23 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
       const fg = graphRef.current;
       const n = graphData.nodes.length;
 
-      fg.d3Force("charge")?.strength(-200 - n * 1.5);
-      fg.d3Force("link")?.distance(90);
-      fg.d3Force("center")?.strength(0.08);
+      fg.d3Force("charge")?.strength(-150);
+      fg.d3Force("link")?.distance(60);
+      fg.d3Force("center")?.strength(0.05);
 
-      setTimeout(() => {
-        fg.zoomToFit(400, 50);
-      }, 1000);
+      setTimeout(() => fg.zoomToFit(400, 40), 1500);
     }
   }, [graphData.nodes.length]);
 
   // Custom node rendering
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const size = 4 + node.importance * 6; // 4-10px radius based on importance
+    const size = 4 + node.importance * 4; // 4-8px radius based on importance
     const fontSize = 11 / globalScale;
 
     // Outer glow
     ctx.save();
     ctx.shadowColor = node.color;
-    ctx.shadowBlur = 4 + node.importance * 6;
+    ctx.shadowBlur = 3 + node.importance * 4;
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = node.color;
@@ -325,10 +313,6 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     // Note: The highlight sets update refs, React handles re-renders through state changes
   }, [graphData.links]);
 
-  // Minimal cluster indicator: just a faint label at each sub-cluster center
-  const paintClusters = useCallback((_ctx: CanvasRenderingContext2D, _globalScale: number) => {
-    // Intentionally minimal — proper cluster visualization is tracked as a separate task
-  }, []);
 
   if (nodes.length === 0) {
     return (
@@ -359,7 +343,6 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
         enablePanInteraction={true}
         onNodeHover={handleNodeHover}
         // Cluster backgrounds
-        onRenderFramePre={(ctx, globalScale) => paintClusters(ctx, globalScale)}
         // Physics
         d3AlphaDecay={0.02}
         d3VelocityDecay={0.3}
