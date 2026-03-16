@@ -119,39 +119,40 @@ export function Graph({ nodes, links }: GraphProps) {
       const fg = graphRef.current;
       const n = graphData.nodes.length;
 
-      // Scale repulsion with node count — more nodes need stronger push
-      const chargeStrength = Math.min(-300, -150 - n * 3);
-      fg.d3Force("charge")?.strength(chargeStrength);
-      fg.d3Force("link")?.distance(120 + Math.sqrt(n) * 5);
-      fg.d3Force("center")?.strength(0.03);
+      // Moderate repulsion — enough to spread but not scatter
+      fg.d3Force("charge")?.strength(-200 - n);
+      fg.d3Force("link")?.distance(90);
+      fg.d3Force("center")?.strength(0.05);
 
-      // Small delay to let the simulation settle, then fit to view
       setTimeout(() => {
-        fg.zoomToFit(400, 60);
-      }, 1200);
+        fg.zoomToFit(400, 50);
+      }, 1000);
     }
   }, [graphData.nodes.length]);
 
   // Custom node rendering
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const size = 5 + node.importance * 7; // 5-12px radius based on importance
+    const size = 7 + node.importance * 10; // 7-17px radius based on importance
     const fontSize = 11 / globalScale;
 
-    // Draw node circle
+    // Outer glow
+    ctx.save();
+    ctx.shadowColor = node.color;
+    ctx.shadowBlur = 8 + node.importance * 12;
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = node.color;
     ctx.fill();
+    ctx.restore();
 
-    // Draw glow effect
-    ctx.strokeStyle = node.color;
-    ctx.lineWidth = 1.5 + node.importance * 1.5;
-    ctx.globalAlpha = 0.3 + node.importance * 0.3;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    // Bright inner fill (no shadow)
+    ctx.beginPath();
+    ctx.arc(node.x!, node.y!, size * 0.7, 0, 2 * Math.PI);
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.fill();
 
     // Draw label below node (only if zoomed in enough)
-    if (globalScale > 0.6) {
+    if (globalScale > 0.4) {
       ctx.font = `600 ${fontSize}px Sans-Serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
