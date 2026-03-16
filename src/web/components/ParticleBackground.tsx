@@ -21,22 +21,22 @@ interface Particle {
   alpha: number;
 }
 
-// Monochrome palette — subtle so it doesn't compete with the knowledge graph
+// Muted monochrome — visible but won't be confused with graph nodes
 const PARTICLE_COLORS = [
-  "#3a4555", // dark slate
-  "#2d3848", // darker slate
-  "#4a5568", // muted gray
+  "#4a5f78", // slate blue
+  "#5a6b80", // lighter slate
+  "#3d5068", // steel
 ];
 
-const PARTICLE_COUNT = 50;
-const CONNECTION_DISTANCE = 100;
-const PARTICLE_MIN_RADIUS = 0.5;
-const PARTICLE_MAX_RADIUS = 1.5;
-const PARTICLE_MIN_SPEED = 0.05;
-const PARTICLE_MAX_SPEED = 0.15;
-const PARTICLE_MIN_ALPHA = 0.1;
-const PARTICLE_MAX_ALPHA = 0.2;
-const CONNECTION_ALPHA = 0.06;
+const PARTICLE_COUNT = 60;
+const CONNECTION_DISTANCE = 110;
+const PARTICLE_MIN_RADIUS = 1;
+const PARTICLE_MAX_RADIUS = 2;
+const PARTICLE_MIN_SPEED = 0.08;
+const PARTICLE_MAX_SPEED = 0.2;
+const PARTICLE_MIN_ALPHA = 0.15;
+const PARTICLE_MAX_ALPHA = 0.3;
+const CONNECTION_ALPHA = 0.08;
 
 export function ParticleBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
