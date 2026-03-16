@@ -117,16 +117,18 @@ export function Graph({ nodes, links }: GraphProps) {
   useEffect(() => {
     if (graphRef.current && graphData.nodes.length > 0) {
       const fg = graphRef.current;
+      const n = graphData.nodes.length;
 
-      // Configure d3 forces for better spacing
-      fg.d3Force("charge")?.strength(-150); // Repulsion between nodes
-      fg.d3Force("link")?.distance(80); // Longer links
-      fg.d3Force("center")?.strength(0.05); // Weaker centering
+      // Scale repulsion with node count — more nodes need stronger push
+      const chargeStrength = Math.min(-300, -150 - n * 3);
+      fg.d3Force("charge")?.strength(chargeStrength);
+      fg.d3Force("link")?.distance(120 + Math.sqrt(n) * 5);
+      fg.d3Force("center")?.strength(0.03);
 
       // Small delay to let the simulation settle, then fit to view
       setTimeout(() => {
-        fg.zoomToFit(400, 50);
-      }, 800);
+        fg.zoomToFit(400, 60);
+      }, 1200);
     }
   }, [graphData.nodes.length]);
 

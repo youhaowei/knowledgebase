@@ -2,7 +2,7 @@
 name: enforce-bun-runtime
 enabled: true
 event: bash
-pattern: \b(node|ts-node)\s+\S+
+pattern: ^\s*(node|ts-node)\s+\S+\.(js|ts|mjs|cjs)
 action: block
 ---
 
