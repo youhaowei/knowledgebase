@@ -323,15 +323,16 @@ export class LadybugProvider implements GraphProvider {
       const entityScope = entityWithScope.scope ?? "project";
       const finalNamespace = entityScope === "global" ? "" : entityNamespace;
 
-      // Check if entity already exists
-      const existing = await this.executeQuery(
+      // Check if entity already exists by name+namespace
+      const existingResult = await this.executeQuery(
         `MATCH (e:Entity {name: $name, namespace: $namespace, deletedAt: ''}) RETURN e.uuid as uuid`,
         { name: entity.name, namespace: finalNamespace },
       );
+      const existingRows = await existingResult.getAll();
 
-      if (existing[0]?.uuid) {
+      if (existingRows[0]?.uuid) {
         // Reuse existing uuid, update fields
-        entityWithScope.uuid = existing[0].uuid as string;
+        entityWithScope.uuid = existingRows[0].uuid as string;
         await this.executeQuery(
           `MATCH (e:Entity {uuid: $uuid, deletedAt: ''})
            SET e.type = $type, e.description = COALESCE($description, e.description)`,
