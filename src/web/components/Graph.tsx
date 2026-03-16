@@ -167,34 +167,39 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     }
   }, [graphData.nodes.length]);
 
-  // Custom node rendering
+  // Custom node rendering — adapts to zoom level
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const size = 4 + node.importance * 4; // 4-8px radius based on importance
-    const fontSize = 11 / globalScale;
+    // Scale node size inversely with zoom — bigger when zoomed out, smaller when zoomed in
+    const baseSize = 3 + node.importance * 4;
+    const zoomCompensation = Math.max(0.6, Math.min(2, 1 / globalScale));
+    const size = baseSize * zoomCompensation;
 
-    // Outer glow
+    // Outer glow — stronger when zoomed out to stay visible
     ctx.save();
     ctx.shadowColor = node.color;
-    ctx.shadowBlur = 3 + node.importance * 4;
+    ctx.shadowBlur = (2 + node.importance * 3) * zoomCompensation;
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = node.color;
     ctx.fill();
     ctx.restore();
 
-    // Bright inner fill (no shadow)
+    // Inner highlight
     ctx.beginPath();
-    ctx.arc(node.x!, node.y!, size * 0.7, 0, 2 * Math.PI);
-    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.arc(node.x!, node.y!, size * 0.6, 0, 2 * Math.PI);
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
     ctx.fill();
 
-    // Draw label below node (only if zoomed in enough)
-    if (globalScale > 0.3) {
+    // Labels — adaptive: zoomed out shows only high-importance, zoomed in shows all
+    const showLabel = globalScale > 1.2 || (globalScale > 0.4 && node.importance > 0.5) || (globalScale > 0.15 && node.importance > 0.8);
+    if (showLabel) {
+      const fontSize = Math.min(14, Math.max(8, 11 / globalScale));
+      const alpha = globalScale > 1 ? 0.95 : 0.6 + node.importance * 0.35;
       ctx.font = `600 ${fontSize}px Sans-Serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
-      ctx.fillStyle = "rgba(230, 235, 245, 0.95)";
-      ctx.fillText(node.name, node.x!, node.y! + size + 3);
+      ctx.fillStyle = `rgba(230, 235, 245, ${alpha})`;
+      ctx.fillText(node.name, node.x!, node.y! + size + 2);
     }
 
     // Store size for pointer area
