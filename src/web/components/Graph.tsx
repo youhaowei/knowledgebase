@@ -188,15 +188,19 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     ctx.fillStyle = "rgba(255,255,255,0.12)";
     ctx.fill();
 
-    const showLabel = globalScale > 0.8 || (globalScale > 0.3 && node.importance > 0.3) || (globalScale > 0.1 && node.importance > 0.6);
+    // Tiered labels: always show high-importance, progressively reveal others on zoom
+    const tier = node.importance > 0.7 ? 1 : node.importance > 0.3 ? 2 : 3;
+    const showLabel = tier === 1 || (tier === 2 && globalScale > 0.3) || (tier === 3 && globalScale > 0.8);
     if (showLabel) {
-      const fontSize = Math.min(16, Math.max(10, 13 / globalScale));
-      const alpha = globalScale > 0.8 ? 0.95 : 0.5 + node.importance * 0.45;
-      ctx.font = `600 ${fontSize}px Sans-Serif`;
+      // Font scales with zoom compensation — readable at all levels
+      const baseFontSize = tier === 1 ? 14 : tier === 2 ? 12 : 10;
+      const fontSize = baseFontSize * Math.max(0.8, Math.min(1.8, 1 / globalScale));
+      const alpha = tier === 1 ? 0.95 : tier === 2 ? 0.8 : 0.65;
+      ctx.font = `${tier === 1 ? 700 : 600} ${fontSize}px Sans-Serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
       ctx.fillStyle = `rgba(230, 235, 245, ${alpha})`;
-      ctx.fillText(node.name, node.x!, node.y! + size + 2);
+      ctx.fillText(node.name, node.x!, node.y! + size + 3);
     }
 
     // Store size for pointer area
