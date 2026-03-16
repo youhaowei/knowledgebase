@@ -1,0 +1,3 @@
+[submodule "libs/wystack"]
+	path = libs/wystack
+	url = git@github.com:youhaowei/wystack.git
