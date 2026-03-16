@@ -89,9 +89,13 @@ const extractionSchema = {
         required: ["relationType", "sourceIndex", "targetIndex", "fact", "sentiment", "confidence"],
       },
     },
+    abstract: {
+      type: "string",
+      description: "1-2 sentence abstract, maximally information-dense. Include primary topic, key entities, and one notable decision or pattern.",
+    },
     summary: {
       type: "string",
-      description: "1-2 sentence summary of the key information",
+      description: "1 paragraph (4-6 sentences) summary with thorough coverage. Capture key facts, entities, relationships, context, and nuance. A reader should understand the memory without needing the full text.",
     },
     category: {
       type: "string",
@@ -99,7 +103,7 @@ const extractionSchema = {
       description: "Memory category: preference (opinions/choices), event (time-specific happenings), pattern (recurring practices/rules), general (everything else)",
     },
   },
-  required: ["entities", "edges", "summary", "category"],
+  required: ["entities", "edges", "abstract", "summary", "category"],
 };
 
 const extractionPrompt = (text: string) => `Extract structured knowledge from this text:
@@ -155,9 +159,11 @@ Your task:
    - {relationType: "hasAdvantageOver", sourceIndex: 1, targetIndex: 2, fact: "Zustand has simpler API than Redux", sentiment: 0.5, confidence: 0.8, confidenceReason: "implied by choice rationale"}
    - {relationType: "rejected", sourceIndex: 0, targetIndex: 2, fact: "DashFrame rejected Redux due to boilerplate", sentiment: -0.8, confidence: 1.0, confidenceReason: "explicitly stated rejection"}
 
-3. **SUMMARY** - A concise 1-2 sentence summary.
+3. **ABSTRACT** - A 1-2 sentence abstract that is maximally information-dense. Include the primary topic, key entities, and one notable decision or pattern.
 
-4. **CATEGORY** - Classify the overall memory into exactly one category:
+4. **SUMMARY** - A 1-paragraph summary (4-6 sentences) with thorough coverage. Capture key facts, entities, relationships, context, and nuance. A reader should understand the memory without needing the full text.
+
+5. **CATEGORY** - Classify the overall memory into exactly one category:
    - preference: Opinions, choices, likes/dislikes ("I prefer Zustand over Redux", "We chose Bun for speed")
    - event: Time-specific happenings, milestones, incidents ("Migrated to Bun on Jan 15", "Deploy failed yesterday")
    - pattern: Recurring practices, rules, how-tos ("Always run db:init after schema changes", "Use kebab-case for routes")
