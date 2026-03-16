@@ -1183,9 +1183,49 @@ export class LadybugProvider implements GraphProvider {
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async getGraphData(namespace?: string, nodeLimit?: number): Promise<GraphData> {
-    return { nodes: [], links: [] };
+  async getGraphData(namespace?: string): Promise<GraphData> {
+    const nsFilter = namespace ? `AND e.namespace = '${namespace}'` : "";
+    const entityResult = await this.conn.query(
+      `MATCH (e:Entity)
+       WHERE e.deletedAt = '' ${nsFilter}
+       RETURN e.uuid as id, e.name as name, e.type as type,
+              e.description as description, e.summary as summary
+       ORDER BY e.name`,
+    );
+    const entityRows = await entityResult.getAll();
+    const nodes = entityRows.map((r) => ({
+      id: (r.name as string) || (r.id as string),
+      name: r.name as string,
+      type: r.type as string,
+      description: (r.description as string) || undefined,
+      summary: (r.summary as string) || undefined,
+    }));
+
+    const nodeNames = new Set(nodes.map((n) => n.name));
+
+    const relResult = await this.conn.query(
+      `MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
+       WHERE (r.invalidAt IS NULL OR r.invalidAt = '') ${nsFilter.replace("e.", "s.")}
+       RETURN s.name as source, t.name as target,
+              r.relationType as relationType, r.fact as fact,
+              r.sentiment as sentiment, r.confidence as confidence,
+              r.id as edgeId
+       ORDER BY s.name, t.name`,
+    );
+    const relRows = await relResult.getAll();
+    const links = relRows
+      .map((r) => ({
+        source: r.source as string,
+        target: r.target as string,
+        relationType: r.relationType as string,
+        fact: r.fact as string,
+        sentiment: (r.sentiment as number) ?? 0,
+        confidence: (r.confidence as number) ?? 1,
+        edgeId: r.edgeId as string,
+      }))
+      .filter((l) => nodeNames.has(l.source) && nodeNames.has(l.target));
+
+    return { nodes, links };
   }
 
   async findMemoriesNeedingEmbedding(

@@ -1057,14 +1057,13 @@ describe("GraphProvider", () => {
 
       const graphData = await provider.getGraphData(testNamespace);
 
-      if (isLadybugMode()) {
-        expect(graphData).toEqual({ nodes: [], links: [] });
-      } else {
-        expect(graphData).toHaveProperty("nodes");
-        expect(graphData).toHaveProperty("links");
-        expect(Array.isArray(graphData.nodes)).toBe(true);
-        expect(Array.isArray(graphData.links)).toBe(true);
-      }
+      expect(graphData).toHaveProperty("nodes");
+      expect(graphData).toHaveProperty("links");
+      expect(Array.isArray(graphData.nodes)).toBe(true);
+      expect(Array.isArray(graphData.links)).toBe(true);
+      expect(graphData.nodes.length).toBeGreaterThan(0);
+      expect(graphData.nodes.some((n) => n.name === "Karen")).toBe(true);
+      expect(graphData.nodes.some((n) => n.name === "Leo")).toBe(true);
     });
   });
 
