@@ -187,8 +187,8 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
   }));
 }
 
-export async function stats(namespace = "default") {
-  return tracked("stats", { namespace }, async () => {
+export async function stats(namespace?: string) {
+  return tracked("stats", { namespace: namespace ?? "all" }, async () => {
     const gp = await getProvider();
     return gp.stats(namespace);
   });
