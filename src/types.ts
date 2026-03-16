@@ -85,7 +85,8 @@ export const MemoryCategory = z.enum([
 export const Extraction = z.object({
   entities: z.array(Entity),          // Extract entities first (indexed 0, 1, 2...)
   edges: z.array(ExtractedEdge),      // Edges reference entities by index
-  summary: z.string(),
+  abstract: z.string(),               // L0: 1-2 sentences, max information density
+  summary: z.string(),                // L1: 1 paragraph (4-6 sentences), thorough coverage
   category: MemoryCategory.optional(), // LLM classifies; optional for resilience against non-compliance
 });
 
@@ -96,12 +97,15 @@ export const Extraction = z.object({
 export const Memory = z.object({
   id: z.string(),
   name: z.string(),                    // User-provided or auto-generated from summary
-  text: z.string(),                    // Original text
-  summary: z.string(),                 // Claude-generated summary
+  text: z.string(),                    // Original text (L2)
+  abstract: z.string().default(""),    // L0: 1-2 sentences, max information density
+  summary: z.string(),                 // L1: 1 paragraph (4-6 sentences), thorough coverage
   category: MemoryCategory.optional(), // Classification (null for pre-category memories)
   namespace: z.string().default("default"),
   status: z.enum(["pending", "processing", "completed", "failed"]).optional(),
   error: z.string().optional(),
+  schemaVersion: z.string().default("0.0.0"), // SemVer tracking prompt version
+  versionedAt: z.string().optional(),  // ISOTimestamp of last summary regeneration
   createdAt: z.date(),
   createdBy: z.string().optional(),
 });
@@ -111,6 +115,12 @@ export const Memory = z.object({
 // =============================================================================
 
 export const Intent = z.enum(["factual", "decision", "general"]);
+
+// =============================================================================
+// DETAIL LEVEL - Controls response granularity for MCP tools
+// =============================================================================
+
+export const DetailLevel = z.enum(["summary", "full", "source"]);
 
 // =============================================================================
 // EMBEDDING TYPES
@@ -132,3 +142,4 @@ export type Extraction = z.infer<typeof Extraction>;
 export type Memory = z.infer<typeof Memory>;
 export type MemoryCategory = z.infer<typeof MemoryCategory>;
 export type Intent = z.infer<typeof Intent>;
+export type DetailLevel = z.infer<typeof DetailLevel>;
