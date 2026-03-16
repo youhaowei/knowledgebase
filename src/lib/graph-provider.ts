@@ -39,6 +39,7 @@ export interface GraphData {
     id: string;
     name: string;
     type: string;
+    namespace?: string;
     description?: string;
     summary?: string;
   }>;

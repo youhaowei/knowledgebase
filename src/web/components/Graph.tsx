@@ -20,6 +20,7 @@ import type { GraphNode, GraphLink } from "./types";
 interface GraphProps {
   nodes: GraphNode[];
   links: GraphLink[];
+  onClusterClick?: (namespace: string) => void;
 }
 
 // Type-based color palette (matching the cyber aesthetic)
@@ -49,6 +50,16 @@ function getSentimentCategory(sentiment: number): "positive" | "neutral" | "nega
   return "neutral";
 }
 
+// Cluster colors (muted, translucent backgrounds)
+const CLUSTER_COLORS = [
+  "rgba(0, 245, 212, 0.06)",  // cyan
+  "rgba(247, 37, 133, 0.06)", // magenta
+  "rgba(255, 195, 0, 0.06)",  // amber
+  "rgba(123, 44, 191, 0.06)", // violet
+  "rgba(0, 196, 167, 0.06)",  // teal
+  "rgba(100, 130, 180, 0.06)", // slate
+];
+
 // Extended node type for force graph
 interface ForceNode extends NodeObject {
   id: string;
@@ -57,6 +68,7 @@ interface ForceNode extends NodeObject {
   importance: number;
   degree: number;
   color: string;
+  clusterId?: number;
 }
 
 // Extended link type for force graph
@@ -71,7 +83,7 @@ interface ForceLink extends LinkObject {
   edgeId: string;
 }
 
-export function Graph({ nodes, links }: GraphProps) {
+export function Graph({ nodes, links, onClusterClick }: GraphProps) {
   const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -110,7 +122,19 @@ export function Graph({ nodes, links }: GraphProps) {
         edgeId: l.edgeId || "",
       }));
 
-    return { nodes: forceNodes, links: forceLinks };
+    // Assign cluster IDs by namespace
+    const namespaceList = [...new Set(forceNodes.map((n) => {
+      const ns = nodes.find((orig) => orig.name === n.id)?.namespace ?? "default";
+      return ns;
+    }))].sort();
+    const nsToCluster = new Map(namespaceList.map((ns, i) => [ns, i]));
+
+    for (const node of forceNodes) {
+      const ns = nodes.find((orig) => orig.name === node.id)?.namespace ?? "default";
+      node.clusterId = nsToCluster.get(ns) ?? 0;
+    }
+
+    return { nodes: forceNodes, links: forceLinks, namespaceList };
   }, [nodes, links]);
 
   // Configure forces and fit to view when graph mounts
@@ -275,6 +299,49 @@ export function Graph({ nodes, links }: GraphProps) {
     // Note: The highlight sets update refs, React handles re-renders through state changes
   }, [graphData.links]);
 
+  // Draw namespace cluster hulls behind nodes
+  const paintClusters = useCallback((ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const clusters = new Map<number, ForceNode[]>();
+    for (const node of graphData.nodes) {
+      if (node.x == null || node.y == null) continue;
+      const cid = node.clusterId ?? 0;
+      if (!clusters.has(cid)) clusters.set(cid, []);
+      clusters.get(cid)!.push(node);
+    }
+
+    for (const [cid, clusterNodes] of clusters) {
+      if (clusterNodes.length < 2) continue;
+
+      const cx = clusterNodes.reduce((s, n) => s + n.x!, 0) / clusterNodes.length;
+      const cy = clusterNodes.reduce((s, n) => s + n.y!, 0) / clusterNodes.length;
+      const maxDist = Math.max(...clusterNodes.map((n) =>
+        Math.sqrt((n.x! - cx) ** 2 + (n.y! - cy) ** 2)
+      ));
+      const radius = maxDist + 35;
+
+      // Fill
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length];
+      ctx.fill();
+
+      // Dashed border
+      ctx.strokeStyle = CLUSTER_COLORS[cid % CLUSTER_COLORS.length].replace("0.06", "0.12");
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Namespace label at top of cluster
+      const nsName = graphData.namespaceList[cid] ?? "default";
+      const fontSize = Math.max(10, 12 / globalScale);
+      ctx.font = `500 ${fontSize}px Sans-Serif`;
+      ctx.textAlign = "center";
+      ctx.fillStyle = "rgba(136, 146, 166, 0.5)";
+      ctx.fillText(nsName, cx, cy - radius + fontSize + 2);
+    }
+  }, [graphData.nodes, graphData.namespaceList]);
+
   if (nodes.length === 0) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
@@ -303,6 +370,8 @@ export function Graph({ nodes, links }: GraphProps) {
         enableZoomInteraction={true}
         enablePanInteraction={true}
         onNodeHover={handleNodeHover}
+        // Cluster backgrounds
+        onRenderFramePre={(ctx, globalScale) => paintClusters(ctx, globalScale)}
         // Physics
         d3AlphaDecay={0.02}
         d3VelocityDecay={0.3}

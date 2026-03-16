@@ -13,6 +13,7 @@ interface RawGraphData {
     id: string;
     name: string;
     type: string;
+    namespace?: string;
     description?: string;
     summary?: string;
   }>;
@@ -68,7 +69,8 @@ function processGraphData(graphData: RawGraphData) {
     id: n.id || n.name,
     name: n.name,
     type: "Entity",
-    itemType: n.type, // Entity type (person, technology, etc.)
+    itemType: n.type,
+    namespace: n.namespace,
     description: n.description,
     summary: n.summary,
     degree: edgeCounts[i],
@@ -177,7 +179,7 @@ function Home() {
 
       <div className="h-screen overflow-hidden relative z-[2]">
         {/* Full-screen graph as the primary visual - client-only to avoid SSR issues */}
-        <GraphClient nodes={nodes} links={links} />
+        <GraphClient nodes={nodes} links={links} onClusterClick={handleNamespaceChange} />
 
         {/* Stats overlay in top-left corner */}
         <StatsOverlay

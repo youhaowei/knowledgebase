@@ -1189,7 +1189,7 @@ export class LadybugProvider implements GraphProvider {
       `MATCH (e:Entity)
        WHERE e.deletedAt = '' ${nsFilter}
        RETURN e.uuid as id, e.name as name, e.type as type,
-              e.description as description, e.summary as summary
+              e.namespace as namespace, e.description as description, e.summary as summary
        ORDER BY e.name`,
     );
     const entityRows = await entityResult.getAll();
@@ -1197,6 +1197,7 @@ export class LadybugProvider implements GraphProvider {
       id: (r.name as string) || (r.id as string),
       name: r.name as string,
       type: r.type as string,
+      namespace: (r.namespace as string) || undefined,
       description: (r.description as string) || undefined,
       summary: (r.summary as string) || undefined,
     }));

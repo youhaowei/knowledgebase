@@ -11,13 +11,17 @@ import type { GraphNode, GraphLink } from "./types";
 interface GraphClientProps {
   nodes: GraphNode[];
   links: GraphLink[];
+  onClusterClick?: (namespace: string) => void;
 }
 
-export function GraphClient({ nodes, links }: GraphClientProps) {
-  const [Graph, setGraph] = useState<React.ComponentType<{ nodes: GraphNode[]; links: GraphLink[] }> | null>(null);
+export function GraphClient({ nodes, links, onClusterClick }: GraphClientProps) {
+  const [Graph, setGraph] = useState<React.ComponentType<{
+    nodes: GraphNode[];
+    links: GraphLink[];
+    onClusterClick?: (namespace: string) => void;
+  }> | null>(null);
 
   useEffect(() => {
-    // Dynamic import only runs on client
     import("./Graph").then((mod) => {
       setGraph(() => mod.Graph);
     });
@@ -31,5 +35,5 @@ export function GraphClient({ nodes, links }: GraphClientProps) {
     );
   }
 
-  return <Graph nodes={nodes} links={links} />;
+  return <Graph nodes={nodes} links={links} onClusterClick={onClusterClick} />;
 }
