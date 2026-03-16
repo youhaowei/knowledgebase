@@ -18,6 +18,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as ops from "@/lib/operations.js";
 import { analyticsContext } from "@/lib/analytics.js";
+import type { Memory, StoredEdge, StoredEntity, DetailLevel } from "@/types.js";
+
+function formatMemory(m: Memory, detail: DetailLevel) {
+  if (detail === "summary") return { id: m.id, name: m.name, abstract: m.abstract };
+  if (detail === "source") return { id: m.id, name: m.name, text: m.text, abstract: m.abstract, summary: m.summary, category: m.category, schemaVersion: m.schemaVersion, createdAt: m.createdAt };
+  return { id: m.id, name: m.name, summary: m.summary, category: m.category };
+}
+
+function formatEdge(e: StoredEdge, detail: DetailLevel) {
+  if (detail === "summary") return { sourceEntity: e.sourceEntityName, targetEntity: e.targetEntityName, relationType: e.relationType, sentiment: e.sentiment };
+  if (detail === "source") return { id: e.id, sourceEntity: e.sourceEntityName, targetEntity: e.targetEntityName, relationType: e.relationType, fact: e.fact, sentiment: e.sentiment, confidence: e.confidence, confidenceReason: e.confidenceReason, episodes: e.episodes, validAt: e.validAt, invalidAt: e.invalidAt, createdAt: e.createdAt };
+  return { id: e.id, sourceEntity: e.sourceEntityName, targetEntity: e.targetEntityName, relationType: e.relationType, fact: e.fact, sentiment: e.sentiment, confidence: e.confidence, confidenceReason: e.confidenceReason };
+}
+
+function formatEntity(e: StoredEntity, detail: DetailLevel) {
+  if (detail === "summary") return { name: e.name, type: e.type };
+  if (detail === "source") return { name: e.name, type: e.type, description: e.description, summary: e.summary, namespace: e.namespace };
+  return { name: e.name, type: e.type, description: e.description, summary: e.summary };
+}
 
 function errorResult(err: unknown) {
   return {
@@ -78,7 +97,7 @@ export function createKnowledgebaseMcpServer() {
 
   server.tool(
     "search",
-    "Search the knowledge graph. Returns edges (facts as relationships), memories, and entities. Check the guidance field for instructions on handling contradictory results.",
+    "Search the knowledge graph. Returns edges (facts as relationships), memories, and entities. Use detail parameter to control response granularity: 'summary' (cheapest, abstracts only), 'full' (default, summaries + facts), 'source' (everything including full text).",
     {
       query: z.string().describe("Search query"),
       namespace: z
@@ -86,8 +105,9 @@ export function createKnowledgebaseMcpServer() {
         .default("default")
         .describe("Namespace to search within"),
       limit: z.number().default(10).describe("Max results"),
+      detail: z.enum(["summary", "full", "source"]).default("full").describe("Response detail level: summary (L0 abstracts), full (L1 summaries, default), source (L2 full text)"),
     },
-    withMcpSource(async ({ query, namespace, limit }) => {
+    withMcpSource(async ({ query, namespace, limit, detail }) => {
       try {
         const result = await ops.search(query, namespace, limit);
         return {
@@ -97,28 +117,9 @@ export function createKnowledgebaseMcpServer() {
               text: JSON.stringify(
                 {
                   intent: result.intent,
-                  memories: result.memories.map((m) => ({
-                    id: m.id,
-                    name: m.name,
-                    summary: m.summary,
-                    category: m.category,
-                  })),
-                  edges: result.edges.map((e) => ({
-                    id: e.id,
-                    sourceEntity: e.sourceEntityName,
-                    targetEntity: e.targetEntityName,
-                    relationType: e.relationType,
-                    fact: e.fact,
-                    sentiment: e.sentiment,
-                    confidence: e.confidence,
-                    confidenceReason: e.confidenceReason,
-                  })),
-                  entities: result.entities.map((e) => ({
-                    name: e.name,
-                    type: e.type,
-                    description: e.description,
-                    summary: e.summary,
-                  })),
+                  memories: result.memories.map((m) => formatMemory(m, detail)),
+                  edges: result.edges.map((e) => formatEdge(e, detail)),
+                  entities: result.entities.map((e) => formatEntity(e, detail)),
                   guidance: result.guidance,
                 },
                 null,
@@ -135,18 +136,19 @@ export function createKnowledgebaseMcpServer() {
 
   server.tool(
     "get",
-    "Get entity by exact name. Returns the entity and its related edges (facts).",
+    "Get entity by exact name. Returns the entity and its related edges (facts). Use detail parameter to control response granularity.",
     {
       name: z.string().describe("Exact entity name"),
       namespace: z
         .string()
         .default("default")
         .describe("Namespace to search in"),
+      detail: z.enum(["summary", "full", "source"]).default("full").describe("Response detail level"),
     },
-    withMcpSource(async ({ name, namespace }) => {
+    withMcpSource(async ({ name, namespace, detail }) => {
       try {
         const result = await ops.getByName(name, namespace);
-        if (!result.entity) {
+        if (!result.entity && !result.memory) {
           return {
             content: [
               { type: "text" as const, text: `Nothing found with name "${name}"` },
@@ -155,7 +157,14 @@ export function createKnowledgebaseMcpServer() {
         }
         return {
           content: [
-            { type: "text" as const, text: JSON.stringify(result, null, 2) },
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                memory: result.memory ? formatMemory(result.memory, detail) : undefined,
+                entity: result.entity ? formatEntity(result.entity, detail) : undefined,
+                edges: result.edges.map((e) => formatEdge(e, detail)),
+              }, null, 2),
+            },
           ],
         };
       } catch (err) {
