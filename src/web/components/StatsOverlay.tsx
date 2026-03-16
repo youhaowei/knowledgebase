@@ -37,6 +37,7 @@ export function StatsOverlay({
     failed: number;
     lastEntities: number;
     lastEdges: number;
+    errors: string[];
   } | null>(null);
 
   const startReextract = useCallback(async () => {
@@ -174,11 +175,16 @@ export function StatsOverlay({
 
         {/* Re-extract result */}
         {reextractStatus && !reextractStatus.running && reextractStatus.total > 0 && (
-          <div className="mt-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-glow-cyan/30 rounded-xl">
+          <div className="mt-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-glow-cyan/30 rounded-xl space-y-1">
             <span className="text-[11px] text-glow-cyan">
               Done: {reextractStatus.success}/{reextractStatus.total} extracted
               {reextractStatus.failed > 0 && `, ${reextractStatus.failed} failed`}
             </span>
+            {reextractStatus.errors?.length > 0 && (
+              <div className="text-[10px] text-red-400 max-h-20 overflow-y-auto">
+                {reextractStatus.errors.map((e, i) => <div key={i}>{e}</div>)}
+              </div>
+            )}
           </div>
         )}
       </div>

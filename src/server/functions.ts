@@ -299,7 +299,9 @@ export const reextractAll = createServerFn({ method: "POST" }).handler(async () 
         reextractState.success++;
       } catch (err) {
         reextractState.failed++;
-        reextractState.errors.push(`${memory.name}: ${err instanceof Error ? err.message : String(err)}`);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        reextractState.errors.push(`${memory.name}: ${errMsg}`);
+        console.error(`[reextract] Failed ${memory.name}:`, errMsg);
       }
     }
     reextractState.running = false;
