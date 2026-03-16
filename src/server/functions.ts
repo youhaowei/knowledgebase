@@ -227,6 +227,43 @@ export const forgetEdge = createServerFn({ method: "POST" })
   }));
 
 // ============================================================================
+// Admin Operations
+// ============================================================================
+
+export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
+  const { extract } = await import("../lib/extractor.js");
+  const { embedDual } = await import("../lib/embedder.js");
+  const gp = await ops.getProvider();
+  const memories = await gp.findMemories({});
+
+  let success = 0;
+  let failed = 0;
+
+  for (const memory of memories) {
+    try {
+      const extraction = await extract(memory.text);
+      const memEmb = await embedDual(memory.text);
+      const edgeEmbeddings = [];
+      for (const edge of extraction.edges) {
+        edgeEmbeddings.push(await embedDual(edge.fact));
+      }
+      await gp.store(
+        { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
+        extraction.entities,
+        extraction.edges,
+        memEmb,
+        edgeEmbeddings,
+      );
+      success++;
+    } catch (err) {
+      failed++;
+    }
+  }
+
+  return { success, failed, total: memories.length };
+});
+
+// ============================================================================
 // LLM-Powered Answer
 // ============================================================================
 
