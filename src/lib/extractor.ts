@@ -167,17 +167,31 @@ Your task:
 Return a JSON object matching the schema.`;
 
 async function extractWithClaude(text: string): Promise<Extraction> {
-  const result = await prompt("claude", extractionPrompt(text), {
+  const result = await prompt("claude", extractionPrompt(text) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.", {
     model: "haiku",
     maxTurns: 1,
     allowedTools: [],
-    outputFormat: { type: "json_schema", schema: extractionSchema },
   });
-  if (!result.structuredOutput) {
-    throw new Error("Extraction failed - no structured output in response");
+
+  // Try structuredOutput first (works in some contexts), fall back to parsing text
+  const data = result.structuredOutput ?? parseJsonFromText(result.text ?? "");
+  if (!data) {
+    throw new Error("Extraction failed - could not parse JSON from response");
   }
-  console.error("Extracted edges:", JSON.stringify(result.structuredOutput, null, 2));
-  return Extraction.parse(result.structuredOutput);
+  return Extraction.parse(data);
+}
+
+function parseJsonFromText(text: string): unknown | null {
+  // Try direct parse
+  try { return JSON.parse(text); } catch {}
+  // Try extracting from markdown code block
+  const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenced) try { return JSON.parse(fenced[1]!); } catch {}
+  // Try finding first { to last }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) try { return JSON.parse(text.slice(start, end + 1)); } catch {}
+  return null;
 }
 
 /**
