@@ -247,6 +247,10 @@ const reextractState = {
 };
 
 export const getReextractStatus = createServerFn().handler(async () => ({ ...reextractState }));
+export const resetReextract = createServerFn({ method: "POST" }).handler(async () => {
+  reextractState.running = false;
+  return { reset: true };
+});
 
 export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
   if (reextractState.running) return { started: false, reason: "already running" };
