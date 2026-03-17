@@ -252,6 +252,56 @@ export const resetReextract = createServerFn({ method: "POST" }).handler(async (
   return { reset: true };
 });
 
+export const deduplicateEntities = createServerFn({ method: "POST" }).handler(async () => {
+  const gp = await ops.getProvider() as any;
+  const conn = gp.conn;
+  if (!conn) return { error: "No connection available" };
+
+  // Get all active entities
+  const result = await conn.query(
+    `MATCH (e:Entity) WHERE e.deletedAt = '' RETURN e.uuid as uuid, e.name as name, e.namespace as ns ORDER BY e.name`,
+  );
+  const rows = await result.getAll();
+
+  // Group by name+namespace
+  const groups = new Map<string, Array<{ uuid: string; name: string; ns: string }>>();
+  for (const r of rows) {
+    const key = `${r.name}::${r.ns}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push({ uuid: r.uuid as string, name: r.name as string, ns: r.ns as string });
+  }
+
+  let merged = 0;
+  let removed = 0;
+  const details: string[] = [];
+
+  for (const [, entities] of groups) {
+    if (entities.length <= 1) continue;
+
+    const keep = entities[0]!;
+    const dupes = entities.slice(1);
+
+    for (const dupe of dupes) {
+      // Re-point Fact nodes referencing the duplicate
+      await conn.query(`MATCH (f:Fact) WHERE f.sourceUuid = '${dupe.uuid}' SET f.sourceUuid = '${keep.uuid}'`);
+      await conn.query(`MATCH (f:Fact) WHERE f.targetUuid = '${dupe.uuid}' SET f.targetUuid = '${keep.uuid}'`);
+
+      // Re-point RELATES_TO edges: delete from dupe, they'll be re-created via facts
+      await conn.query(`MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->() DELETE r`);
+      await conn.query(`MATCH ()-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'}) DELETE r`);
+
+      // Soft-delete the duplicate
+      await conn.query(`MATCH (e:Entity {uuid: '${dupe.uuid}'}) SET e.deletedAt = '${new Date().toISOString()}'`);
+      removed++;
+    }
+
+    details.push(`"${keep.name}": kept 1, removed ${dupes.length}`);
+    merged++;
+  }
+
+  return { merged, removed, total: rows.length, remaining: rows.length - removed, details };
+});
+
 export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
   if (reextractState.running) return { started: false, reason: "already running" };
 

@@ -8,7 +8,7 @@
 import { useState, useCallback } from "react";
 import { Brain, Link2, Users, ChevronDown, RefreshCw } from "lucide-react";
 import type { Stats } from "./types";
-import { reextractAll, getReextractStatus } from "@/server/functions";
+import { reextractAll, getReextractStatus, deduplicateEntities } from "@/server/functions";
 
 interface StatsOverlayProps {
   stats: Stats | null;
@@ -118,7 +118,7 @@ export function StatsOverlay({
             </div>
           ))}
 
-          {/* Re-extract button */}
+          {/* Admin buttons */}
           <button
             onClick={startReextract}
             disabled={reextractStatus?.running}
@@ -128,6 +128,15 @@ export function StatsOverlay({
             <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary">
               {reextractStatus?.running ? "Extracting..." : "Re-extract"}
             </span>
+          </button>
+          <button
+            onClick={async () => {
+              const result = await deduplicateEntities();
+              alert(`Dedup: merged ${result.merged} groups, removed ${result.removed} duplicates. ${result.remaining} entities remaining.`);
+            }}
+            className="flex items-center gap-2 px-3 py-2 bg-surface/60 backdrop-blur-xl border border-border rounded-xl transition-all duration-300 hover:border-glow-cyan"
+          >
+            <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary">Dedup</span>
           </button>
         </div>
 
