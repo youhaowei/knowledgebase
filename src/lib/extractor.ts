@@ -178,6 +178,13 @@ async function extractWithClaude(text: string): Promise<Extraction> {
   if (!data) {
     throw new Error("Extraction failed - could not parse JSON from response");
   }
+  // Coerce invalid entity types to "concept" before Zod validation
+  const validTypes = new Set(["person", "organization", "project", "technology", "concept"]);
+  if (typeof data === "object" && data && "entities" in data && Array.isArray((data as any).entities)) {
+    for (const entity of (data as any).entities) {
+      if (entity.type && !validTypes.has(entity.type)) entity.type = "concept";
+    }
+  }
   return Extraction.parse(data);
 }
 
