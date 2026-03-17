@@ -6,11 +6,13 @@
  * - Extracts edges (facts) as relationships between entities
  * - Each edge has relationType, sentiment, and natural language description
  *
- * Uses Claude via unifai (OAuth subscription, no API costs).
+ * Uses Ollama (qwen3.5) for local, fast extraction with no external API dependency.
  */
 
-import { prompt } from "unifai";
 import { Extraction } from "../types.js";
+
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const EXTRACTION_MODEL = process.env.EXTRACTION_MODEL || "qwen3.5";
 
 // JSON schema for edge-based extraction
 const extractionSchema = {
@@ -166,15 +168,25 @@ Your task:
 
 Return a JSON object matching the schema.`;
 
-async function extractWithClaude(text: string): Promise<Extraction> {
-  const result = await prompt("claude", extractionPrompt(text) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.", {
-    model: "haiku",
-    maxTurns: 1,
-    allowedTools: [],
+async function extractWithOllama(text: string): Promise<Extraction> {
+  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: EXTRACTION_MODEL,
+      prompt: extractionPrompt(text) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.",
+      stream: false,
+      think: false,
+      options: { temperature: 0.2, num_predict: 4096 },
+    }),
   });
 
-  // Try structuredOutput first (works in some contexts), fall back to parsing text
-  const data = result.structuredOutput ?? parseJsonFromText(result.text ?? "");
+  if (!resp.ok) {
+    throw new Error(`Ollama extraction error: ${resp.status} ${await resp.text()}`);
+  }
+
+  const result = (await resp.json()) as { response: string };
+  const data = parseJsonFromText(result.response);
   if (!data) {
     throw new Error("Extraction failed - could not parse JSON from response");
   }
@@ -202,10 +214,10 @@ function parseJsonFromText(text: string): unknown | null {
 }
 
 /**
- * Extract structured knowledge from text using Claude (via unifai).
+ * Extract structured knowledge from text using Ollama (local, fast).
  */
 export async function extract(text: string): Promise<Extraction> {
-  return extractWithClaude(text);
+  return extractWithOllama(text);
 }
 
 export { extractionSchema, extractionPrompt };
