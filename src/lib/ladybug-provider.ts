@@ -2,7 +2,7 @@ import { Database, Connection } from "lbug";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { mkdirSync } from "fs";
+import { mkdirSync, unlinkSync } from "fs";
 import type {
   Memory,
   Entity,
@@ -34,7 +34,20 @@ export class LadybugProvider implements GraphProvider {
   constructor(dataPath?: string) {
     this.dataPath = dataPath ?? process.env.LADYBUG_DATA_PATH ?? join(homedir(), ".kb", "ladybug");
     mkdirSync(dirname(this.dataPath), { recursive: true });
-    this.db = new Database(this.dataPath);
+
+    // Auto-recover from corrupted WAL (LadybugDB crashes on unclean shutdown)
+    const walPath = this.dataPath + ".wal";
+    try {
+      this.db = new Database(this.dataPath);
+    } catch (err) {
+      if (String(err).includes("wal_record") || String(err).includes("KU_UNREACHABLE")) {
+        console.error(`[kb] Corrupted WAL detected, removing ${walPath} and retrying...`);
+        try { unlinkSync(walPath); } catch {}
+        this.db = new Database(this.dataPath);
+      } else {
+        throw err;
+      }
+    }
   }
 
   /** Maps dimension → column/index names for Memory and Fact tables */
