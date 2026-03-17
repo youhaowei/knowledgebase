@@ -72,60 +72,45 @@ export class Queue {
       try {
         const ns = memory.namespace;
 
-        // 1. Extract entities and edges using Claude/Gemini (Edge-as-Fact model)
-        console.error(`[Queue] Extracting entities and edges from memory ${memory.id}...`);
-        const extractStart = performance.now();
+        const start = performance.now();
+
+        // 1. Extract
         const { entities, edges, abstract, summary, category } = await extract(memory.text);
         memory.abstract = abstract;
         memory.summary = summary;
         memory.category = category ?? "general";
         memory.schemaVersion = String(summarySchema.current);
         memory.versionedAt = new Date().toISOString();
-        track("queue.extract", {
-          namespace: ns,
-          duration_ms: performance.now() - extractStart,
-          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, category: memory.category },
-        });
+        const extractMs = Math.round(performance.now() - start);
 
-        console.error(`[Queue] Extracted ${entities.length} entities, ${edges.length} edges`);
-
-        // 2. Auto-generate name from summary if not provided
+        // 2. Auto-generate name
         if (!memory.name || memory.name === "") {
-          // Take first 50 chars of summary, or first line
           const firstLine = summary.slice(0, 50).split("\n")[0];
           memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
         }
 
-        // 3. Generate dual embeddings for memory text (all available dimensions)
-        console.error(`[Queue] Generating memory embeddings (dual)...`);
+        // 3. Embed memory + edges
         const embedStart = performance.now();
         const memEmb = await embedDual(memory.text);
-
-        // 4. Generate dual embeddings for each edge's fact description
-        console.error(`[Queue] Generating embeddings for ${edges.length} edge facts...`);
         const edgeEmbeddings: EmbeddingMap[] = [];
         for (const edge of edges) {
           edgeEmbeddings.push(await embedDual(edge.fact));
         }
-        const embedDuration = performance.now() - embedStart;
-        const dimensions = memEmb.size > 0 ? [...memEmb.keys()] : [];
-        track("queue.embed", {
-          namespace: ns,
-          duration_ms: embedDuration,
-          meta: { memoryId: memory.id, edgeCount: edges.length, dimensions },
-        });
+        const embedMs = Math.round(performance.now() - embedStart);
 
-        // 5. Store everything (entities + RELATES_TO edges) with all embedding dimensions
-        console.error(`[Queue] Storing...`);
+        // 4. Store
         const storeStart = performance.now();
         await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
-        track("queue.store", {
-          namespace: ns,
-          duration_ms: performance.now() - storeStart,
-          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length },
-        });
+        const storeMs = Math.round(performance.now() - storeStart);
 
-        console.error(`[Queue] Memory ${memory.id} processed successfully`);
+        const totalMs = Math.round(performance.now() - start);
+        console.error(`[kb] ${memory.name} → ${entities.length}E ${edges.length}R (${extractMs}ms extract, ${embedMs}ms embed, ${storeMs}ms store = ${totalMs}ms)`);
+
+        track("queue.process", {
+          namespace: ns,
+          duration_ms: totalMs,
+          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, extractMs, embedMs, storeMs },
+        });
 
         // 6. Self-evolving: regenerate one stale memory per cycle (fire-and-forget)
         this.regenerateOneStale(ns).catch((err: unknown) =>

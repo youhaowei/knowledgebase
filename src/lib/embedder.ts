@@ -85,7 +85,7 @@ export async function embed(text: string): Promise<number[]> {
 
     if (ollamaDim === null) {
       ollamaDim = data.embedding.length;
-      console.error(`[embedder] Detected Ollama dimension: ${ollamaDim}`);
+      console.error(`[embed] Ollama dim: ${ollamaDim}`);
     }
 
     return data.embedding;

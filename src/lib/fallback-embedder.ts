@@ -30,9 +30,7 @@ async function loadPipeline(): Promise<FeatureExtractionPipeline | null> {
     const pipe = await createPipeline("feature-extraction", MODEL_ID, {
       dtype: "fp32",
     });
-    console.error(
-      `[fallback-embedder] Loaded ${MODEL_ID}`,
-    );
+    console.error(`[embed] Fallback ready (${MODEL_ID})`);
     return pipe as FeatureExtractionPipeline;
   } catch (err) {
     initFailed = true;
@@ -75,7 +73,7 @@ export async function embedFallback(text: string): Promise<number[]> {
     const result = Array.from(output.data as Float32Array);
     if (fallbackDim === null && result.length > 0) {
       fallbackDim = result.length;
-      console.error(`[fallback-embedder] Detected dimension: ${fallbackDim}`);
+      console.error(`[embed] Fallback dim: ${fallbackDim}`);
     }
     return result;
   } catch (err) {
