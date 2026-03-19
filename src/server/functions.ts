@@ -287,7 +287,72 @@ export const deduplicateEntities = createServerFn({ method: "POST" }).handler(as
       await conn.query(`MATCH (f:Fact) WHERE f.sourceUuid = '${dupe.uuid}' SET f.sourceUuid = '${keep.uuid}'`);
       await conn.query(`MATCH (f:Fact) WHERE f.targetUuid = '${dupe.uuid}' SET f.targetUuid = '${keep.uuid}'`);
 
-      // Re-point RELATES_TO edges: delete from dupe, they'll be re-created via facts
+      // Re-point RELATES_TO edges: copy to kept entity, then delete from dupe.
+      // Kuzu can't change edge endpoints — must create new + delete old.
+      // Outgoing edges: dupe -> X becomes keep -> X
+      const outResult = await conn.query(
+        `MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->(t:Entity)
+         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+                r.sentiment as sentiment, r.confidence as confidence,
+                r.confidenceReason as confidenceReason, r.episodes as episodes,
+                r.validAt as validAt, r.invalidAt as invalidAt,
+                r.namespace as namespace, r.createdAt as createdAt,
+                t.uuid as targetUuid`,
+      );
+      for (const row of await outResult.getAll()) {
+        // Skip if edge already exists on kept entity (avoid duplicates)
+        const exists = await conn.query(
+          `MATCH (s:Entity {uuid: '${keep.uuid}'})-[r:RELATES_TO {id: '${row.id}'}]->(t:Entity) RETURN r.id`,
+        );
+        if ((await exists.getAll()).length === 0) {
+          await conn.query(
+            `MATCH (s:Entity {uuid: '${keep.uuid}'})
+             MATCH (t:Entity {uuid: '${row.targetUuid}'})
+             CREATE (s)-[:RELATES_TO {
+               id: '${row.id}', relationType: '${row.relationType}',
+               fact: '${(row.fact as string).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               sentiment: ${row.sentiment ?? 0}, confidence: ${row.confidence ?? 1},
+               confidenceReason: '${((row.confidenceReason as string) ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               episodes: ${JSON.stringify(row.episodes ?? [])},
+               validAt: '${row.validAt ?? ""}', invalidAt: '${row.invalidAt ?? ""}',
+               namespace: '${row.namespace ?? ""}', createdAt: '${row.createdAt ?? ""}'
+             }]->(t)`,
+          );
+        }
+      }
+
+      // Incoming edges: X -> dupe becomes X -> keep
+      const inResult = await conn.query(
+        `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'})
+         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+                r.sentiment as sentiment, r.confidence as confidence,
+                r.confidenceReason as confidenceReason, r.episodes as episodes,
+                r.validAt as validAt, r.invalidAt as invalidAt,
+                r.namespace as namespace, r.createdAt as createdAt,
+                s.uuid as sourceUuid`,
+      );
+      for (const row of await inResult.getAll()) {
+        const exists = await conn.query(
+          `MATCH (s:Entity)-[r:RELATES_TO {id: '${row.id}'}]->(t:Entity {uuid: '${keep.uuid}'}) RETURN r.id`,
+        );
+        if ((await exists.getAll()).length === 0) {
+          await conn.query(
+            `MATCH (s:Entity {uuid: '${row.sourceUuid}'})
+             MATCH (t:Entity {uuid: '${keep.uuid}'})
+             CREATE (s)-[:RELATES_TO {
+               id: '${row.id}', relationType: '${row.relationType}',
+               fact: '${(row.fact as string).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               sentiment: ${row.sentiment ?? 0}, confidence: ${row.confidence ?? 1},
+               confidenceReason: '${((row.confidenceReason as string) ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               episodes: ${JSON.stringify(row.episodes ?? [])},
+               validAt: '${row.validAt ?? ""}', invalidAt: '${row.invalidAt ?? ""}',
+               namespace: '${row.namespace ?? ""}', createdAt: '${row.createdAt ?? ""}'
+             }]->(t)`,
+          );
+        }
+      }
+
+      // Now safe to delete old edges from duplicate
       await conn.query(`MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->() DELETE r`);
       await conn.query(`MATCH ()-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'}) DELETE r`);
 
