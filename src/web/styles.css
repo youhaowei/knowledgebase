@@ -1,10 +1,12 @@
 @import "tailwindcss";
+@import "@stdui/react/styles";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 
-/* Tell Tailwind to scan React components */
+/* Tell Tailwind to scan React components + stdui source */
 @source "./components/**/*.tsx";
 @source "../routes/**/*.tsx";
+@source "../../../node_modules/@stdui/react/src/**/*.tsx";
 
 /* Custom theme using Tailwind v4's CSS-first config */
 @theme {

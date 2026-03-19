@@ -12,6 +12,7 @@ import type {
   EntityFilter,
   EdgeFilter,
   MemoryFilter,
+  PaginationParams,
   EmbeddingMap,
 } from "../types.js";
 import type {
@@ -1052,6 +1053,7 @@ export class LadybugProvider implements GraphProvider {
   async findEntities(
     filter: EntityFilter,
     limit = 100,
+    pagination?: PaginationParams,
   ): Promise<StoredEntity[]> {
     const conditions: string[] = ["e.deletedAt = ''"];
     if (filter.uuid) conditions.push(`e.uuid = '${filter.uuid}'`);
@@ -1063,9 +1065,14 @@ export class LadybugProvider implements GraphProvider {
     if (filter.scope) conditions.push(`e.scope = '${filter.scope}'`);
     if (filter.type) conditions.push(`e.type = '${filter.type}'`);
 
+    const effectiveLimit = pagination?.limit ?? limit;
+    const offset = pagination?.offset ?? 0;
+    const sortCol = pagination?.sortBy === "name" ? "e.name" : "e.name";
+    const sortDir = pagination?.sortDir === "asc" ? "ASC" : "ASC";
+
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.conn.query(
-      `MATCH (e:Entity) ${whereClause} RETURN e LIMIT ${limit}`,
+      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir} SKIP ${offset} LIMIT ${effectiveLimit}`,
     );
 
     const rows = await result.getAll();
@@ -1083,7 +1090,7 @@ export class LadybugProvider implements GraphProvider {
     });
   }
 
-  async findEdges(filter: EdgeFilter, limit = 100): Promise<StoredEdge[]> {
+  async findEdges(filter: EdgeFilter, limit = 100, pagination?: PaginationParams): Promise<StoredEdge[]> {
     const conditions: string[] = [
       "source.deletedAt = ''",
       "target.deletedAt = ''",
@@ -1100,6 +1107,11 @@ export class LadybugProvider implements GraphProvider {
       conditions.push(`r.relationType = '${filter.relationType}'`);
     if (!filter.includeInvalidated) conditions.push("r.invalidAt = ''");
 
+    const effectiveLimit = pagination?.limit ?? limit;
+    const offset = pagination?.offset ?? 0;
+    const sortCol = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
+    const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.conn.query(
       `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
@@ -1109,14 +1121,16 @@ export class LadybugProvider implements GraphProvider {
               r.confidence as confidence, r.confidenceReason as confidenceReason,
               r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
               r.invalidAt as invalidAt, r.createdAt as createdAt
-       LIMIT ${limit}`,
+       ORDER BY ${sortCol} ${sortDir}
+       SKIP ${offset}
+       LIMIT ${effectiveLimit}`,
     );
 
     const rows = await result.getAll();
     return this.mapEdgeRows(rows);
   }
 
-  async findMemories(filter: MemoryFilter, limit = 100): Promise<Memory[]> {
+  async findMemories(filter: MemoryFilter, limit = 100, pagination?: PaginationParams): Promise<Memory[]> {
     const conditions: string[] = ["m.deletedAt = ''"];
     if (filter.id) conditions.push(`m.id = '${filter.id}'`);
     if (filter.name)
@@ -1126,13 +1140,20 @@ export class LadybugProvider implements GraphProvider {
       conditions.push(`m.namespace = '${filter.namespace}'`);
     if (filter.category) conditions.push(`m.category = '${filter.category}'`);
 
+    const effectiveLimit = pagination?.limit ?? limit;
+    const offset = pagination?.offset ?? 0;
+    const sortCol = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
+    const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.conn.query(
       `MATCH (m:Memory) ${whereClause}
        RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
               m.category as category, m.namespace as namespace, m.status as status,
               m.error as error, m.createdAt as createdAt
-       LIMIT ${limit}`,
+       ORDER BY ${sortCol} ${sortDir}
+       SKIP ${offset}
+       LIMIT ${effectiveLimit}`,
     );
 
     const rows = await result.getAll();

@@ -8,6 +8,10 @@ export default defineConfig({
   server: {
     port: 8000,
   },
+  resolve: {
+    // Force single instance of React/zustand — prevents dual-React when using linked @stdui/react
+    dedupe: ["react", "react-dom", "zustand"],
+  },
   plugins: [
     tsConfigPaths(),
     tanstackStart(),

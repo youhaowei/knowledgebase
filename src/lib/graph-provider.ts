@@ -7,6 +7,7 @@ import type {
   EntityFilter,
   EdgeFilter,
   MemoryFilter,
+  PaginationParams,
   EmbeddingMap,
 } from "../types.js";
 import { Neo4jProvider } from "./neo4j-provider.js";
@@ -118,11 +119,11 @@ export interface GraphProvider {
 
   storeEntity(entity: StoredEntity): Promise<void>;
 
-  findEntities(filter: EntityFilter, limit?: number): Promise<StoredEntity[]>;
+  findEntities(filter: EntityFilter, limit?: number, pagination?: PaginationParams): Promise<StoredEntity[]>;
 
-  findEdges(filter: EdgeFilter, limit?: number): Promise<StoredEdge[]>;
+  findEdges(filter: EdgeFilter, limit?: number, pagination?: PaginationParams): Promise<StoredEdge[]>;
 
-  findMemories(filter: MemoryFilter, limit?: number): Promise<Memory[]>;
+  findMemories(filter: MemoryFilter, limit?: number, pagination?: PaginationParams): Promise<Memory[]>;
 
   stats(namespace?: string): Promise<Stats>;
 

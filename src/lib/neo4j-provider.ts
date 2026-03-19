@@ -9,6 +9,7 @@ import type {
   EntityFilter,
   EdgeFilter,
   MemoryFilter,
+  PaginationParams,
   EmbeddingMap,
 } from "../types.js";
 import type {
@@ -1104,11 +1105,17 @@ export class Neo4jProvider implements GraphProvider {
   async findEntities(
     filter: EntityFilter,
     limit = 100,
+    pagination?: PaginationParams,
   ): Promise<StoredEntity[]> {
     const session = this.driver.session();
     try {
       const conditions: string[] = [];
-      const params: Record<string, unknown> = { limit: neo4j.int(limit) };
+      const effectiveLimit = pagination?.limit ?? limit;
+      const offset = pagination?.offset ?? 0;
+      const params: Record<string, unknown> = {
+        limit: neo4j.int(effectiveLimit),
+        skip: neo4j.int(offset),
+      };
 
       if (filter.uuid) {
         conditions.push("e.uuid = $uuid");
@@ -1133,11 +1140,13 @@ export class Neo4jProvider implements GraphProvider {
         params.type = filter.type;
       }
 
+      const sortProp = pagination?.sortBy === "name" ? "e.name" : "e.name";
+      const sortDir = pagination?.sortDir === "asc" ? "ASC" : "ASC";
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
       const result = await session.run(
-        `MATCH (e:Entity) ${where} RETURN e LIMIT $limit`,
+        `MATCH (e:Entity) ${where} RETURN e ORDER BY ${sortProp} ${sortDir} SKIP $skip LIMIT $limit`,
         params,
       );
 
@@ -1158,11 +1167,16 @@ export class Neo4jProvider implements GraphProvider {
     }
   }
 
-  async findEdges(filter: EdgeFilter, limit = 100): Promise<StoredEdge[]> {
+  async findEdges(filter: EdgeFilter, limit = 100, pagination?: PaginationParams): Promise<StoredEdge[]> {
     const session = this.driver.session();
     try {
       const conditions: string[] = [];
-      const params: Record<string, unknown> = { limit: neo4j.int(limit) };
+      const effectiveLimit = pagination?.limit ?? limit;
+      const offset = pagination?.offset ?? 0;
+      const params: Record<string, unknown> = {
+        limit: neo4j.int(effectiveLimit),
+        skip: neo4j.int(offset),
+      };
 
       if (filter.id) {
         conditions.push("r.id = $id");
@@ -1190,6 +1204,8 @@ export class Neo4jProvider implements GraphProvider {
         conditions.push("r.invalidAt IS NULL");
       }
 
+      const sortProp = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
+      const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1210,6 +1226,8 @@ export class Neo4jProvider implements GraphProvider {
                r.validAt as validAt,
                r.invalidAt as invalidAt,
                r.createdAt as createdAt
+        ORDER BY ${sortProp} ${sortDir}
+        SKIP $skip
         LIMIT $limit
         `,
         params,
@@ -1237,11 +1255,16 @@ export class Neo4jProvider implements GraphProvider {
     }
   }
 
-  async findMemories(filter: MemoryFilter, limit = 100): Promise<Memory[]> {
+  async findMemories(filter: MemoryFilter, limit = 100, pagination?: PaginationParams): Promise<Memory[]> {
     const session = this.driver.session();
     try {
       const conditions: string[] = [];
-      const params: Record<string, unknown> = { limit: neo4j.int(limit) };
+      const effectiveLimit = pagination?.limit ?? limit;
+      const offset = pagination?.offset ?? 0;
+      const params: Record<string, unknown> = {
+        limit: neo4j.int(effectiveLimit),
+        skip: neo4j.int(offset),
+      };
 
       if (filter.id) {
         conditions.push("m.id = $id");
@@ -1263,6 +1286,8 @@ export class Neo4jProvider implements GraphProvider {
         params.category = filter.category;
       }
 
+      const sortProp = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
+      const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1281,6 +1306,8 @@ export class Neo4jProvider implements GraphProvider {
                m.status as status,
                m.error as error,
                m.createdAt as createdAt
+        ORDER BY ${sortProp} ${sortDir}
+        SKIP $skip
         LIMIT $limit
         `,
         params,

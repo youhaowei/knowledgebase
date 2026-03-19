@@ -90,12 +90,13 @@ export const searchMemories = createServerFn()
 
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
+  namespace: z.string().optional(),
 });
 
 export const getMemory = createServerFn()
   .inputValidator((data: unknown) => getMemorySchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.getByName(data.name);
+    const result = await ops.getByName(data.name, data.namespace || undefined);
 
     if (!result.memory && !result.entity) {
       throw new Error(`Nothing found with name "${data.name}"`);
@@ -286,7 +287,75 @@ export const deduplicateEntities = createServerFn({ method: "POST" }).handler(as
       await conn.query(`MATCH (f:Fact) WHERE f.sourceUuid = '${dupe.uuid}' SET f.sourceUuid = '${keep.uuid}'`);
       await conn.query(`MATCH (f:Fact) WHERE f.targetUuid = '${dupe.uuid}' SET f.targetUuid = '${keep.uuid}'`);
 
-      // Re-point RELATES_TO edges: delete from dupe, they'll be re-created via facts
+      // Re-point RELATES_TO edges: copy to kept entity, then delete from dupe.
+      // Kuzu can't change edge endpoints — must create new + delete old.
+      // Outgoing edges: dupe -> X becomes keep -> X
+      const outResult = await conn.query(
+        `MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->(t:Entity)
+         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+                r.sentiment as sentiment, r.confidence as confidence,
+                r.confidenceReason as confidenceReason, r.episodes as episodes,
+                r.validAt as validAt, r.invalidAt as invalidAt,
+                r.namespace as namespace, r.createdAt as createdAt,
+                t.uuid as targetUuid`,
+      );
+      for (const row of await outResult.getAll()) {
+        // Skip if equivalent edge already exists on kept entity (same target + relationType)
+        const exists = await conn.query(
+          `MATCH (s:Entity {uuid: '${keep.uuid}'})-[r:RELATES_TO]->(t:Entity {uuid: '${row.targetUuid}'})
+           WHERE r.relationType = '${row.relationType}' RETURN r.id`,
+        );
+        if ((await exists.getAll()).length === 0) {
+          await conn.query(
+            `MATCH (s:Entity {uuid: '${keep.uuid}'})
+             MATCH (t:Entity {uuid: '${row.targetUuid}'})
+             CREATE (s)-[:RELATES_TO {
+               id: '${row.id}', relationType: '${row.relationType}',
+               fact: '${(row.fact as string).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               sentiment: ${row.sentiment ?? 0}, confidence: ${row.confidence ?? 1},
+               confidenceReason: '${((row.confidenceReason as string) ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               episodes: ${JSON.stringify(row.episodes ?? [])},
+               validAt: '${row.validAt ?? ""}', invalidAt: '${row.invalidAt ?? ""}',
+               namespace: '${row.namespace ?? ""}', createdAt: '${row.createdAt ?? ""}'
+             }]->(t)`,
+          );
+        }
+      }
+
+      // Incoming edges: X -> dupe becomes X -> keep
+      const inResult = await conn.query(
+        `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'})
+         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+                r.sentiment as sentiment, r.confidence as confidence,
+                r.confidenceReason as confidenceReason, r.episodes as episodes,
+                r.validAt as validAt, r.invalidAt as invalidAt,
+                r.namespace as namespace, r.createdAt as createdAt,
+                s.uuid as sourceUuid`,
+      );
+      for (const row of await inResult.getAll()) {
+        // Skip if equivalent edge already exists on kept entity (same source + relationType)
+        const exists = await conn.query(
+          `MATCH (s:Entity {uuid: '${row.sourceUuid}'})-[r:RELATES_TO]->(t:Entity {uuid: '${keep.uuid}'})
+           WHERE r.relationType = '${row.relationType}' RETURN r.id`,
+        );
+        if ((await exists.getAll()).length === 0) {
+          await conn.query(
+            `MATCH (s:Entity {uuid: '${row.sourceUuid}'})
+             MATCH (t:Entity {uuid: '${keep.uuid}'})
+             CREATE (s)-[:RELATES_TO {
+               id: '${row.id}', relationType: '${row.relationType}',
+               fact: '${(row.fact as string).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               sentiment: ${row.sentiment ?? 0}, confidence: ${row.confidence ?? 1},
+               confidenceReason: '${((row.confidenceReason as string) ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
+               episodes: ${JSON.stringify(row.episodes ?? [])},
+               validAt: '${row.validAt ?? ""}', invalidAt: '${row.invalidAt ?? ""}',
+               namespace: '${row.namespace ?? ""}', createdAt: '${row.createdAt ?? ""}'
+             }]->(t)`,
+          );
+        }
+      }
+
+      // Now safe to delete old edges from duplicate
       await conn.query(`MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->() DELETE r`);
       await conn.query(`MATCH ()-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'}) DELETE r`);
 
@@ -440,6 +509,147 @@ Instructions:
       entitiesUsed: searchResult.entities.length,
     };
   }));
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+// ============================================================================
+// Browse APIs (paginated listing)
+// ============================================================================
+
+const listMemoriesSchema = z.object({
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(100).default(30),
+  namespace: z.string().optional(),
+  category: z.enum(["preference", "event", "pattern", "general"]).optional(),
+  sortBy: z.enum(["createdAt", "name"]).default("createdAt"),
+  sortDir: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const listMemories = createServerFn()
+  .inputValidator((data: unknown) => listMemoriesSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    const filter: Record<string, unknown> = {};
+    if (data.namespace) filter.namespace = data.namespace;
+    if (data.category) filter.category = data.category;
+
+    const items = await gp.findMemories(filter as any, data.limit, {
+      offset: data.offset,
+      limit: data.limit,
+      sortBy: data.sortBy,
+      sortDir: data.sortDir,
+    });
+
+    const total = await gp.stats(data.namespace || undefined);
+    return { items, total: total.memories };
+  });
+
+const listEntitiesSchema = z.object({
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(100).default(30),
+  namespace: z.string().optional(),
+  type: z.enum(["person", "organization", "project", "technology", "concept"]).optional(),
+  sortBy: z.enum(["createdAt", "name"]).default("name"),
+  sortDir: z.enum(["asc", "desc"]).default("asc"),
+});
+
+export const listEntities = createServerFn()
+  .inputValidator((data: unknown) => listEntitiesSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    const filter: Record<string, unknown> = {};
+    if (data.namespace) filter.namespace = data.namespace;
+    if (data.type) filter.type = data.type;
+
+    const items = await gp.findEntities(filter as any, data.limit, {
+      offset: data.offset,
+      limit: data.limit,
+      sortBy: data.sortBy,
+      sortDir: data.sortDir,
+    });
+
+    const total = await gp.stats(data.namespace || undefined);
+    return { items, total: total.entities };
+  });
+
+const listEdgesSchema = z.object({
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(100).default(30),
+  namespace: z.string().optional(),
+  relationType: z.string().optional(),
+  includeInvalidated: z.boolean().default(false),
+  sortBy: z.enum(["createdAt", "name"]).default("createdAt"),
+  sortDir: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const listEdges = createServerFn()
+  .inputValidator((data: unknown) => listEdgesSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    const filter: Record<string, unknown> = {
+      includeInvalidated: data.includeInvalidated,
+    };
+    if (data.namespace) filter.namespace = data.namespace;
+    if (data.relationType) filter.relationType = data.relationType;
+
+    const items = await gp.findEdges(filter as any, data.limit, {
+      offset: data.offset,
+      limit: data.limit,
+      sortBy: data.sortBy,
+      sortDir: data.sortDir,
+    });
+
+    const total = await gp.stats(data.namespace || undefined);
+    return { items, total: total.edges };
+  });
+
+const getEntitySchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  namespace: z.string().optional(),
+});
+
+export const getEntity = createServerFn()
+  .inputValidator((data: unknown) => getEntitySchema.parse(data))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    // Find entity by exact name — namespace filter is optional
+    const filter: Record<string, unknown> = { name: data.name };
+    if (data.namespace) filter.namespace = data.namespace;
+    const entities = await gp.findEntities(filter as any, 10);
+    const entity = entities.find((e) => e.name === data.name);
+    if (!entity) throw new Error(`Entity not found: "${data.name}"`);
+
+    // Find all connected edges (both directions)
+    const edgeFilter: Record<string, unknown> = {};
+    if (data.namespace) edgeFilter.namespace = data.namespace;
+    const outgoing = await gp.findEdges({ ...edgeFilter, sourceEntityName: data.name } as any, 100);
+    const incoming = await gp.findEdges({ ...edgeFilter, targetEntityName: data.name } as any, 100);
+
+    return {
+      entity: {
+        name: entity.name,
+        type: entity.type,
+        description: entity.description,
+        summary: entity.summary,
+        namespace: entity.namespace,
+      },
+      edges: [...outgoing, ...incoming].map((e) => ({
+        id: e.id,
+        sourceEntity: e.sourceEntityName,
+        targetEntity: e.targetEntityName,
+        relationType: e.relationType,
+        fact: e.fact,
+        sentiment: e.sentiment,
+        confidence: e.confidence,
+        confidenceReason: e.confidenceReason,
+        validAt: e.validAt,
+        invalidAt: e.invalidAt,
+        createdAt: e.createdAt,
+      })),
+    };
+  });
 
 // ============================================================================
 // Streaming

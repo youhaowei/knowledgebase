@@ -21,6 +21,8 @@ interface GraphProps {
   nodes: GraphNode[];
   links: GraphLink[];
   onClusterClick?: (namespace: string) => void;
+  onNodeClick?: (node: { name: string; type: string }) => void;
+  selectedNodeName?: string;
 }
 
 // Type-based color palette (matching the cyber aesthetic)
@@ -73,12 +75,14 @@ interface ForceLink extends LinkObject {
   edgeId: string;
 }
 
-export function Graph({ nodes, links, onClusterClick }: GraphProps) {
+export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeName }: GraphProps) {
   const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Track hovered node for focus effect
   const hoveredNodeRef = useRef<ForceNode | null>(null);
+  const selectedNodeRef = useRef<string | undefined>(selectedNodeName);
+  selectedNodeRef.current = selectedNodeName;
   const highlightedNodesRef = useRef<Set<string>>(new Set());
   const highlightedLinksRef = useRef<Set<ForceLink>>(new Set());
 
@@ -187,6 +191,19 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
     ctx.arc(node.x!, node.y!, size * 0.6, 0, 2 * Math.PI);
     ctx.fillStyle = "rgba(255,255,255,0.12)";
     ctx.fill();
+
+    // Selection ring
+    if (selectedNodeRef.current === node.name) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(node.x!, node.y!, size + 3 * zoomCompensation, 0, 2 * Math.PI);
+      ctx.strokeStyle = "#00f5d4";
+      ctx.lineWidth = 2 * zoomCompensation;
+      ctx.shadowColor = "#00f5d4";
+      ctx.shadowBlur = 8 * zoomCompensation;
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Tiered labels: always show high-importance, progressively reveal others on zoom
     const tier = node.importance > 0.7 ? 1 : node.importance > 0.3 ? 2 : 3;
@@ -348,6 +365,12 @@ export function Graph({ nodes, links, onClusterClick }: GraphProps) {
         enableZoomInteraction={true}
         enablePanInteraction={true}
         onNodeHover={handleNodeHover}
+        onNodeClick={(node) => {
+          const n = node as ForceNode;
+          if (onNodeClick && n.name) {
+            onNodeClick({ name: n.name, type: n.itemType || "entity" });
+          }
+        }}
         // Cluster backgrounds
         // Physics
         d3AlphaDecay={0.02}

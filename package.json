@@ -44,6 +44,8 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@stdui/react": "../stdui/packages/ui",
+    "@stdui/icons": "../stdui/packages/icons",
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/geist-mono": "^5.2.7",
     "@huggingface/transformers": "^3.8.1",
@@ -73,5 +75,9 @@
   },
   "trustedDependencies": [
     "lbug"
-  ]
+  ],
+  "overrides": {
+    "@stdui/icons": "../stdui/packages/icons",
+    "@base-ui/react": "1.2.0"
+  }
 }
