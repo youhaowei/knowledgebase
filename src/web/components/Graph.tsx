@@ -9,7 +9,7 @@
  * - Edge labels
  */
 
-import { useCallback, useMemo, useRef, useEffect } from "react";
+import { useCallback, useMemo, useRef, useEffect, useState } from "react";
 import ForceGraph2D, {
   type ForceGraphMethods,
   type NodeObject,
@@ -78,6 +78,20 @@ interface ForceLink extends LinkObject {
 export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeName }: GraphProps) {
   const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Track container dimensions — react-force-graph-2d mis-sizes to window instead of container
+  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      if (entry) {
+        setDimensions({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Track hovered node for focus effect
   const hoveredNodeRef = useRef<ForceNode | null>(null);
@@ -338,48 +352,47 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
   }, [graphData.links]);
 
 
-  if (nodes.length === 0) {
-    return (
-      <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
-        <p>No entities in the graph yet.</p>
-        <p className="font-sans not-italic opacity-50 text-sm mt-3 tracking-wide">
-          Add a memory to extract facts and entities!
-        </p>
-      </div>
-    );
-  }
-
   return (
     <div ref={containerRef} className="w-full h-full">
-      <ForceGraph2D
-        ref={graphRef}
-        graphData={graphData}
-        // Node configuration
-        nodeCanvasObject={paintNode}
-        nodePointerAreaPaint={nodePointerAreaPaint}
-        nodeLabel={(node) => `${(node as ForceNode).name} (${(node as ForceNode).degree} connections)`}
-        // Link configuration - use custom rendering
-        linkCanvasObject={paintLink}
-        linkDirectionalArrowLength={0} // We draw our own arrows
-        // Interaction
-        enableNodeDrag={true}
-        enableZoomInteraction={true}
-        enablePanInteraction={true}
-        onNodeHover={handleNodeHover}
-        onNodeClick={(node) => {
-          const n = node as ForceNode;
-          if (onNodeClick && n.name) {
-            onNodeClick({ name: n.name, type: n.itemType || "entity" });
-          }
-        }}
-        // Cluster backgrounds
-        // Physics
-        d3AlphaDecay={0.02}
-        d3VelocityDecay={0.3}
-        cooldownTicks={200}
-        // Styling
-        backgroundColor="transparent"
-      />
+      {nodes.length === 0 ? (
+        <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
+          <p>No entities in the graph yet.</p>
+          <p className="font-sans not-italic opacity-50 text-sm mt-3 tracking-wide">
+            Add a memory to extract facts and entities!
+          </p>
+        </div>
+      ) : dimensions.width > 0 && dimensions.height > 0 ? (
+        <ForceGraph2D
+          ref={graphRef}
+          graphData={graphData}
+          width={dimensions.width}
+          height={dimensions.height}
+          // Node configuration
+          nodeCanvasObject={paintNode}
+          nodePointerAreaPaint={nodePointerAreaPaint}
+          nodeLabel={(node) => `${(node as ForceNode).name} (${(node as ForceNode).degree} connections)`}
+          // Link configuration - use custom rendering
+          linkCanvasObject={paintLink}
+          linkDirectionalArrowLength={0} // We draw our own arrows
+          // Interaction
+          enableNodeDrag={true}
+          enableZoomInteraction={true}
+          enablePanInteraction={true}
+          onNodeHover={handleNodeHover}
+          onNodeClick={(node) => {
+            const n = node as ForceNode;
+            if (onNodeClick && n.name) {
+              onNodeClick({ name: n.name, type: n.itemType || "entity" });
+            }
+          }}
+          // Physics
+          d3AlphaDecay={0.02}
+          d3VelocityDecay={0.3}
+          cooldownTicks={200}
+          // Styling
+          backgroundColor="transparent"
+        />
+      ) : null}
     </div>
   );
 }
