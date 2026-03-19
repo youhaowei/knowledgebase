@@ -5,6 +5,8 @@ import { CommandPalette } from "@/web/components/CommandPalette";
 import { TopBar } from "@/web/components/TopBar";
 import { StatusBar } from "@/web/components/StatusBar";
 import { LeftPanel } from "@/web/components/LeftPanel";
+import { RightPanel } from "@/web/components/RightPanel";
+import { ThemeProvider } from "@/web/components/ThemeProvider";
 import { ParticleBackground } from "@/web/components/ParticleBackground";
 import { getGraphData, getStats, listNamespaces } from "@/server/functions";
 import type { GraphNode, GraphLink, Stats } from "@/web/components/types";
@@ -167,23 +169,26 @@ function Home() {
     return () => clearInterval(interval);
   }, [refreshData, selectedNamespace]);
 
-  // Cmd+K shortcut
+  // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
         setCommandPaletteOpen((prev) => !prev);
       }
+      if (e.key === "Escape" && _selectedItem) {
+        setSelectedItem(null);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [_selectedItem]);
 
   // Right panel is open when an item is selected
   const rightPanelOpen = _selectedItem !== null;
 
   return (
-    <>
+    <ThemeProvider>
       {/* Background layers */}
       <ParticleBackground />
 
@@ -232,25 +237,14 @@ function Home() {
             className="shrink-0 transition-all duration-200 ease-in-out overflow-hidden border-l border-neutral-border bg-neutral-bg/40 backdrop-blur-xl"
             style={{ width: rightPanelOpen ? 400 : 0 }}
           >
-            <div className="w-[400px] h-full flex flex-col">
-              {/* Placeholder for Phase 5 — RightPanel with detail */}
+            <div className="w-[400px] h-full">
               {_selectedItem && (
-                <div className="flex-1 p-4">
-                  <div className="flex items-center justify-between mb-4">
-                    <span className="font-display text-sm font-semibold text-neutral-fg">
-                      {_selectedItem.name}
-                    </span>
-                    <button
-                      onClick={() => setSelectedItem(null)}
-                      className="text-neutral-fg-subtle hover:text-neutral-fg text-xs"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  <div className="text-xs text-neutral-fg-subtle">
-                    {_selectedItem.type} detail — Phase 5
-                  </div>
-                </div>
+                <RightPanel
+                  item={_selectedItem}
+                  namespace={selectedNamespace}
+                  onClose={() => setSelectedItem(null)}
+                  onRefresh={() => refreshData(selectedNamespace)}
+                />
               )}
             </div>
           </div>
@@ -267,6 +261,6 @@ function Home() {
       {commandPaletteOpen && (
         <CommandPalette onRefreshData={() => refreshData(selectedNamespace)} />
       )}
-    </>
+    </ThemeProvider>
   );
 }

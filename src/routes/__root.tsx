@@ -4,10 +4,8 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { StduiProvider } from "@stdui/react/theme";
 import appCss from "../web/styles.css?url";
 import { NotFound } from "../web/components/NotFound";
-import { ThemeInit } from "../web/components/ThemeInit";
 
 export const Route = createRootRoute({
   notFoundComponent: NotFound,
@@ -32,12 +30,9 @@ function RootComponent() {
         <HeadContent />
       </head>
       <body className="bg-void text-text-primary font-sans h-screen overflow-hidden flex flex-col">
-        <StduiProvider defaultMode="dark" storageKey="kb">
-          <ThemeInit />
-          <div className="flex-1 relative w-full h-full">
-            <Outlet />
-          </div>
-        </StduiProvider>
+        <div className="flex-1 relative w-full h-full">
+          <Outlet />
+        </div>
         <Scripts />
       </body>
     </html>
