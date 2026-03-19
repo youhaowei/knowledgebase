@@ -300,9 +300,10 @@ export const deduplicateEntities = createServerFn({ method: "POST" }).handler(as
                 t.uuid as targetUuid`,
       );
       for (const row of await outResult.getAll()) {
-        // Skip if edge already exists on kept entity (avoid duplicates)
+        // Skip if equivalent edge already exists on kept entity (same target + relationType)
         const exists = await conn.query(
-          `MATCH (s:Entity {uuid: '${keep.uuid}'})-[r:RELATES_TO {id: '${row.id}'}]->(t:Entity) RETURN r.id`,
+          `MATCH (s:Entity {uuid: '${keep.uuid}'})-[r:RELATES_TO]->(t:Entity {uuid: '${row.targetUuid}'})
+           WHERE r.relationType = '${row.relationType}' RETURN r.id`,
         );
         if ((await exists.getAll()).length === 0) {
           await conn.query(
@@ -332,8 +333,10 @@ export const deduplicateEntities = createServerFn({ method: "POST" }).handler(as
                 s.uuid as sourceUuid`,
       );
       for (const row of await inResult.getAll()) {
+        // Skip if equivalent edge already exists on kept entity (same source + relationType)
         const exists = await conn.query(
-          `MATCH (s:Entity)-[r:RELATES_TO {id: '${row.id}'}]->(t:Entity {uuid: '${keep.uuid}'}) RETURN r.id`,
+          `MATCH (s:Entity {uuid: '${row.sourceUuid}'})-[r:RELATES_TO]->(t:Entity {uuid: '${keep.uuid}'})
+           WHERE r.relationType = '${row.relationType}' RETURN r.id`,
         );
         if ((await exists.getAll()).length === 0) {
           await conn.query(
