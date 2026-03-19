@@ -143,3 +143,38 @@ export type Memory = z.infer<typeof Memory>;
 export type MemoryCategory = z.infer<typeof MemoryCategory>;
 export type Intent = z.infer<typeof Intent>;
 export type DetailLevel = z.infer<typeof DetailLevel>;
+
+// =============================================================================
+// FILTER TYPES - Used by GraphProvider find methods
+// =============================================================================
+
+export interface EntityFilter {
+  uuid?: string;
+  name?: string; // CONTAINS match (case-insensitive)
+  namespace?: string | null; // null = global scope
+  scope?: "project" | "global";
+  type?: EntityType;
+}
+
+export interface EdgeFilter {
+  id?: string;
+  namespace?: string | null;
+  sourceEntityName?: string;
+  targetEntityName?: string;
+  relationType?: string;
+  includeInvalidated?: boolean; // default false — only active edges
+}
+
+export interface MemoryFilter {
+  id?: string;
+  name?: string; // CONTAINS match (case-insensitive)
+  namespace?: string | null;
+  category?: MemoryCategory;
+}
+
+export interface PaginationParams {
+  offset?: number;
+  limit?: number;
+  sortBy?: "createdAt" | "name";
+  sortDir?: "asc" | "desc";
+}

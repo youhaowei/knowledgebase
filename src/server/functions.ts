@@ -445,6 +445,143 @@ Instructions:
 // Streaming
 // ============================================================================
 
+// ============================================================================
+// Browse APIs (paginated listing)
+// ============================================================================
+
+const listMemoriesSchema = z.object({
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(100).default(30),
+  namespace: z.string().optional(),
+  category: z.enum(["preference", "event", "pattern", "general"]).optional(),
+  sortBy: z.enum(["createdAt", "name"]).default("createdAt"),
+  sortDir: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const listMemories = createServerFn()
+  .inputValidator((data: unknown) => listMemoriesSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    const filter: Record<string, unknown> = {};
+    if (data.namespace) filter.namespace = data.namespace;
+    if (data.category) filter.category = data.category;
+
+    const items = await gp.findMemories(filter as any, data.limit, {
+      offset: data.offset,
+      limit: data.limit,
+      sortBy: data.sortBy,
+      sortDir: data.sortDir,
+    });
+
+    const total = await gp.stats(data.namespace || undefined);
+    return { items, total: total.memories };
+  });
+
+const listEntitiesSchema = z.object({
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(100).default(30),
+  namespace: z.string().optional(),
+  type: z.enum(["person", "organization", "project", "technology", "concept"]).optional(),
+  sortBy: z.enum(["createdAt", "name"]).default("name"),
+  sortDir: z.enum(["asc", "desc"]).default("asc"),
+});
+
+export const listEntities = createServerFn()
+  .inputValidator((data: unknown) => listEntitiesSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    const filter: Record<string, unknown> = {};
+    if (data.namespace) filter.namespace = data.namespace;
+    if (data.type) filter.type = data.type;
+
+    const items = await gp.findEntities(filter as any, data.limit, {
+      offset: data.offset,
+      limit: data.limit,
+      sortBy: data.sortBy,
+      sortDir: data.sortDir,
+    });
+
+    const total = await gp.stats(data.namespace || undefined);
+    return { items, total: total.entities };
+  });
+
+const listEdgesSchema = z.object({
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(100).default(30),
+  namespace: z.string().optional(),
+  relationType: z.string().optional(),
+  includeInvalidated: z.boolean().default(false),
+  sortBy: z.enum(["createdAt", "name"]).default("createdAt"),
+  sortDir: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const listEdges = createServerFn()
+  .inputValidator((data: unknown) => listEdgesSchema.parse(data ?? {}))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    const filter: Record<string, unknown> = {
+      includeInvalidated: data.includeInvalidated,
+    };
+    if (data.namespace) filter.namespace = data.namespace;
+    if (data.relationType) filter.relationType = data.relationType;
+
+    const items = await gp.findEdges(filter as any, data.limit, {
+      offset: data.offset,
+      limit: data.limit,
+      sortBy: data.sortBy,
+      sortDir: data.sortDir,
+    });
+
+    const total = await gp.stats(data.namespace || undefined);
+    return { items, total: total.edges };
+  });
+
+const getEntitySchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  namespace: z.string().default("default"),
+});
+
+export const getEntity = createServerFn()
+  .inputValidator((data: unknown) => getEntitySchema.parse(data))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    // Find entity by exact name
+    const entities = await gp.findEntities({ name: data.name, namespace: data.namespace }, 10);
+    const entity = entities.find((e) => e.name === data.name);
+    if (!entity) throw new Error(`Entity not found: "${data.name}"`);
+
+    // Find all connected edges (both directions)
+    const outgoing = await gp.findEdges({ sourceEntityName: data.name, namespace: data.namespace }, 100);
+    const incoming = await gp.findEdges({ targetEntityName: data.name, namespace: data.namespace }, 100);
+
+    return {
+      entity: {
+        name: entity.name,
+        type: entity.type,
+        description: entity.description,
+        summary: entity.summary,
+        namespace: entity.namespace,
+      },
+      edges: [...outgoing, ...incoming].map((e) => ({
+        id: e.id,
+        sourceEntity: e.sourceEntityName,
+        targetEntity: e.targetEntityName,
+        relationType: e.relationType,
+        fact: e.fact,
+        sentiment: e.sentiment,
+        confidence: e.confidence,
+        confidenceReason: e.confidenceReason,
+        validAt: e.validAt,
+        invalidAt: e.invalidAt,
+        createdAt: e.createdAt,
+      })),
+    };
+  });
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
 const streamingSearchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),

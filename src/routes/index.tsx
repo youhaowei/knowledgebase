@@ -2,7 +2,8 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect, useCallback } from "react";
 import { GraphClient } from "@/web/components/GraphClient";
 import { CommandPalette } from "@/web/components/CommandPalette";
-import { StatsOverlay } from "@/web/components/StatsOverlay";
+import { TopBar } from "@/web/components/TopBar";
+import { StatusBar } from "@/web/components/StatusBar";
 import { ParticleBackground } from "@/web/components/ParticleBackground";
 import { getGraphData, getStats, listNamespaces } from "@/server/functions";
 import type { GraphNode, GraphLink, Stats } from "@/web/components/types";
@@ -28,23 +29,12 @@ interface RawGraphData {
   }>;
 }
 
-/**
- * Normalize a value to 0-1 range using min-max scaling
- * Returns 0.5 if all values are the same (no variance)
- */
 function normalize(value: number, min: number, max: number): number {
   if (max === min) return 0.5;
   return (value - min) / (max - min);
 }
 
-/**
- * Helper to process raw graph data into UI-friendly format
- * Computes node importance from edge count
- * Maps edge sentiment to visual strength
- * Filters out orphan nodes (nodes with no connections)
- */
 function processGraphData(graphData: RawGraphData) {
-  // Build set of nodes that have at least one connection
   const connectedNodeNames = new Set<string>();
   const nodeEdgeCount = new Map<string, number>();
 
@@ -55,12 +45,10 @@ function processGraphData(graphData: RawGraphData) {
     nodeEdgeCount.set(edge.target, (nodeEdgeCount.get(edge.target) ?? 0) + 1);
   }
 
-  // Filter out orphan nodes (nodes not in any edge)
   const connectedNodes = graphData.nodes.filter((n) =>
     connectedNodeNames.has(n.name),
   );
 
-  // Compute importance from edge count (how many edges involve this entity)
   const edgeCounts = connectedNodes.map((n) => nodeEdgeCount.get(n.name) ?? 0);
   const minImportance = Math.min(...edgeCounts, 0);
   const maxImportance = Math.max(...edgeCounts, 1);
@@ -79,7 +67,6 @@ function processGraphData(graphData: RawGraphData) {
 
   const nodeNames = new Set(entityNodes.map((n) => n.name));
 
-  // Filter valid edges and map to GraphLink format
   const validEdges = graphData.edges.filter(
     (e) => nodeNames.has(e.source) && nodeNames.has(e.target),
   );
@@ -92,19 +79,13 @@ function processGraphData(graphData: RawGraphData) {
     sentiment: e.sentiment,
     confidence: e.confidence,
     edgeId: e.edgeId,
-    // Legacy support - relation as readable label
     relation: e.relationType,
-    // Map sentiment to strength (0-1 range)
-    strength: (e.sentiment + 1) / 2, // -1..1 → 0..1
+    strength: (e.sentiment + 1) / 2,
   }));
 
   return { itemNodes: entityNodes, validLinks };
 }
 
-/**
- * Route with SSR loader - data is fetched on the server before render
- * No loading spinner needed on initial page load!
- */
 export const Route = createFileRoute("/")({
   loader: async () => {
     const [graphData, stats, namespaces] = await Promise.all([
@@ -117,16 +98,30 @@ export const Route = createFileRoute("/")({
   component: Home,
 });
 
+// Selection state shared across panels
+export interface SelectedItem {
+  type: "entity" | "memory" | "edge";
+  name: string;
+  edgeId?: string;
+}
+
 function Home() {
   const loaderData = Route.useLoaderData();
-
   const initialProcessed = processGraphData(loaderData.graphData);
 
+  // Data state
   const [nodes, setNodes] = useState<GraphNode[]>(initialProcessed.itemNodes);
   const [links, setLinks] = useState<GraphLink[]>(initialProcessed.validLinks);
   const [stats, setStats] = useState<Stats>(loaderData.stats);
   const [namespaces, setNamespaces] = useState<string[]>(loaderData.namespaces);
   const [selectedNamespace, setSelectedNamespace] = useState<string | undefined>(undefined);
+
+  // Panel state
+  const [leftPanelOpen, setLeftPanelOpen] = useState(true);
+  const [_selectedItem, setSelectedItem] = useState<SelectedItem | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [_addDialogOpen, setAddDialogOpen] = useState(false);
+  const [_adminOpen, setAdminOpen] = useState(false);
 
   const refreshData = useCallback(async (ns?: string) => {
     try {
@@ -160,39 +155,113 @@ function Home() {
     }
   }, []);
 
-  // Refresh when namespace changes
   const handleNamespaceChange = useCallback((ns: string | undefined) => {
     setSelectedNamespace(ns);
     refreshData(ns);
   }, [refreshData]);
 
-  // Polling for updates
+  // Polling
   useEffect(() => {
     const interval = setInterval(() => refreshData(selectedNamespace), 5000);
     return () => clearInterval(interval);
   }, [refreshData, selectedNamespace]);
 
+  // Cmd+K shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // Right panel is open when an item is selected
+  const rightPanelOpen = _selectedItem !== null;
+
   return (
     <>
-      {/* Particle background layer (z-index: 1) */}
+      {/* Background layers */}
       <ParticleBackground />
 
-      <div className="h-screen overflow-hidden relative z-[2]">
-        {/* Full-screen graph as the primary visual - client-only to avoid SSR issues */}
-        <GraphClient nodes={nodes} links={links} onClusterClick={handleNamespaceChange} />
-
-        {/* Stats overlay in top-left corner */}
-        <StatsOverlay
-          stats={stats}
-          nodeCount={nodes.length}
+      {/* Main 3-panel layout */}
+      <div className="flex flex-col h-screen relative z-[2]">
+        {/* Top bar */}
+        <TopBar
+          leftPanelOpen={leftPanelOpen}
+          onToggleLeftPanel={() => setLeftPanelOpen((p) => !p)}
           namespaces={namespaces}
           selectedNamespace={selectedNamespace}
           onNamespaceChange={handleNamespaceChange}
+          onOpenSearch={() => setCommandPaletteOpen(true)}
+          onOpenAdd={() => setAddDialogOpen(true)}
         />
 
-        {/* Spotlight-style command palette at bottom */}
-        <CommandPalette onRefreshData={() => refreshData(selectedNamespace)} />
+        {/* Content: left panel + graph + right panel */}
+        <div className="flex flex-1 overflow-hidden">
+          {/* Left panel */}
+          <div
+            className="shrink-0 transition-all duration-200 ease-in-out overflow-hidden border-r border-neutral-border bg-neutral-bg/40 backdrop-blur-xl"
+            style={{ width: leftPanelOpen ? 320 : 0 }}
+          >
+            <div className="w-80 h-full flex flex-col">
+              {/* Placeholder for Phase 3 — LeftPanel with tabs */}
+              <div className="flex-1 flex items-center justify-center text-neutral-fg-subtle text-sm">
+                <div className="text-center space-y-2">
+                  <div className="text-lg font-display">Browse</div>
+                  <div className="text-xs">Memories · Entities · Facts</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Center: Graph (always visible, flex-1) */}
+          <div className="flex-1 min-w-0 relative">
+            <GraphClient nodes={nodes} links={links} onClusterClick={handleNamespaceChange} />
+          </div>
+
+          {/* Right panel */}
+          <div
+            className="shrink-0 transition-all duration-200 ease-in-out overflow-hidden border-l border-neutral-border bg-neutral-bg/40 backdrop-blur-xl"
+            style={{ width: rightPanelOpen ? 400 : 0 }}
+          >
+            <div className="w-[400px] h-full flex flex-col">
+              {/* Placeholder for Phase 5 — RightPanel with detail */}
+              {_selectedItem && (
+                <div className="flex-1 p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="font-display text-sm font-semibold text-neutral-fg">
+                      {_selectedItem.name}
+                    </span>
+                    <button
+                      onClick={() => setSelectedItem(null)}
+                      className="text-neutral-fg-subtle hover:text-neutral-fg text-xs"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="text-xs text-neutral-fg-subtle">
+                    {_selectedItem.type} detail — Phase 5
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Status bar */}
+        <StatusBar
+          stats={stats}
+          onOpenAdmin={() => setAdminOpen(true)}
+        />
       </div>
+
+      {/* Command palette overlay */}
+      {commandPaletteOpen && (
+        <CommandPalette onRefreshData={() => refreshData(selectedNamespace)} />
+      )}
     </>
   );
 }
