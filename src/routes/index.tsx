@@ -4,6 +4,7 @@ import { GraphClient } from "@/web/components/GraphClient";
 import { CommandPalette } from "@/web/components/CommandPalette";
 import { TopBar } from "@/web/components/TopBar";
 import { StatusBar } from "@/web/components/StatusBar";
+import { LeftPanel } from "@/web/components/LeftPanel";
 import { ParticleBackground } from "@/web/components/ParticleBackground";
 import { getGraphData, getStats, listNamespaces } from "@/server/functions";
 import type { GraphNode, GraphLink, Stats } from "@/web/components/types";
@@ -206,20 +207,24 @@ function Home() {
             className="shrink-0 transition-all duration-200 ease-in-out overflow-hidden border-r border-neutral-border bg-neutral-bg/40 backdrop-blur-xl"
             style={{ width: leftPanelOpen ? 320 : 0 }}
           >
-            <div className="w-80 h-full flex flex-col">
-              {/* Placeholder for Phase 3 — LeftPanel with tabs */}
-              <div className="flex-1 flex items-center justify-center text-neutral-fg-subtle text-sm">
-                <div className="text-center space-y-2">
-                  <div className="text-lg font-display">Browse</div>
-                  <div className="text-xs">Memories · Entities · Facts</div>
-                </div>
-              </div>
+            <div className="w-80 h-full">
+              <LeftPanel
+                namespace={selectedNamespace}
+                selectedItem={_selectedItem}
+                onSelect={setSelectedItem}
+              />
             </div>
           </div>
 
           {/* Center: Graph (always visible, flex-1) */}
           <div className="flex-1 min-w-0 relative">
-            <GraphClient nodes={nodes} links={links} onClusterClick={handleNamespaceChange} />
+            <GraphClient
+              nodes={nodes}
+              links={links}
+              onClusterClick={handleNamespaceChange}
+              onNodeClick={(node) => setSelectedItem({ type: "entity", name: node.name })}
+              selectedNodeName={_selectedItem?.type === "entity" ? _selectedItem.name : undefined}
+            />
           </div>
 
           {/* Right panel */}
