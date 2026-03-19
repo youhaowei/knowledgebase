@@ -11,17 +11,17 @@ async function main() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- migration script accesses internal conn/driver
   const gp = provider as any;
 
-  if (gp.conn) {
-    // LadybugDB path
-    const result = await gp.conn.query(
-      `MATCH (e:Entity) WHERE e.canonicalName = '' OR e.canonicalName IS NULL RETURN e.uuid as uuid, e.name as name`,
+  if (gp.executeQuery) {
+    // LadybugDB path — use executeQuery for parameterized queries
+    const result = await gp.executeQuery(
+      `MATCH (e:Entity) WHERE e.canonicalName = '' RETURN e.uuid as uuid, e.name as name`,
     );
     const rows = await result.getAll();
 
     let updated = 0;
     for (const row of rows) {
       const canonical = normalizeEntityName(row.name as string);
-      await gp.conn.query(
+      await gp.executeQuery(
         `MATCH (e:Entity {uuid: $uuid}) SET e.canonicalName = $canonical`,
         { uuid: row.uuid as string, canonical },
       );
