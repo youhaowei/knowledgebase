@@ -69,7 +69,7 @@ export function EntityList({ namespace, selectedItem, onSelect }: EntityListProp
               const isSelected = selectedItem?.type === "entity" && selectedItem?.name === entity.name;
               return (
                 <button
-                  key={entity.name}
+                  key={`${entity.name}-${entity.namespace ?? "global"}`}
                   onClick={() => onSelect({ type: "entity", name: entity.name, namespace: entity.namespace })}
                   className={`w-full text-left px-3 py-2.5 border-b border-neutral-border/50 transition-colors ${
                     isSelected
