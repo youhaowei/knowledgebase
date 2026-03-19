@@ -157,19 +157,20 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
     return { nodes: forceNodes, links: forceLinks, clusterLabels, namespaceList };
   }, [nodes, links]);
 
-  // Configure forces and fit to view when graph mounts
+  // Configure forces and fit to view when graph data changes
   useEffect(() => {
     if (graphRef.current && graphData.nodes.length > 0) {
       const fg = graphRef.current;
-      const n = graphData.nodes.length;
 
       fg.d3Force("charge")?.strength(-150);
       fg.d3Force("link")?.distance(60);
       fg.d3Force("center")?.strength(0.05);
 
-      setTimeout(() => fg.zoomToFit(400, 40), 1500);
+      // Fit after simulation settles
+      const timer = setTimeout(() => fg.zoomToFit(400, 40), 1500);
+      return () => clearTimeout(timer);
     }
-  }, [graphData.nodes.length]);
+  }, [graphData]);
 
   // Custom node rendering — adapts to zoom level
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
