@@ -7,6 +7,8 @@ import { StatusBar } from "@/web/components/StatusBar";
 import { LeftPanel } from "@/web/components/LeftPanel";
 import { RightPanel } from "@/web/components/RightPanel";
 import { ThemeProvider } from "@/web/components/ThemeProvider";
+import { AddMemoryDialog } from "@/web/components/AddMemoryDialog";
+import { AdminDialog } from "@/web/components/AdminDialog";
 import { ParticleBackground } from "@/web/components/ParticleBackground";
 import { getGraphData, getStats, listNamespaces } from "@/server/functions";
 import type { GraphNode, GraphLink, Stats } from "@/web/components/types";
@@ -259,8 +261,31 @@ function Home() {
 
       {/* Command palette overlay */}
       {commandPaletteOpen && (
-        <CommandPalette onRefreshData={() => refreshData(selectedNamespace)} />
+        <CommandPalette
+          onRefreshData={() => refreshData(selectedNamespace)}
+          onSelect={(item) => {
+            setSelectedItem(item);
+            setCommandPaletteOpen(false);
+          }}
+          onClose={() => setCommandPaletteOpen(false)}
+        />
       )}
+
+      {/* Add memory dialog */}
+      <AddMemoryDialog
+        open={_addDialogOpen}
+        onClose={() => setAddDialogOpen(false)}
+        onAdded={() => refreshData(selectedNamespace)}
+        namespace={selectedNamespace}
+        namespaces={namespaces}
+      />
+
+      <AdminDialog
+        open={_adminOpen}
+        onClose={() => setAdminOpen(false)}
+        stats={stats}
+        onRefresh={() => refreshData(selectedNamespace)}
+      />
     </ThemeProvider>
   );
 }

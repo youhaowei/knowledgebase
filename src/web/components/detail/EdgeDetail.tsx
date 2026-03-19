@@ -33,12 +33,9 @@ export function EdgeDetail({ edgeId, namespace, onInvalidated }: EdgeDetailProps
   useEffect(() => {
     setEdge(null);
     setError(null);
-    // Fetch the specific edge by ID
-    listEdges({ data: { offset: 0, limit: 1, namespace: namespace ?? undefined, includeInvalidated: true } as any })
-      .then(async (result) => {
-        // The listEdges doesn't filter by ID directly — use findEdges pattern
-        // For now, use a broader search and filter client-side
-        const allEdges = await listEdges({ data: { offset: 0, limit: 100, namespace: namespace ?? undefined, includeInvalidated: true } as any });
+    // Fetch edges and filter by ID client-side (no ID-specific server function yet)
+    listEdges({ data: { offset: 0, limit: 100, namespace: namespace ?? undefined, includeInvalidated: true } as any })
+      .then((allEdges) => {
         const found = allEdges.items.find((e) => e.id === edgeId);
         if (found) setEdge(found as any);
         else setError("Edge not found");
