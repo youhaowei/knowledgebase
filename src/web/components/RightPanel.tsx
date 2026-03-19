@@ -60,18 +60,18 @@ export function RightPanel({ item, namespace, onClose, onRefresh }: RightPanelPr
         </button>
       </div>
 
-      {/* Content */}
+      {/* Content — use item's namespace if available, fallback to global filter */}
       <div className="flex-1 overflow-hidden">
         {item.type === "entity" && (
-          <EntityDetail name={item.name} namespace={namespace} />
+          <EntityDetail name={item.name} namespace={item.namespace ?? namespace} />
         )}
         {item.type === "memory" && (
-          <MemoryDetail name={item.name} />
+          <MemoryDetail name={item.name} namespace={item.namespace ?? namespace} />
         )}
         {item.type === "edge" && item.edgeId && (
           <EdgeDetail
             edgeId={item.edgeId}
-            namespace={namespace}
+            namespace={item.namespace ?? namespace}
             onInvalidated={() => { onRefresh(); onClose(); }}
           />
         )}

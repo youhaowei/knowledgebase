@@ -90,12 +90,13 @@ export const searchMemories = createServerFn()
 
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
+  namespace: z.string().optional(),
 });
 
 export const getMemory = createServerFn()
   .inputValidator((data: unknown) => getMemorySchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.getByName(data.name);
+    const result = await ops.getByName(data.name, data.namespace || undefined);
 
     if (!result.memory && !result.entity) {
       throw new Error(`Nothing found with name "${data.name}"`);
@@ -538,21 +539,25 @@ export const listEdges = createServerFn()
 
 const getEntitySchema = z.object({
   name: z.string().min(1, "Name is required"),
-  namespace: z.string().default("default"),
+  namespace: z.string().optional(),
 });
 
 export const getEntity = createServerFn()
   .inputValidator((data: unknown) => getEntitySchema.parse(data))
   .handler(async ({ data }) => {
     const gp = await ops.getProvider();
-    // Find entity by exact name
-    const entities = await gp.findEntities({ name: data.name, namespace: data.namespace }, 10);
+    // Find entity by exact name — namespace filter is optional
+    const filter: Record<string, unknown> = { name: data.name };
+    if (data.namespace) filter.namespace = data.namespace;
+    const entities = await gp.findEntities(filter as any, 10);
     const entity = entities.find((e) => e.name === data.name);
     if (!entity) throw new Error(`Entity not found: "${data.name}"`);
 
     // Find all connected edges (both directions)
-    const outgoing = await gp.findEdges({ sourceEntityName: data.name, namespace: data.namespace }, 100);
-    const incoming = await gp.findEdges({ targetEntityName: data.name, namespace: data.namespace }, 100);
+    const edgeFilter: Record<string, unknown> = {};
+    if (data.namespace) edgeFilter.namespace = data.namespace;
+    const outgoing = await gp.findEdges({ ...edgeFilter, sourceEntityName: data.name } as any, 100);
+    const incoming = await gp.findEdges({ ...edgeFilter, targetEntityName: data.name } as any, 100);
 
     return {
       entity: {

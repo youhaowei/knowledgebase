@@ -108,6 +108,7 @@ export interface SelectedItem {
   type: "entity" | "memory" | "edge";
   name: string;
   edgeId?: string;
+  namespace?: string; // namespace of the selected item (for cross-namespace lookup)
 }
 
 function Home() {

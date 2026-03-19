@@ -5,6 +5,7 @@ import { SentimentBadge, ConfidenceBadge } from "./SentimentBadge";
 
 interface MemoryDetailProps {
   name: string;
+  namespace: string | undefined;
 }
 
 interface MemoryData {
@@ -34,17 +35,17 @@ const CATEGORY_COLORS: Record<string, "primary" | "info" | "warning" | "secondar
   general: "secondary",
 };
 
-export function MemoryDetail({ name }: MemoryDetailProps) {
+export function MemoryDetail({ name, namespace }: MemoryDetailProps) {
   const [data, setData] = useState<MemoryData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setData(null);
     setError(null);
-    getMemory({ data: { name } })
+    getMemory({ data: { name, namespace: namespace || undefined } })
       .then(setData)
       .catch((err) => setError(err.message));
-  }, [name]);
+  }, [name, namespace]);
 
   if (error) {
     return (

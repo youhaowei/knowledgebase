@@ -77,7 +77,7 @@ export function EdgeList({ namespace, selectedItem, onSelect }: EdgeListProps) {
               return (
                 <button
                   key={edge.id}
-                  onClick={() => onSelect({ type: "edge", name: edge.fact, edgeId: edge.id })}
+                  onClick={() => onSelect({ type: "edge", name: edge.fact, edgeId: edge.id, namespace: edge.namespace })}
                   className={`w-full text-left px-3 py-2.5 border-b border-neutral-border/50 transition-colors ${
                     isSelected
                       ? "bg-palette-primary/10 border-l-2 border-l-palette-primary"

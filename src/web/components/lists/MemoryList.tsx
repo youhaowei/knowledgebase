@@ -79,7 +79,7 @@ export function MemoryList({ namespace, selectedItem, onSelect }: MemoryListProp
               return (
                 <button
                   key={memory.id}
-                  onClick={() => onSelect({ type: "memory", name: memory.name })}
+                  onClick={() => onSelect({ type: "memory", name: memory.name, namespace: memory.namespace })}
                   className={`w-full text-left px-3 py-2.5 border-b border-neutral-border/50 transition-colors ${
                     isSelected
                       ? "bg-palette-primary/10 border-l-2 border-l-palette-primary"
