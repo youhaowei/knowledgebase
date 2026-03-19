@@ -158,6 +158,68 @@ describe("GraphProvider", () => {
     });
   });
 
+  describe("canonicalName entity dedup at store time", () => {
+    test("reuses entity with different casing", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const mem1: Memory = {
+        id: randomUUID(), name: "M1", text: "Sonnet Agent is fast",
+        summary: "Sonnet Agent speed", namespace: testNamespace, status: "completed", createdAt: new Date(),
+      };
+      await provider.store(mem1, [{ name: "Sonnet Agent", type: "technology" }], [], makeTestEmbeddingMap(100), []);
+
+      const mem2: Memory = {
+        id: randomUUID(), name: "M2", text: "sonnet agent is good",
+        summary: "sonnet agent quality", namespace: testNamespace, status: "completed", createdAt: new Date(),
+      };
+      await provider.store(mem2, [{ name: "sonnet agent", type: "technology" }], [], makeTestEmbeddingMap(101), []);
+
+      const found = await provider.findEntities({ namespace: testNamespace });
+      const techEntities = found.filter((e) => e.name.toLowerCase() === "sonnet agent");
+      expect(techEntities).toHaveLength(1);
+    });
+
+    test("reuses entity with slash prefix", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const mem1: Memory = {
+        id: randomUUID(), name: "M1", text: "bugfix skill helps",
+        summary: "bugfix", namespace: testNamespace, status: "completed", createdAt: new Date(),
+      };
+      await provider.store(mem1, [{ name: "bugfix skill", type: "concept" }], [], makeTestEmbeddingMap(200), []);
+
+      const mem2: Memory = {
+        id: randomUUID(), name: "M2", text: "/bugfix skill is useful",
+        summary: "/bugfix", namespace: testNamespace, status: "completed", createdAt: new Date(),
+      };
+      await provider.store(mem2, [{ name: "/bugfix skill", type: "concept" }], [], makeTestEmbeddingMap(201), []);
+
+      const found = await provider.findEntities({ namespace: testNamespace });
+      const bugfixEntities = found.filter((e) => e.name.toLowerCase().includes("bugfix"));
+      expect(bugfixEntities).toHaveLength(1);
+    });
+  });
+
+  describe("getEntityCatalog", () => {
+    test("returns name and type for active entities", async () => {
+      testNamespace = `test-${randomUUID()}`;
+      const mem: Memory = {
+        id: randomUUID(), name: "Catalog Test", text: "React and Zustand",
+        summary: "React and Zustand", namespace: testNamespace, status: "completed", createdAt: new Date(),
+      };
+      await provider.store(
+        mem,
+        [{ name: "React", type: "technology" }, { name: "Zustand", type: "technology" }],
+        [], makeTestEmbeddingMap(400), [],
+      );
+
+      const catalog = await provider.getEntityCatalog(testNamespace);
+      expect(catalog.length).toBeGreaterThanOrEqual(2);
+      const names = catalog.map((e) => e.name);
+      expect(names).toContain("React");
+      expect(names).toContain("Zustand");
+      expect(catalog[0]!.type).toBe("technology");
+    });
+  });
+
   describe("confidence scoring", () => {
     test("stores and retrieves confidence fields on edges", async () => {
       testNamespace = `test-${randomUUID()}`;

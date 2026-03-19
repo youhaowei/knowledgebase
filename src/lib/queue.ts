@@ -74,8 +74,9 @@ export class Queue {
 
         const start = performance.now();
 
-        // 1. Extract
-        const { entities, edges, abstract, summary, category } = await extract(memory.text);
+        // 1. Extract (with existing entity catalog for dedup)
+        const entityCatalog = await this.graph.getEntityCatalog(ns);
+        const { entities, edges, abstract, summary, category } = await extract(memory.text, entityCatalog);
         memory.abstract = abstract;
         memory.summary = summary;
         memory.category = category ?? "general";

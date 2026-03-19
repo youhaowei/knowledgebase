@@ -167,6 +167,12 @@ export interface GraphProvider {
 
   /** Count memories in a namespace (for rollup threshold). */
   countMemories(namespace: string): Promise<number>;
+
+  /** Lightweight entity catalog for extraction context — returns name + type for active entities. */
+  getEntityCatalog(namespace: string): Promise<Array<{ name: string; type: string }>>;
+
+  /** Merge duplicate entities: re-point all edges from dupeUuids to keepUuid, soft-delete dupes. */
+  mergeEntities(keepUuid: string, dupeUuids: string[]): Promise<{ removed: number }>;
 }
 
 export async function createGraphProvider(): Promise<GraphProvider> {

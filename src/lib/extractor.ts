@@ -103,7 +103,32 @@ const extractionSchema = {
   required: ["entities", "edges", "abstract", "summary", "category"],
 };
 
-const extractionPrompt = (text: string) => `Extract structured knowledge from this text:
+interface EntityCatalogEntry {
+  name: string;
+  type: string;
+}
+
+function formatEntityCatalog(entities: EntityCatalogEntry[]): string {
+  if (entities.length === 0) return "";
+  const grouped = new Map<string, string[]>();
+  for (const e of entities) {
+    if (!grouped.has(e.type)) grouped.set(e.type, []);
+    grouped.get(e.type)!.push(e.name);
+  }
+  const lines = [...grouped.entries()].map(([type, names]) => `   - ${type}: ${names.join(", ")}`);
+  return `
+EXISTING ENTITIES (reuse these exact names when referring to the same thing):
+${lines.join("\n")}
+
+   When an entity in the text matches or is equivalent to an existing entity above,
+   you MUST use the EXACT existing name. This includes abbreviations, acronyms, plurals,
+   alternate names, and semantic equivalents (e.g., "DnD" → "drag-and-drop").
+   Only create a NEW entity if nothing above is semantically equivalent.
+
+`;
+}
+
+const extractionPrompt = (text: string, existingEntities?: EntityCatalogEntry[]) => `Extract structured knowledge from this text:
 
 ${text}
 
@@ -117,10 +142,10 @@ Your task:
    - project: Projects, products, packages (e.g., "DashFrame", "@dashframe/core")
    - technology: Tools, languages, systems, formats (e.g., "Zustand", "Arrow IPC")
    - concept: Patterns, abstractions, ideas (e.g., "DataFrame", "state management")
-
+${existingEntities?.length ? formatEntityCatalog(existingEntities) : ""}
    Rules:
    - Names must be 1-3 words maximum
-   - Use canonical/proper names
+   - Use canonical/proper names${existingEntities?.length ? "\n   - REUSE existing entity names from the list above when applicable" : ""}
 
 2. **EDGES** - Extract relationships as fact triples between entities.
 
@@ -168,13 +193,13 @@ Your task:
 
 Return a JSON object matching the schema.`;
 
-async function extractWithOllama(text: string): Promise<Extraction> {
+async function extractWithOllama(text: string, existingEntities?: EntityCatalogEntry[]): Promise<Extraction> {
   const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: EXTRACTION_MODEL,
-      prompt: extractionPrompt(text) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.",
+      prompt: extractionPrompt(text, existingEntities) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.",
       stream: false,
       think: false,
       options: { temperature: 0.2, num_predict: 4096 },
@@ -215,9 +240,10 @@ function parseJsonFromText(text: string): unknown | null {
 
 /**
  * Extract structured knowledge from text using Ollama (local, fast).
+ * Pass existingEntities to enable context-aware entity resolution.
  */
-export async function extract(text: string): Promise<Extraction> {
-  return extractWithOllama(text);
+export async function extract(text: string, existingEntities?: EntityCatalogEntry[]): Promise<Extraction> {
+  return extractWithOllama(text, existingEntities);
 }
 
 export { extractionSchema, extractionPrompt };

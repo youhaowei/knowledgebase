@@ -23,6 +23,7 @@ import type {
 } from "./graph-provider.js";
 import { rrfFuse } from "./search-utils.js";
 import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
+import { normalizeEntityName } from "./entity-matcher.js";
 
 export class Neo4jProvider implements GraphProvider {
   private driver: Driver;
@@ -262,13 +263,8 @@ export class Neo4jProvider implements GraphProvider {
         );
 
         for (const entity of entities) {
-          if (!entity.uuid) {
-            throw new Error(
-              `Entity "${entity.name}" missing UUID - should be assigned by queue`,
-            );
-          }
-          const uuid = entity.uuid;
           const entityWithScope = entity as Entity & {
+            uuid?: string;
             namespace?: string;
             scope?: string;
           };
@@ -277,6 +273,17 @@ export class Neo4jProvider implements GraphProvider {
               ? entityWithScope.namespace
               : memory.namespace;
           const entityScope = entityWithScope.scope ?? "project";
+          const finalNamespace = entityScope === "global" ? null : entityNamespace;
+          const canonicalName = normalizeEntityName(entity.name);
+
+          // Check for existing entity by canonicalName+namespace (indexed, O(1))
+          const existingResult = await tx.run(
+            `MATCH (e:Entity) WHERE e.canonicalName = $canonicalName AND e.namespace = $namespace RETURN e.uuid AS uuid`,
+            { canonicalName, namespace: finalNamespace },
+          );
+          const existingUuid = existingResult.records[0]?.get("uuid") as string | undefined;
+          const uuid = existingUuid ?? entityWithScope.uuid ?? randomUUID();
+          entityWithScope.uuid = uuid;
 
           await tx.run(
             `
@@ -286,8 +293,10 @@ export class Neo4jProvider implements GraphProvider {
               e.type = $type,
               e.description = $description,
               e.namespace = $namespace,
-              e.scope = $scope
+              e.scope = $scope,
+              e.canonicalName = $canonicalName
             ON MATCH SET
+              e.type = $type,
               e.description = COALESCE($description, e.description)
             `,
             {
@@ -295,8 +304,9 @@ export class Neo4jProvider implements GraphProvider {
               name: entity.name,
               type: entity.type,
               description: entity.description ?? null,
-              namespace: entityScope === "global" ? null : entityNamespace,
+              namespace: finalNamespace,
               scope: entityScope,
+              canonicalName,
             },
           );
         }
@@ -1721,5 +1731,130 @@ export class Neo4jProvider implements GraphProvider {
     } finally {
       await session.close();
     }
+  }
+
+  async getEntityCatalog(namespace: string): Promise<Array<{ name: string; type: string }>> {
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (e:Entity) WHERE e.namespace = $namespace AND (e.deletedAt IS NULL OR e.deletedAt = '') RETURN e.name AS name, e.type AS type`,
+        { namespace },
+      );
+      return result.records.map((r) => ({ name: r.get("name") as string, type: r.get("type") as string }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async mergeEntities(keepUuid: string, dupeUuids: string[]): Promise<{ removed: number }> {
+    const session = this.driver.session();
+    let removed = 0;
+
+    try {
+      for (const dupeUuid of dupeUuids) {
+        await session.executeWrite(async (tx) => {
+          // Re-point outgoing edges
+          const outResult = await tx.run(
+            `MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->(t:Entity)
+             RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+                    r.sentiment as sentiment, r.confidence as confidence,
+                    r.confidenceReason as confidenceReason,
+                    r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
+                    r.namespace as namespace, r.createdAt as createdAt,
+                    t.uuid as targetUuid`,
+            { dupeUuid },
+          );
+          for (const record of outResult.records) {
+            const targetUuid = record.get("targetUuid") as string;
+            const relationType = record.get("relationType") as string;
+            const exists = await tx.run(
+              `MATCH (s:Entity {uuid: $keepUuid})-[r:RELATES_TO]->(t:Entity {uuid: $targetUuid})
+               WHERE r.relationType = $relationType RETURN r.id`,
+              { keepUuid, targetUuid, relationType },
+            );
+            if (exists.records.length === 0) {
+              await tx.run(
+                `MATCH (s:Entity {uuid: $keepUuid})
+                 MATCH (t:Entity {uuid: $targetUuid})
+                 CREATE (s)-[:RELATES_TO {
+                   id: $id, relationType: $relationType, fact: $fact,
+                   sentiment: $sentiment, confidence: $confidence,
+                   confidenceReason: $confidenceReason,
+                   episodes: $episodes, validAt: $validAt,
+                   invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
+                 }]->(t)`,
+                {
+                  keepUuid, targetUuid,
+                  id: record.get("id"), relationType,
+                  fact: record.get("fact"),
+                  sentiment: record.get("sentiment") ?? 0, confidence: record.get("confidence") ?? 1,
+                  confidenceReason: record.get("confidenceReason") ?? "",
+                  episodes: record.get("episodes") ?? [],
+                  validAt: record.get("validAt") ?? "", invalidAt: record.get("invalidAt") ?? "",
+                  namespace: record.get("namespace") ?? "", createdAt: record.get("createdAt") ?? "",
+                },
+              );
+            }
+          }
+
+          // Re-point incoming edges
+          const inResult = await tx.run(
+            `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: $dupeUuid})
+             RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+                    r.sentiment as sentiment, r.confidence as confidence,
+                    r.confidenceReason as confidenceReason,
+                    r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
+                    r.namespace as namespace, r.createdAt as createdAt,
+                    s.uuid as sourceUuid`,
+            { dupeUuid },
+          );
+          for (const record of inResult.records) {
+            const sourceUuid = record.get("sourceUuid") as string;
+            const relationType = record.get("relationType") as string;
+            const exists = await tx.run(
+              `MATCH (s:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(t:Entity {uuid: $keepUuid})
+               WHERE r.relationType = $relationType RETURN r.id`,
+              { sourceUuid, keepUuid, relationType },
+            );
+            if (exists.records.length === 0) {
+              await tx.run(
+                `MATCH (s:Entity {uuid: $sourceUuid})
+                 MATCH (t:Entity {uuid: $keepUuid})
+                 CREATE (s)-[:RELATES_TO {
+                   id: $id, relationType: $relationType, fact: $fact,
+                   sentiment: $sentiment, confidence: $confidence,
+                   confidenceReason: $confidenceReason,
+                   episodes: $episodes, validAt: $validAt,
+                   invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
+                 }]->(t)`,
+                {
+                  sourceUuid, keepUuid,
+                  id: record.get("id"), relationType,
+                  fact: record.get("fact"),
+                  sentiment: record.get("sentiment") ?? 0, confidence: record.get("confidence") ?? 1,
+                  confidenceReason: record.get("confidenceReason") ?? "",
+                  episodes: record.get("episodes") ?? [],
+                  validAt: record.get("validAt") ?? "", invalidAt: record.get("invalidAt") ?? "",
+                  namespace: record.get("namespace") ?? "", createdAt: record.get("createdAt") ?? "",
+                },
+              );
+            }
+          }
+
+          // Delete old edges and soft-delete duplicate
+          await tx.run(`MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->() DELETE r`, { dupeUuid });
+          await tx.run(`MATCH ()-[r:RELATES_TO]->(e:Entity {uuid: $dupeUuid}) DELETE r`, { dupeUuid });
+          await tx.run(
+            `MATCH (e:Entity {uuid: $dupeUuid}) SET e.deletedAt = $deletedAt`,
+            { dupeUuid, deletedAt: new Date().toISOString() },
+          );
+        });
+        removed++;
+      }
+    } finally {
+      await session.close();
+    }
+
+    return { removed };
   }
 }

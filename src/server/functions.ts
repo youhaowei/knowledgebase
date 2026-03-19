@@ -9,6 +9,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import * as ops from "../lib/operations.js";
 import { analyticsContext } from "../lib/analytics.js";
+import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 
 // ============================================================================
 // Queries (GET by default)
@@ -253,122 +254,80 @@ export const resetReextract = createServerFn({ method: "POST" }).handler(async (
   return { reset: true };
 });
 
-export const deduplicateEntities = createServerFn({ method: "POST" }).handler(async () => {
-  const gp = await ops.getProvider() as any;
-  const conn = gp.conn;
-  if (!conn) return { error: "No connection available" };
+/** Find duplicate entity groups using fuzzy name matching */
+export const findDuplicateCandidates = createServerFn().handler(async () => {
+  const gp = await ops.getProvider();
 
-  // Get all active entities
-  const result = await conn.query(
-    `MATCH (e:Entity) WHERE e.deletedAt = '' RETURN e.uuid as uuid, e.name as name, e.namespace as ns ORDER BY e.name`,
-  );
-  const rows = await result.getAll();
-
-  // Group by name+namespace
-  const groups = new Map<string, Array<{ uuid: string; name: string; ns: string }>>();
-  for (const r of rows) {
-    const key = `${r.name}::${r.ns}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push({ uuid: r.uuid as string, name: r.name as string, ns: r.ns as string });
+  // Fetch all entities across all namespaces via provider interface
+  const namespaces = await gp.listNamespaces();
+  const allEntities: Array<{ uuid: string; name: string; namespace: string; type: string }> = [];
+  for (const ns of namespaces) {
+    const entities = await gp.findEntities({ namespace: ns }, 10000);
+    for (const e of entities) {
+      const withUuid = e as typeof e & { uuid?: string };
+      if (withUuid.uuid) {
+        allEntities.push({ uuid: withUuid.uuid, name: e.name, namespace: e.namespace, type: e.type });
+      }
+    }
   }
+  // Also fetch global-scope entities
+  const globalEntities = await gp.findEntities({ namespace: null }, 10000);
+  for (const e of globalEntities) {
+    const withUuid = e as typeof e & { uuid?: string };
+    if (withUuid.uuid) {
+      allEntities.push({ uuid: withUuid.uuid, name: e.name, namespace: e.namespace, type: e.type });
+    }
+  }
+
+  const groups = groupDuplicateEntities(allEntities as any);
+
+  // Enrich with edge counts
+  const candidates = [];
+  for (const group of groups) {
+    const edges = await gp.findEdges({ sourceEntityName: group.keep.name }, 1000);
+    const inEdges = await gp.findEdges({ targetEntityName: group.keep.name }, 1000);
+
+    candidates.push({
+      keep: { uuid: group.keep.uuid, name: group.keep.name },
+      duplicates: group.duplicates.map((d) => ({ uuid: d.uuid, name: d.name })),
+      normalizedName: group.normalizedName,
+      totalEdges: edges.length + inEdges.length,
+    });
+  }
+
+  return { candidates };
+});
+
+const mergeDuplicateGroupSchema = z.object({
+  keepUuid: z.string(),
+  duplicateUuids: z.array(z.string()),
+});
+
+/** Merge a single duplicate group via provider interface (parameterized queries, both backends) */
+export const mergeDuplicateGroup = createServerFn({ method: "POST" })
+  .inputValidator((data: unknown) => mergeDuplicateGroupSchema.parse(data))
+  .handler(async ({ data }) => {
+    const gp = await ops.getProvider();
+    return gp.mergeEntities(data.keepUuid, data.duplicateUuids);
+  });
+
+/** Merge all duplicate groups at once (batch mode) */
+export const deduplicateEntities = createServerFn({ method: "POST" }).handler(async () => {
+  const result = await findDuplicateCandidates();
 
   let merged = 0;
   let removed = 0;
   const details: string[] = [];
+  const gp = await ops.getProvider();
 
-  for (const [, entities] of groups) {
-    if (entities.length <= 1) continue;
-
-    const keep = entities[0]!;
-    const dupes = entities.slice(1);
-
-    for (const dupe of dupes) {
-      // Re-point Fact nodes referencing the duplicate
-      await conn.query(`MATCH (f:Fact) WHERE f.sourceUuid = '${dupe.uuid}' SET f.sourceUuid = '${keep.uuid}'`);
-      await conn.query(`MATCH (f:Fact) WHERE f.targetUuid = '${dupe.uuid}' SET f.targetUuid = '${keep.uuid}'`);
-
-      // Re-point RELATES_TO edges: copy to kept entity, then delete from dupe.
-      // Kuzu can't change edge endpoints — must create new + delete old.
-      // Outgoing edges: dupe -> X becomes keep -> X
-      const outResult = await conn.query(
-        `MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->(t:Entity)
-         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
-                r.sentiment as sentiment, r.confidence as confidence,
-                r.confidenceReason as confidenceReason, r.episodes as episodes,
-                r.validAt as validAt, r.invalidAt as invalidAt,
-                r.namespace as namespace, r.createdAt as createdAt,
-                t.uuid as targetUuid`,
-      );
-      for (const row of await outResult.getAll()) {
-        // Skip if equivalent edge already exists on kept entity (same target + relationType)
-        const exists = await conn.query(
-          `MATCH (s:Entity {uuid: '${keep.uuid}'})-[r:RELATES_TO]->(t:Entity {uuid: '${row.targetUuid}'})
-           WHERE r.relationType = '${row.relationType}' RETURN r.id`,
-        );
-        if ((await exists.getAll()).length === 0) {
-          await conn.query(
-            `MATCH (s:Entity {uuid: '${keep.uuid}'})
-             MATCH (t:Entity {uuid: '${row.targetUuid}'})
-             CREATE (s)-[:RELATES_TO {
-               id: '${row.id}', relationType: '${row.relationType}',
-               fact: '${(row.fact as string).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
-               sentiment: ${row.sentiment ?? 0}, confidence: ${row.confidence ?? 1},
-               confidenceReason: '${((row.confidenceReason as string) ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
-               episodes: ${JSON.stringify(row.episodes ?? [])},
-               validAt: '${row.validAt ?? ""}', invalidAt: '${row.invalidAt ?? ""}',
-               namespace: '${row.namespace ?? ""}', createdAt: '${row.createdAt ?? ""}'
-             }]->(t)`,
-          );
-        }
-      }
-
-      // Incoming edges: X -> dupe becomes X -> keep
-      const inResult = await conn.query(
-        `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'})
-         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
-                r.sentiment as sentiment, r.confidence as confidence,
-                r.confidenceReason as confidenceReason, r.episodes as episodes,
-                r.validAt as validAt, r.invalidAt as invalidAt,
-                r.namespace as namespace, r.createdAt as createdAt,
-                s.uuid as sourceUuid`,
-      );
-      for (const row of await inResult.getAll()) {
-        // Skip if equivalent edge already exists on kept entity (same source + relationType)
-        const exists = await conn.query(
-          `MATCH (s:Entity {uuid: '${row.sourceUuid}'})-[r:RELATES_TO]->(t:Entity {uuid: '${keep.uuid}'})
-           WHERE r.relationType = '${row.relationType}' RETURN r.id`,
-        );
-        if ((await exists.getAll()).length === 0) {
-          await conn.query(
-            `MATCH (s:Entity {uuid: '${row.sourceUuid}'})
-             MATCH (t:Entity {uuid: '${keep.uuid}'})
-             CREATE (s)-[:RELATES_TO {
-               id: '${row.id}', relationType: '${row.relationType}',
-               fact: '${(row.fact as string).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
-               sentiment: ${row.sentiment ?? 0}, confidence: ${row.confidence ?? 1},
-               confidenceReason: '${((row.confidenceReason as string) ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")}',
-               episodes: ${JSON.stringify(row.episodes ?? [])},
-               validAt: '${row.validAt ?? ""}', invalidAt: '${row.invalidAt ?? ""}',
-               namespace: '${row.namespace ?? ""}', createdAt: '${row.createdAt ?? ""}'
-             }]->(t)`,
-          );
-        }
-      }
-
-      // Now safe to delete old edges from duplicate
-      await conn.query(`MATCH (e:Entity {uuid: '${dupe.uuid}'})-[r:RELATES_TO]->() DELETE r`);
-      await conn.query(`MATCH ()-[r:RELATES_TO]->(e:Entity {uuid: '${dupe.uuid}'}) DELETE r`);
-
-      // Soft-delete the duplicate
-      await conn.query(`MATCH (e:Entity {uuid: '${dupe.uuid}'}) SET e.deletedAt = '${new Date().toISOString()}'`);
-      removed++;
-    }
-
-    details.push(`"${keep.name}": kept 1, removed ${dupes.length}`);
+  for (const candidate of result.candidates) {
+    const mergeResult = await gp.mergeEntities(candidate.keep.uuid, candidate.duplicates.map((d) => d.uuid));
+    removed += mergeResult.removed;
     merged++;
+    details.push(`"${candidate.keep.name}": kept 1, removed ${candidate.duplicates.length}`);
   }
 
-  return { merged, removed, total: rows.length, remaining: rows.length - removed, details };
+  return { merged, removed, total: 0, remaining: 0, details };
 });
 
 export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
