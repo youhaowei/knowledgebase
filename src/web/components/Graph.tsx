@@ -195,14 +195,20 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
   }, [graphData]);
 
   // Custom node rendering — adapts to zoom level
+  // When zoomed out: high-degree nodes grow, low-degree nodes shrink → visual hierarchy
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const baseSize = 5 + node.importance * 6;
+    const isZoomedOut = globalScale < 0.5;
+    // Base size driven by degree (connections) — hubs are bigger
+    const degreeScale = Math.min(node.degree / 8, 1); // 0-1, saturates at 8 connections
+    const baseSize = isZoomedOut
+      ? 3 + degreeScale * 12  // zoomed out: 3px (isolated) to 15px (hub)
+      : 5 + node.importance * 6; // zoomed in: original sizing
     const zoomCompensation = Math.max(0.7, Math.min(2.5, 1.2 / globalScale));
     const size = baseSize * zoomCompensation;
 
     ctx.save();
     ctx.shadowColor = node.color;
-    ctx.shadowBlur = (3 + node.importance * 5) * zoomCompensation;
+    ctx.shadowBlur = (3 + degreeScale * 8) * zoomCompensation;
     ctx.beginPath();
     ctx.arc(node.x!, node.y!, size, 0, 2 * Math.PI);
     ctx.fillStyle = node.color;
@@ -228,8 +234,9 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
       ctx.restore();
     }
 
-    // Tiered labels: always show high-importance, progressively reveal others on zoom
-    const tier = node.importance > 0.7 ? 1 : node.importance > 0.3 ? 2 : 3;
+    // Tiered labels: high-degree/importance nodes show first, reveal others on zoom
+    const tier = (node.degree >= 5 || node.importance > 0.7) ? 1
+      : (node.degree >= 2 || node.importance > 0.3) ? 2 : 3;
     const showLabel = tier === 1 || (tier === 2 && globalScale > 0.3) || (tier === 3 && globalScale > 0.8);
     if (showLabel) {
       // Font scales with zoom compensation — readable at all levels
