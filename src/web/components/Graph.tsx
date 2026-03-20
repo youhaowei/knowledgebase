@@ -78,19 +78,27 @@ interface ForceLink extends LinkObject {
 export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeName }: GraphProps) {
   const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
+  const roRef = useRef<ResizeObserver | null>(null);
 
   // Track container dimensions — react-force-graph-2d mis-sizes to window instead of container
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
-  useEffect(() => {
-    const el = containerRef.current;
+  const containerCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    // Clean up old observer
+    if (roRef.current) {
+      roRef.current.disconnect();
+      roRef.current = null;
+    }
+    containerRef.current = el;
     if (!el) return;
-    const ro = new ResizeObserver(([entry]) => {
+    // Set initial dimensions immediately
+    setDimensions({ width: el.clientWidth, height: el.clientHeight });
+    // Watch for resizes
+    roRef.current = new ResizeObserver(([entry]) => {
       if (entry) {
         setDimensions({ width: entry.contentRect.width, height: entry.contentRect.height });
       }
     });
-    ro.observe(el);
-    return () => ro.disconnect();
+    roRef.current.observe(el);
   }, []);
 
   // Track hovered node for focus effect
@@ -353,7 +361,7 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
 
 
   return (
-    <div ref={containerRef} className="w-full h-full">
+    <div ref={containerCallbackRef} className="w-full h-full">
       {nodes.length === 0 ? (
         <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
           <p>No entities in the graph yet.</p>

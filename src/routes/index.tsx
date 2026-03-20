@@ -224,8 +224,8 @@ function Home() {
             </div>
           </div>
 
-          {/* Center: Graph (always visible, flex-1) */}
-          <div className="flex-1 min-w-0 relative">
+          {/* Center: Graph (always full width) */}
+          <div className="flex-1 min-w-0 relative overflow-hidden">
             <GraphClient
               nodes={nodes}
               links={links}
@@ -233,14 +233,12 @@ function Home() {
               onNodeClick={(node) => setSelectedItem({ type: "entity", name: node.name })}
               selectedNodeName={_selectedItem?.type === "entity" ? _selectedItem.name : undefined}
             />
-          </div>
 
-          {/* Right panel */}
-          <div
-            className="shrink-0 transition-all duration-200 ease-in-out overflow-hidden border-l border-neutral-border bg-neutral-bg/40 backdrop-blur-xl"
-            style={{ width: rightPanelOpen ? 400 : 0 }}
-          >
-            <div className="w-[400px] h-full">
+            {/* Right panel — overlay on top of graph */}
+            <div
+              className={`absolute top-0 right-0 h-full transition-transform duration-200 ease-in-out border-l border-neutral-border bg-neutral-bg/95 backdrop-blur-xl ${rightPanelOpen ? "translate-x-0" : "translate-x-full"}`}
+              style={{ width: 400 }}
+            >
               {_selectedItem && (
                 <RightPanel
                   item={_selectedItem}
