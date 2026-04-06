@@ -8,6 +8,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import * as ops from "../lib/operations.js";
+import { hybridSearch } from "../lib/hybrid-search.js";
 import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 
@@ -56,7 +57,7 @@ const searchSchema = z.object({
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.search(data.query, data.namespace, data.limit);
+    const result = await hybridSearch(data.query, data.namespace, data.limit);
 
     return {
       intent: result.intent,
@@ -85,6 +86,7 @@ export const searchMemories = createServerFn()
         description: e.description,
         summary: e.summary,
       })),
+      files: result.files,
       guidance: result.guidance,
     };
   }));
@@ -166,15 +168,13 @@ export const addMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => addMemorySchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.addMemory(data.text, data.name, data.namespace);
-    const pending = await ops.getQueueStatus(data.namespace);
-    const pendingInfo = pending > 0 ? ` (${pending} pending)` : "";
-
     return {
       success: true,
-      message: result.existing
+      message: result.status === "existing"
         ? `Memory already exists`
-        : `Memory queued for processing${pendingInfo}`,
+        : `Memory written to filesystem`,
       memoryId: result.id,
+      path: result.path,
     };
   }));
 

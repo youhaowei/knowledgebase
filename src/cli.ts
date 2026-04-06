@@ -23,10 +23,10 @@ function parseArgs(argv: string[]): ParsedArgs {
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i]!;
-    if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op") {
+    if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op" || arg === "--origin") {
       const key = arg === "--ns" ? "--namespace" : arg;
       flags[key] = argv[++i] ?? "";
-    } else if (arg === "--json" || arg === "-i") {
+    } else if (arg === "--json" || arg === "-i" || arg === "--dry-run") {
       flags[arg] = "true";
     } else if (arg.startsWith("--")) {
       flags[arg] = argv[++i] ?? "";
@@ -51,6 +51,7 @@ if (envName) {
 
 const ops = await import("./lib/operations.js");
 const { analyticsContext } = await import("./lib/analytics.js");
+const { hybridSearch } = await import("./lib/hybrid-search.js");
 
 // --- Context for command execution ---
 
@@ -96,10 +97,11 @@ async function handleAdd(ctx: CmdContext) {
   const text = ctx.positional[1];
   if (!text) throw new UsageError("Usage: kb add <text> [--name <name>] [--ns <namespace>]");
   const name = ctx.flags["--name"];
-  const result = await ops.addMemory(text, name, ctx.namespace);
-  const msg = result.existing
+  const origin = (ctx.flags["--origin"] ?? "manual") as import("./lib/fs-memory.js").Origin;
+  const result = await ops.addMemory(text, name, ctx.namespace, origin);
+  const msg = result.status === "existing"
     ? `Memory already exists: ${result.id}`
-    : `Queued memory ${result.id}`;
+    : `Written ${result.path}`;
   out(ctx, ctx.json ? result : msg);
 }
 
@@ -108,11 +110,22 @@ async function handleSearch(ctx: CmdContext) {
   if (!query) throw new UsageError("Usage: kb search <query> [--limit <n>] [--ns <namespace>]");
   const parsed = parseInt(ctx.flags["--limit"] ?? "", 10);
   const limit = Number.isNaN(parsed) ? 10 : parsed;
-  const result = await ops.search(query, ctx.namespace, limit);
+  const result = await hybridSearch(query, ctx.namespace, limit);
 
   if (ctx.json) {
     out(ctx, result);
     return;
+  }
+
+  // Show file results first (fast, always available)
+  if (result.files.length > 0) {
+    console.log(`\nFiles (${result.files.length}):`);
+    for (const f of result.files) {
+      const status = f.indexed ? "" : " [unindexed]";
+      const tags = f.tags.length ? ` [${f.tags.join(", ")}]` : "";
+      console.log(`  ${f.name}${status}${tags}`);
+      if (f.matchContext) console.log(`    ...${f.matchContext.slice(0, 80)}...`);
+    }
   }
 
   if (result.memories.length > 0) {
@@ -136,7 +149,7 @@ async function handleSearch(ctx: CmdContext) {
     }
   }
 
-  if (result.memories.length === 0 && result.edges.length === 0 && result.entities.length === 0) {
+  if (result.files.length === 0 && result.memories.length === 0 && result.edges.length === 0 && result.entities.length === 0) {
     console.log("No results found.");
   }
 }
@@ -194,6 +207,13 @@ async function handleStats(ctx: CmdContext) {
   console.log(`  Entities: ${result.entities}`);
   console.log(`  Edges:    ${result.edges}`);
   if (pending > 0) console.log(`  Pending:  ${pending}`);
+}
+
+async function handleMigrate(ctx: CmdContext) {
+  const dryRun = ctx.flags["--dry-run"] === "true";
+  const { migrate } = await import("./lib/migrate-to-fs.js");
+  await migrate(dryRun);
+  if (ctx.json) out(ctx, { done: true });
 }
 
 async function handleAnalytics(ctx: CmdContext) {
@@ -286,6 +306,7 @@ Commands:
   forget-edge <id> <reason>     Invalidate an edge with reason
   stats                         Show statistics
   analytics                     Usage analytics summary
+  migrate                       Export memories to ~/.kb/memories/ (filesystem)
 
 Flags:
   --ns, --namespace <name>      Namespace (default: "default")
@@ -295,6 +316,7 @@ Flags:
   --json                        Output raw JSON
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)
   --op <operation>              Analytics operation filter
+  --dry-run                     Preview migrate without writing files
   -i                            Interactive mode
 
 Interactive: Run 'kb' or 'kb -i' for a REPL.
@@ -314,6 +336,7 @@ async function runCommand(ctx: CmdContext) {
       case "forget-edge": return handleForgetEdge(ctx);
       case "stats": return handleStats(ctx);
       case "analytics": return handleAnalytics(ctx);
+      case "migrate": return handleMigrate(ctx);
       case "help": return showHelp();
       default:
         throw new UsageError(`Unknown command: ${cmd}. Run 'kb help' for usage.`);

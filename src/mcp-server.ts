@@ -17,6 +17,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as ops from "@/lib/operations.js";
+import { hybridSearch } from "@/lib/hybrid-search.js";
 import { analyticsContext } from "@/lib/analytics.js";
 import type { Memory, StoredEdge, StoredEntity, DetailLevel } from "@/types.js";
 
@@ -74,7 +75,7 @@ export function createKnowledgebaseMcpServer() {
     },
     withMcpSource(async ({ text, name, namespace }) => {
       try {
-        const result = await ops.addMemory(text, name, namespace);
+        const result = await ops.addMemory(text, name, namespace, "mcp");
         return {
           content: [
             {
@@ -82,9 +83,11 @@ export function createKnowledgebaseMcpServer() {
               text: JSON.stringify({
                 success: true,
                 id: result.id,
-                message: result.existing
+                name: result.name,
+                path: result.path,
+                message: result.status === "existing"
                   ? "Memory already exists with this name"
-                  : "Memory queued for processing",
+                  : "Memory written to filesystem",
               }),
             },
           ],
@@ -109,7 +112,7 @@ export function createKnowledgebaseMcpServer() {
     },
     withMcpSource(async ({ query, namespace, limit, detail }) => {
       try {
-        const result = await ops.search(query, namespace, limit);
+        const result = await hybridSearch(query, namespace, limit);
         return {
           content: [
             {
@@ -120,6 +123,7 @@ export function createKnowledgebaseMcpServer() {
                   memories: result.memories.map((m) => formatMemory(m, detail)),
                   edges: result.edges.map((e) => formatEdge(e, detail)),
                   entities: result.entities.map((e) => formatEntity(e, detail)),
+                  files: result.files,
                   guidance: result.guidance,
                 },
                 null,
