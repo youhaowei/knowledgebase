@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { homedir } from "os";
 import { join } from "path";
-import { mkdirSync, renameSync, readdirSync, existsSync, appendFileSync } from "fs";
+import { mkdirSync, renameSync, readdirSync, existsSync, appendFileSync, writeFileSync, readFileSync } from "fs";
 import matter from "gray-matter";
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ export async function writeMemoryFile(
   // Serialize frontmatter + body using gray-matter
   const fileContent = matter.stringify(text.trim(), frontmatter as Record<string, unknown>);
 
-  await Bun.write(tmpPath, fileContent);
+  writeFileSync(tmpPath, fileContent);
   renameSync(tmpPath, finalPath); // atomic on same filesystem
 
   return finalPath;
@@ -120,7 +120,7 @@ export async function writeMemoryFile(
 export async function readMemoryFile(
   filePath: string,
 ): Promise<{ frontmatter: MemoryFrontmatter; text: string }> {
-  const content = await Bun.file(filePath).text();
+  const content = readFileSync(filePath, "utf-8");
   return parseFrontmatter(content);
 }
 
@@ -216,7 +216,7 @@ export function generateIndex(namespacePath: string): void {
   lines.push(""); // trailing newline
 
   const indexPath = join(namespacePath, "_index.md");
-  Bun.write(indexPath, lines.join("\n"));
+  writeFileSync(indexPath, lines.join("\n"));
 }
 
 /**
