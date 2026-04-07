@@ -74,7 +74,7 @@ export function normalizeTags(tags: string[]): string[] {
       .replace(/[\s_]+/g, "-")      // spaces and underscores → hyphens
       .replace(/[^a-z0-9-]/g, "")  // strip non-alphanumeric (except hyphens)
       .replace(/-+/g, "-")          // collapse multiple hyphens
-      .replace(/^-|-$/g, ""),       // strip leading/trailing hyphens
+      .replace(/(?:^-)|(?:-$)/g, ""), // strip leading/trailing hyphens
   ).filter(Boolean);
 }
 

@@ -100,6 +100,46 @@ async function rgSearch(
 }
 
 /**
+ * Merge ripgrep matches into the result map. Adds matchContext to existing
+ * entries or creates new rg-only entries with file metadata.
+ */
+function mergeRgMatches(
+  resultById: Map<string, FileSearchResult>,
+  rgMatches: Map<string, string>,
+  namespace: string,
+  tagFilter?: string[],
+): void {
+  const allEntries = listMemoryFiles(namespace);
+  const entryByPath = new Map(allEntries.map((e) => [e.path, e]));
+
+  for (const [filePath, context] of rgMatches) {
+    const entry = entryByPath.get(filePath);
+    if (!entry) continue;
+
+    if (tagFilter && tagFilter.length > 0) {
+      const entryTagSet = new Set(entry.tags);
+      if (!tagFilter.some((t) => entryTagSet.has(t))) continue;
+    }
+
+    const existing = resultById.get(entry.id);
+    if (existing) {
+      existing.matchContext = context;
+    } else {
+      resultById.set(entry.id, {
+        id: entry.id,
+        name: entry.name,
+        abstract: undefined,
+        source: "file",
+        indexed: entry.indexed,
+        stale: false,
+        tags: entry.tags,
+        matchContext: context,
+      });
+    }
+  }
+}
+
+/**
  * Main search function. Runs indexScan + rgSearch in parallel, merges and deduplicates.
  *
  * Sort order: indexed files first, then by name match relevance (exact before contains).
@@ -112,59 +152,24 @@ export async function fileSearch(
   const limit = options?.limit ?? 20;
   const namespacePath = getNamespacePath(namespace);
 
-  // Parallel: index scan (sync wrapped in Promise.resolve) + rg search
   const [indexResults, rgMatches] = await Promise.all([
     Promise.resolve(indexScan(query, namespace, options)),
     rgSearch(query, namespacePath),
   ]);
 
-  // Seed result map with index scan hits (index scan wins for metadata)
   const resultById = new Map<string, FileSearchResult>();
   for (const r of indexResults) {
     resultById.set(r.id, r);
   }
 
-  // Cross-reference rg matches with file entries for metadata + tag filtering
   if (rgMatches.size > 0) {
-    const allEntries = listMemoryFiles(namespace);
-    const entryByPath = new Map(allEntries.map((e) => [e.path, e]));
-
-    for (const [filePath, context] of rgMatches) {
-      const entry = entryByPath.get(filePath);
-      if (!entry) continue;
-
-      // Apply tag filter to rg matches too
-      if (options?.tags && options.tags.length > 0) {
-        const entryTagSet = new Set(entry.tags);
-        if (!options.tags.some((t) => entryTagSet.has(t))) continue;
-      }
-
-      const existing = resultById.get(entry.id);
-      if (existing) {
-        // Already in index scan — add match context from rg
-        existing.matchContext = context;
-      } else {
-        // rg-only match (body/abstract match, name didn't match)
-        resultById.set(entry.id, {
-          id: entry.id,
-          name: entry.name,
-          abstract: undefined,
-          source: "file",
-          indexed: entry.indexed,
-          stale: false,
-          tags: entry.tags,
-          matchContext: context,
-        });
-      }
-    }
+    mergeRgMatches(resultById, rgMatches, namespace, options?.tags);
   }
 
   const q = query.toLowerCase();
   return Array.from(resultById.values())
     .sort((a, b) => {
-      // Indexed before unindexed
       if (a.indexed !== b.indexed) return a.indexed ? -1 : 1;
-      // Exact name match before contains match
       const aExact = a.name.toLowerCase() === q;
       const bExact = b.name.toLowerCase() === q;
       if (aExact !== bExact) return aExact ? -1 : 1;
