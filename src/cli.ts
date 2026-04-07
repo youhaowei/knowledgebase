@@ -110,6 +110,33 @@ async function handleAdd(ctx: CmdContext) {
   out(ctx, ctx.json ? result : msg);
 }
 
+function formatFileResult(f: { name: string; indexed: boolean; tags: string[]; matchContext?: string }): string {
+  const status = f.indexed ? "" : " [unindexed]";
+  const tags = f.tags.length ? ` [${f.tags.join(", ")}]` : "";
+  const context = f.matchContext ? `\n    ...${f.matchContext.slice(0, 80)}...` : "";
+  return `  ${f.name}${status}${tags}${context}`;
+}
+
+function formatMemory(m: { id: string; name: string; summary: string; text: string }): string {
+  return `  [${m.id}] ${m.name || "(unnamed)"} — ${m.summary || m.text.slice(0, 80)}`;
+}
+
+function printSection<T>(label: string, items: T[], fmt: (item: T) => string) {
+  if (items.length === 0) return;
+  console.log(`\n${label} (${items.length}):`);
+  for (const item of items) console.log(fmt(item));
+}
+
+function printSearchResults(result: Awaited<ReturnType<typeof hybridSearch>>) {
+  printSection("Files", result.files, formatFileResult);
+  printSection("Memories", result.memories, formatMemory);
+  printSection("Edges", result.edges, formatEdge);
+  printSection("Entities", result.entities, formatEntity);
+
+  const total = result.files.length + result.memories.length + result.edges.length + result.entities.length;
+  if (total === 0) console.log("No results found.");
+}
+
 async function handleSearch(ctx: CmdContext) {
   const query = ctx.positional[1];
   if (!query) throw new UsageError("Usage: kb search <query> [--limit <n>] [--ns <namespace>]");
@@ -121,42 +148,7 @@ async function handleSearch(ctx: CmdContext) {
     out(ctx, result);
     return;
   }
-
-  // Show file results first (fast, always available)
-  if (result.files.length > 0) {
-    console.log(`\nFiles (${result.files.length}):`);
-    for (const f of result.files) {
-      const status = f.indexed ? "" : " [unindexed]";
-      const tags = f.tags.length ? ` [${f.tags.join(", ")}]` : "";
-      console.log(`  ${f.name}${status}${tags}`);
-      if (f.matchContext) console.log(`    ...${f.matchContext.slice(0, 80)}...`);
-    }
-  }
-
-  if (result.memories.length > 0) {
-    console.log(`\nMemories (${result.memories.length}):`);
-    for (const m of result.memories) {
-      console.log(`  [${m.id}] ${m.name || "(unnamed)"} — ${m.summary || m.text.slice(0, 80)}`);
-    }
-  }
-
-  if (result.edges.length > 0) {
-    console.log(`\nEdges (${result.edges.length}):`);
-    for (const e of result.edges) {
-      console.log(formatEdge(e));
-    }
-  }
-
-  if (result.entities.length > 0) {
-    console.log(`\nEntities (${result.entities.length}):`);
-    for (const e of result.entities) {
-      console.log(formatEntity(e));
-    }
-  }
-
-  if (result.files.length === 0 && result.memories.length === 0 && result.edges.length === 0 && result.entities.length === 0) {
-    console.log("No results found.");
-  }
+  printSearchResults(result);
 }
 
 async function handleGet(ctx: CmdContext) {
@@ -221,58 +213,54 @@ async function handleMigrate(ctx: CmdContext) {
   if (ctx.json) out(ctx, { done: true });
 }
 
-async function handleAnalytics(ctx: CmdContext) {
-  const { getOperationSummary, getSourceBreakdown, getEventTotals } = await import("./lib/analytics.js");
-  const sinceFlag = ctx.flags["--since"];
-  const opFilter = ctx.flags["--op"];
+function parseSinceFlag(sinceFlag: string): string {
+  const match = sinceFlag.match(/^(\d+)([dhm])$/);
+  if (!match) throw new UsageError("--since format: <n>d, <n>h, or <n>m (e.g., 7d, 24h, 30m)");
+  const [, amount, unit] = match;
+  const num = parseInt(amount!, 10);
+  if (num > 365 * 24 * 60) throw new UsageError("--since value too large (max ~1 year)");
+  const ms = num * ({ d: 86400000, h: 3600000, m: 60000 }[unit!] ?? 0);
+  return new Date(Date.now() - ms).toISOString();
+}
 
-  // Parse --since into a date filter (e.g., "7d", "24h", "30d")
-  let sinceDate: string | null = null;
-  if (sinceFlag) {
-    const match = sinceFlag.match(/^(\d+)([dhm])$/);
-    if (!match) throw new UsageError("--since format: <n>d, <n>h, or <n>m (e.g., 7d, 24h, 30m)");
-    const [, amount, unit] = match;
-    const num = parseInt(amount!, 10);
-    if (num > 365 * 24 * 60) throw new UsageError("--since value too large (max ~1 year)");
-    const ms = num * ({ d: 86400000, h: 3600000, m: 60000 }[unit!] ?? 0);
-    sinceDate = new Date(Date.now() - ms).toISOString();
-  }
-
+function buildAnalyticsFilter(sinceFlag?: string, opFilter?: string) {
   const conditions: string[] = [];
   const params: (string | number | null)[] = [];
-
-  if (sinceDate) {
+  if (sinceFlag) {
     conditions.push("ts >= ?");
-    params.push(sinceDate);
+    params.push(parseSinceFlag(sinceFlag));
   }
   if (opFilter) {
     conditions.push("operation = ?");
     params.push(opFilter);
   }
+  return { where: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "", params };
+}
 
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
+// eslint-disable-next-line sonarjs/cognitive-complexity -- display logic with formatting
+async function handleAnalytics(ctx: CmdContext) {
+  const { getOperationSummary, getSourceBreakdown, getEventTotals } = await import("./lib/analytics.js");
+  const sinceFlag = ctx.flags["--since"];
+  const opFilter = ctx.flags["--op"];
+  const { where, params } = buildAnalyticsFilter(sinceFlag, opFilter);
   const summary = getOperationSummary(where, params);
 
   if (ctx.json) {
-    const sourceBreakdown = getSourceBreakdown(where, params);
-    const totals = getEventTotals(where, params);
-    out(ctx, { summary, sourceBreakdown, ...totals });
+    out(ctx, { summary, sourceBreakdown: getSourceBreakdown(where, params), ...getEventTotals(where, params) });
     return;
   }
-
   if (summary.length === 0) {
     console.log("No analytics events recorded yet.");
     return;
   }
 
-  // Header
   const { total: cnt, earliest, latest } = getEventTotals(where, params);
-  console.log(`\nAnalytics Summary (${cnt} events, ${earliest ? String(earliest).slice(0, 10) : "?"} to ${latest ? String(latest).slice(0, 10) : "?"})`);
+  const startDate = earliest ? String(earliest).slice(0, 10) : "?";
+  const endDate = latest ? String(latest).slice(0, 10) : "?";
+  console.log(`\nAnalytics Summary (${cnt} events, ${startDate} to ${endDate})`);
   if (sinceFlag) console.log(`  Filtered: last ${sinceFlag}`);
   if (opFilter) console.log(`  Operation: ${opFilter}`);
 
-  // Operation breakdown
   console.log(`\n  Operation          Count  Avg ms   Min ms   Max ms   Errors`);
   console.log(`  ${"─".repeat(65)}`);
   for (const row of summary) {
@@ -285,15 +273,11 @@ async function handleAnalytics(ctx: CmdContext) {
     console.log(`  ${op} ${count} ${avg} ${min} ${max} ${errors}`);
   }
 
-  // Source breakdown
   const sources = getSourceBreakdown(where, params);
   if (sources.length > 0) {
     console.log(`\n  Sources:`);
-    for (const row of sources) {
-      console.log(`    ${row.source}: ${row.count}`);
-    }
+    for (const row of sources) console.log(`    ${row.source}: ${row.count}`);
   }
-
   console.log("");
 }
 
