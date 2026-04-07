@@ -12,14 +12,14 @@
 
 import { createGraphProvider, type GraphProvider } from "./graph-provider.js";
 import { Queue } from "./queue.js";
-import { embedWithDimension, embedDual, isZeroEmbedding } from "./embedder.js";
+import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 import { tracked } from "./analytics.js";
-import { extract } from "./extractor.js";
-import { summarySchema } from "./versions.js";
+import { writeMemoryFile, appendToIndex, getNamespacePath, listMemoryFiles, normalizeTags } from "./fs-memory.js";
+import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
 let providerPromise: Promise<GraphProvider> | null = null;
 let queue: Queue;
@@ -35,7 +35,7 @@ export async function getProvider() {
   return providerPromise;
 }
 
-async function getQueue() {
+export async function getQueue() {
   await getProvider();
   return queue;
 }
@@ -49,42 +49,51 @@ export async function addMemory(
   text: string,
   name?: string,
   namespace = "default",
-): Promise<{ id: string; queued: boolean; existing?: boolean }> {
+  origin: Origin = "manual",
+): Promise<{ id: string; name: string; path: string; status: "written" | "existing" }> {
   return tracked("add", { namespace }, async () => {
-    // Dedup by exact name match within namespace.
-    // Uses CONTAINS query + post-filter because the provider doesn't support exact match.
-    // High limit (200) to handle prefix collisions (e.g., "retro-1" CONTAINS-matches "retro-10"..."retro-199").
+    // Dedup by exact name match within namespace (filesystem-based).
     if (name) {
-      const gp = await getProvider();
-      const candidates = await gp.findMemories({ name, namespace }, 200);
-      const exact = candidates.find((m) => m.name === name);
-      if (exact) return { id: exact.id, queued: false, existing: true };
+      const files = listMemoryFiles(namespace);
+      const existing = files.find((f) => f.name === name);
+      if (existing) return { id: existing.id, name, path: existing.path, status: "existing" as const };
     }
 
-    const q = await getQueue();
-    const memory: Memory = {
-      id: randomUUID(),
-      name: name ?? "",
-      text,
-      abstract: "",
-      summary: "",
+    const id = randomUUID();
+    const resolvedName = name ?? "";
+    const nsPath = getNamespacePath(namespace);
+    const frontmatter: MemoryFrontmatter = {
+      id,
+      name: resolvedName,
+      origin,
       namespace,
-      status: "pending",
-      schemaVersion: "0.0.0",
-      createdAt: new Date(),
+      tags: normalizeTags([]),
+      createdAt: new Date().toISOString(),
     };
-    await q.add(memory);
 
-    // Trigger namespace rollup check (fire-and-forget)
-    maybeRegenerateRollup(namespace).catch((err) =>
-      console.error(`[Rollup] Error checking rollup:`, err),
-    );
+    const filePath = await writeMemoryFile(id, text, frontmatter);
+    appendToIndex(nsPath, frontmatter);
 
-    return { id: memory.id, queued: true };
+    // Fire-and-forget: notify server to background-index this file
+    const serverUrl = process.env.KB_SERVER_URL ?? "http://localhost:8000";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    fetch(`${serverUrl}/api/trigger-index`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, namespace }),
+      signal: controller.signal,
+    }).then((res) => {
+      if (!res.ok) console.error(`[kb] Server returned ${res.status}`);
+    }).catch(() => {
+      console.error("[kb] Server not running — file written, indexing deferred");
+    }).finally(() => clearTimeout(timeout));
+
+    return { id, name: resolvedName, path: filePath, status: "written" as const };
   }, (result) => ({
     textLength: text.length,
     name: name ?? null,
-    existing: result.existing ?? false,
+    existing: result.status === "existing",
     memoryId: result.id,
   }));
 }
@@ -208,75 +217,6 @@ export async function getGraphData(namespace?: string, nodeLimit?: number): Prom
   });
 }
 
-/**
- * Generate or regenerate a namespace rollup summary.
- * Stored as a special Memory with name "__ns_rollup__".
- * Called after every 5th memory in a namespace.
- */
-export async function generateNamespaceRollup(namespace: string): Promise<void> {
-  const gp = await getProvider();
-  const memories = await gp.findMemories({ namespace }, 200);
-  const regularMemories = memories.filter((m) => m.name !== "__ns_rollup__");
-
-  if (regularMemories.length < 5) return; // Not enough content to summarize
-
-  // Concatenate L1 summaries as input
-  const allSummaries = regularMemories
-    .map((m) => `### ${m.name}\n${m.summary}`)
-    .join("\n\n");
-
-  // Extract produces abstract (L0) + summary (L1) from the concatenated text
-  const { abstract, summary } = await extract(
-    `Namespace "${namespace}" contains ${regularMemories.length} memories:\n\n${allSummaries}`,
-  );
-
-  const rollupId = `__ns_rollup__:${namespace}`;
-  const now = new Date();
-
-  // Check if rollup already exists
-  const existing = memories.find((m) => m.name === "__ns_rollup__");
-
-  if (existing) {
-    // Update existing rollup
-    await gp.updateMemorySummary(existing.id, {
-      abstract,
-      summary,
-      schemaVersion: String(summarySchema.current),
-      versionedAt: now.toISOString(),
-    });
-  } else {
-    // Create new rollup memory
-    const rollupMemory: Memory = {
-      id: rollupId,
-      name: "__ns_rollup__",
-      text: allSummaries,
-      abstract,
-      summary,
-      category: "general",
-      namespace,
-      status: "completed",
-      schemaVersion: String(summarySchema.current),
-      versionedAt: now.toISOString(),
-      createdAt: now,
-    };
-    const emb = await embedDual(abstract);
-    await gp.store(rollupMemory, [], [], emb, []);
-  }
-
-  console.error(`[Rollup] Generated rollup for namespace "${namespace}" (${regularMemories.length} memories)`);
-}
-
-/**
- * Check if a namespace rollup needs regeneration and trigger if so.
- * Called after memory ingestion.
- */
-export async function maybeRegenerateRollup(namespace: string): Promise<void> {
-  const gp = await getProvider();
-  const count = await gp.countMemories(namespace);
-  if (count > 0 && count % 5 === 0) {
-    await generateNamespaceRollup(namespace);
-  }
-}
 
 export async function close() {
   // LadybugDB close() triggers a Bun segfault (native addon issue).

@@ -10,9 +10,6 @@ import type {
   PaginationParams,
   EmbeddingMap,
 } from "../types.js";
-import { Neo4jProvider } from "./neo4j-provider.js";
-import { LadybugProvider } from "./ladybug-provider.js";
-
 export interface SearchResult {
   memories: Memory[];
   edges: StoredEdge[];
@@ -177,10 +174,12 @@ export interface GraphProvider {
 
 export async function createGraphProvider(): Promise<GraphProvider> {
   if (process.env.NEO4J_URI) {
+    const { Neo4jProvider } = await import("./neo4j-provider.js");
     const provider = new Neo4jProvider();
     await provider.init();
     return provider;
   }
+  const { LadybugProvider } = await import("./ladybug-provider.js");
   const provider = new LadybugProvider();
   await provider.init();
   return provider;

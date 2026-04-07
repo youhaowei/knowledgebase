@@ -8,8 +8,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import * as ops from "../lib/operations.js";
+import { hybridSearch } from "../lib/hybrid-search.js";
 import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
+import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity } from "../types.js";
 
 // ============================================================================
 // Queries (GET by default)
@@ -56,7 +58,7 @@ const searchSchema = z.object({
 export const searchMemories = createServerFn()
   .inputValidator((data: unknown) => searchSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.search(data.query, data.namespace, data.limit);
+    const result = await hybridSearch(data.query, data.namespace, data.limit);
 
     return {
       intent: result.intent,
@@ -85,6 +87,7 @@ export const searchMemories = createServerFn()
         description: e.description,
         summary: e.summary,
       })),
+      files: result.files,
       guidance: result.guidance,
     };
   }));
@@ -166,14 +169,11 @@ export const addMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => addMemorySchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
     const result = await ops.addMemory(data.text, data.name, data.namespace);
-    const pending = await ops.getQueueStatus(data.namespace);
-    const pendingInfo = pending > 0 ? ` (${pending} pending)` : "";
-
     return {
       success: true,
-      message: result.existing
+      message: result.status === "existing"
         ? `Memory already exists`
-        : `Memory queued for processing${pendingInfo}`,
+        : `Memory written to filesystem`,
       memoryId: result.id,
     };
   }));
@@ -260,26 +260,26 @@ export const findDuplicateCandidates = createServerFn().handler(async () => {
 
   // Fetch all entities across all namespaces via provider interface
   const namespaces = await gp.listNamespaces();
-  const allEntities: Array<{ uuid: string; name: string; namespace: string; type: string }> = [];
+  const allEntities: Array<StoredEntity & { uuid: string }> = [];
   for (const ns of namespaces) {
     const entities = await gp.findEntities({ namespace: ns }, 10000);
     for (const e of entities) {
-      const withUuid = e as typeof e & { uuid?: string };
+      const withUuid = e as StoredEntity & { uuid?: string };
       if (withUuid.uuid) {
-        allEntities.push({ uuid: withUuid.uuid, name: e.name, namespace: e.namespace, type: e.type });
+        allEntities.push({ ...e, uuid: withUuid.uuid });
       }
     }
   }
   // Also fetch global-scope entities
   const globalEntities = await gp.findEntities({ namespace: null }, 10000);
   for (const e of globalEntities) {
-    const withUuid = e as typeof e & { uuid?: string };
+    const withUuid = e as StoredEntity & { uuid?: string };
     if (withUuid.uuid) {
-      allEntities.push({ uuid: withUuid.uuid, name: e.name, namespace: e.namespace, type: e.type });
+      allEntities.push({ ...e, uuid: withUuid.uuid });
     }
   }
 
-  const groups = groupDuplicateEntities(allEntities as any);
+  const groups = groupDuplicateEntities(allEntities);
 
   // Enrich with edge counts
   const candidates = [];
@@ -490,11 +490,11 @@ export const listMemories = createServerFn()
   .inputValidator((data: unknown) => listMemoriesSchema.parse(data ?? {}))
   .handler(async ({ data }) => {
     const gp = await ops.getProvider();
-    const filter: Record<string, unknown> = {};
+    const filter: MemoryFilter = {};
     if (data.namespace) filter.namespace = data.namespace;
     if (data.category) filter.category = data.category;
 
-    const items = await gp.findMemories(filter as any, data.limit, {
+    const items = await gp.findMemories(filter, data.limit, {
       offset: data.offset,
       limit: data.limit,
       sortBy: data.sortBy,
@@ -518,11 +518,11 @@ export const listEntities = createServerFn()
   .inputValidator((data: unknown) => listEntitiesSchema.parse(data ?? {}))
   .handler(async ({ data }) => {
     const gp = await ops.getProvider();
-    const filter: Record<string, unknown> = {};
+    const filter: EntityFilter = {};
     if (data.namespace) filter.namespace = data.namespace;
     if (data.type) filter.type = data.type;
 
-    const items = await gp.findEntities(filter as any, data.limit, {
+    const items = await gp.findEntities(filter, data.limit, {
       offset: data.offset,
       limit: data.limit,
       sortBy: data.sortBy,
@@ -547,13 +547,13 @@ export const listEdges = createServerFn()
   .inputValidator((data: unknown) => listEdgesSchema.parse(data ?? {}))
   .handler(async ({ data }) => {
     const gp = await ops.getProvider();
-    const filter: Record<string, unknown> = {
+    const filter: EdgeFilter = {
       includeInvalidated: data.includeInvalidated,
     };
     if (data.namespace) filter.namespace = data.namespace;
     if (data.relationType) filter.relationType = data.relationType;
 
-    const items = await gp.findEdges(filter as any, data.limit, {
+    const items = await gp.findEdges(filter, data.limit, {
       offset: data.offset,
       limit: data.limit,
       sortBy: data.sortBy,
@@ -574,17 +574,17 @@ export const getEntity = createServerFn()
   .handler(async ({ data }) => {
     const gp = await ops.getProvider();
     // Find entity by exact name — namespace filter is optional
-    const filter: Record<string, unknown> = { name: data.name };
+    const filter: EntityFilter = { name: data.name };
     if (data.namespace) filter.namespace = data.namespace;
-    const entities = await gp.findEntities(filter as any, 10);
+    const entities = await gp.findEntities(filter, 10);
     const entity = entities.find((e) => e.name === data.name);
     if (!entity) throw new Error(`Entity not found: "${data.name}"`);
 
     // Find all connected edges (both directions)
-    const edgeFilter: Record<string, unknown> = {};
+    const edgeFilter: EdgeFilter = {};
     if (data.namespace) edgeFilter.namespace = data.namespace;
-    const outgoing = await gp.findEdges({ ...edgeFilter, sourceEntityName: data.name } as any, 100);
-    const incoming = await gp.findEdges({ ...edgeFilter, targetEntityName: data.name } as any, 100);
+    const outgoing = await gp.findEdges({ ...edgeFilter, sourceEntityName: data.name }, 100);
+    const incoming = await gp.findEdges({ ...edgeFilter, targetEntityName: data.name }, 100);
 
     return {
       entity: {
