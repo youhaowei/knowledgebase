@@ -30,17 +30,20 @@ async function graphSearchWithTimeout(
   namespace: string | undefined,
   limit: number,
 ): Promise<{ memories: Memory[]; edges: StoredEdge[]; entities: StoredEntity[]; intent: Intent; guidance: string } | null> {
+  let timer: ReturnType<typeof setTimeout>;
   try {
     const result = await Promise.race([
       ops.search(query, namespace, limit),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Graph search timeout")), GRAPH_TIMEOUT_MS),
-      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Graph search timeout")), GRAPH_TIMEOUT_MS);
+      }),
     ]);
     return result;
   } catch (err) {
     console.error(`[hybrid-search] Graph search failed/timed out: ${err instanceof Error ? err.message : err}`);
     return null;
+  } finally {
+    clearTimeout(timer!);
   }
 }
 

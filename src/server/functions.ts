@@ -174,7 +174,6 @@ export const addMemory = createServerFn({ method: "POST" })
         ? `Memory already exists`
         : `Memory written to filesystem`,
       memoryId: result.id,
-      path: result.path,
     };
   }));
 

@@ -9,7 +9,7 @@
 
 import { z } from "zod";
 import { homedir } from "os";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { mkdirSync, renameSync, readdirSync, existsSync, appendFileSync, writeFileSync, readFileSync } from "fs";
 import matter from "gray-matter";
 
@@ -51,7 +51,10 @@ const KB_ROOT = join(homedir(), ".kb", "memories");
  * Example: ~/.kb/memories/default/
  */
 export function getNamespacePath(namespace: string): string {
-  const nsPath = join(KB_ROOT, namespace);
+  const nsPath = resolve(KB_ROOT, namespace);
+  if (!nsPath.startsWith(`${resolve(KB_ROOT)}${sep}`)) {
+    throw new Error(`Invalid namespace: "${namespace}"`);
+  }
   mkdirSync(nsPath, { recursive: true });
   return nsPath;
 }

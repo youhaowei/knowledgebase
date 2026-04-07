@@ -66,10 +66,11 @@ async function rgSearch(
   query: string,
   namespacePath: string,
 ): Promise<Map<string, string>> {
+  if (query.trim() === "") return new Map();
   const result = new Map<string, string>();
   try {
     const proc = Bun.spawn(
-      ["rg", "--json", "-i", "--no-heading", query, namespacePath],
+      ["rg", "--json", "-F", "-i", "--no-heading", query, namespacePath],
       {
         stdout: "pipe",
         stderr: "pipe",

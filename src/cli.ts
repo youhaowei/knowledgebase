@@ -97,7 +97,12 @@ async function handleAdd(ctx: CmdContext) {
   const text = ctx.positional[1];
   if (!text) throw new UsageError("Usage: kb add <text> [--name <name>] [--ns <namespace>]");
   const name = ctx.flags["--name"];
-  const origin = (ctx.flags["--origin"] ?? "manual") as import("./lib/fs-memory.js").Origin;
+  const originRaw = ctx.flags["--origin"] ?? "manual";
+  const validOrigins = ["manual", "retro", "mcp", "import"] as const;
+  if (!validOrigins.includes(originRaw as (typeof validOrigins)[number])) {
+    throw new UsageError(`Invalid --origin: "${originRaw}". Must be one of: ${validOrigins.join(", ")}`);
+  }
+  const origin = originRaw as import("./lib/fs-memory.js").Origin;
   const result = await ops.addMemory(text, name, ctx.namespace, origin);
   const msg = result.status === "existing"
     ? `Memory already exists: ${result.id}`
@@ -312,6 +317,7 @@ Flags:
   --ns, --namespace <name>      Namespace (default: "default")
   --env <name>                  Environment (data isolation, e.g. "test")
   --name <name>                 Name for add command
+  --origin <type>               Origin type (manual|retro|mcp|import)
   --limit <n>                   Result limit for search (default: 10)
   --json                        Output raw JSON
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)

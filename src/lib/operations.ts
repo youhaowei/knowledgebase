@@ -35,7 +35,7 @@ export async function getProvider() {
   return providerPromise;
 }
 
-async function getQueue() {
+export async function getQueue() {
   await getProvider();
   return queue;
 }
@@ -76,13 +76,18 @@ export async function addMemory(
 
     // Fire-and-forget: notify server to background-index this file
     const serverUrl = process.env.KB_SERVER_URL ?? "http://localhost:8000";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     fetch(`${serverUrl}/api/trigger-index`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: filePath, namespace }),
+      body: JSON.stringify({ id, namespace }),
+      signal: controller.signal,
+    }).then((res) => {
+      if (!res.ok) console.error(`[kb] Server returned ${res.status}`);
     }).catch(() => {
       console.error("[kb] Server not running — file written, indexing deferred");
-    });
+    }).finally(() => clearTimeout(timeout));
 
     return { id, name: resolvedName, path: filePath, status: "written" as const };
   }, (result) => ({

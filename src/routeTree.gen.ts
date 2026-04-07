@@ -9,16 +9,11 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as ApiTriggerIndexRouteImport } from './routes/api.trigger-index'
 import { Route as McpRouteImport } from './routes/mcp'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiTriggerIndexRouteImport } from './routes/api.trigger-index'
 
-const ApiTriggerIndexRoute = ApiTriggerIndexRouteImport.update({
-  id: '/api/trigger-index',
-  path: '/api/trigger-index',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const McpRoute = McpRouteImport.update({
   id: '/mcp',
   path: '/mcp',
@@ -32,6 +27,11 @@ const HealthRoute = HealthRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiTriggerIndexRoute = ApiTriggerIndexRouteImport.update({
+  id: '/api/trigger-index',
+  path: '/api/trigger-index',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -71,13 +71,6 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/api/trigger-index': {
-      id: '/api/trigger-index'
-      path: '/api/trigger-index'
-      fullPath: '/api/trigger-index'
-      preLoaderRoute: typeof ApiTriggerIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/mcp': {
       id: '/mcp'
       path: '/mcp'
@@ -97,6 +90,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/trigger-index': {
+      id: '/api/trigger-index'
+      path: '/api/trigger-index'
+      fullPath: '/api/trigger-index'
+      preLoaderRoute: typeof ApiTriggerIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
   }

@@ -11,8 +11,9 @@
  */
 
 import { createGraphProvider } from "./graph-provider.js";
-import { writeMemoryFile, getNamespacePath } from "./fs-memory.js";
+import { writeMemoryFile } from "./fs-memory.js";
 import { existsSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
@@ -24,7 +25,7 @@ interface MemorySummary {
 
 function originForNamespace(namespace: string): Origin {
   if (namespace === "retro") return "retro";
-  return "manual";
+  return "import";
 }
 
 export async function migrate(dryRun = false): Promise<void> {
@@ -42,7 +43,7 @@ export async function migrate(dryRun = false): Promise<void> {
   const allSummaries: MemorySummary[] = [];
 
   for (const ns of namespaces) {
-    const memories = await gp.findMemories({ namespace: ns }, 1000);
+    const memories = await gp.findMemories({ namespace: ns }, 10000);
     const active = memories.filter((m) => m.name !== "__ns_rollup__");
     for (const m of active) {
       allSummaries.push({ id: m.id, name: m.name, namespace: ns });
@@ -83,18 +84,24 @@ export async function migrate(dryRun = false): Promise<void> {
   let failed = 0;
 
   for (const ns of namespaces) {
-    const memories = await gp.findMemories({ namespace: ns }, 1000);
+    const memories = await gp.findMemories({ namespace: ns }, 10000);
     const active = memories.filter((m) => m.name !== "__ns_rollup__");
 
     console.error(`[migrate] Namespace "${ns}": ${active.length} memories`);
 
     for (const m of active) {
-      const nsPath = getNamespacePath(ns);
-      const destPath = join(nsPath, `${m.id}.md`);
+      // Use a pre-computed path for existence check (avoids creating dirs in dry-run)
+      const expectedPath = join(homedir(), ".kb", "memories", ns, `${m.id}.md`);
 
-      if (existsSync(destPath)) {
+      if (existsSync(expectedPath)) {
         console.error(`[migrate]   skip (exists): ${m.id} (${m.name || "(unnamed)"})`);
         skipped++;
+        continue;
+      }
+
+      if (dryRun) {
+        console.error(`[migrate]   (dry-run) would write: ${m.id} (${m.name || "(unnamed)"})`);
+        written++;
         continue;
       }
 
@@ -112,12 +119,6 @@ export async function migrate(dryRun = false): Promise<void> {
         createdAt,
         indexedAt: now, // already extracted/indexed in graph
       };
-
-      if (dryRun) {
-        console.error(`[migrate]   (dry-run) would write: ${m.id} (${m.name || "(unnamed)"})`);
-        written++;
-        continue;
-      }
 
       try {
         await writeMemoryFile(m.id, m.text ?? "", frontmatter);
