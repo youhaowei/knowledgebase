@@ -50,6 +50,7 @@ export async function addMemory(
   name?: string,
   namespace = "default",
   origin: Origin = "manual",
+  tags: string[] = [],
 ): Promise<{ id: string; name: string; path: string; status: "written" | "existing" }> {
   return tracked("add", { namespace }, async () => {
     // Dedup by exact name match within namespace (filesystem-based).
@@ -67,7 +68,7 @@ export async function addMemory(
       name: resolvedName,
       origin,
       namespace,
-      tags: normalizeTags([]),
+      tags: normalizeTags(tags),
       createdAt: new Date().toISOString(),
     };
 
@@ -100,7 +101,7 @@ export async function addMemory(
 
 export async function search(
   query: string,
-  namespace?: string,
+  namespace = "default",
   limit = 10,
 ): Promise<{
   memories: Memory[];
@@ -109,24 +110,18 @@ export async function search(
   intent: Intent;
   guidance: string;
 }> {
-  return tracked("search", { namespace: namespace ?? "default" }, async () => {
+  return tracked("search", { namespace }, async () => {
     const gp = await getProvider();
     const { embedding } = await embedWithDimension(query);
-    // Fetch extra results when filtering by namespace (provider searches all namespaces)
-    const fetchLimit = namespace ? limit * 3 : limit;
+    // Fetch extra results — provider searches all namespaces, we post-filter
+    const fetchLimit = limit * 3;
     const result = await gp.search(isZeroEmbedding(embedding) ? [] : embedding, query, fetchLimit);
     const intent = classifyIntent(query);
 
-    // Post-filter by namespace when specified (provider doesn't support namespace-scoped search)
-    const memories = namespace
-      ? result.memories.filter((m) => m.namespace === namespace).slice(0, limit)
-      : result.memories;
-    const edges = namespace
-      ? result.edges.filter((e) => e.namespace === namespace).slice(0, limit)
-      : result.edges;
-    const entities = namespace
-      ? result.entities.filter((e) => e.namespace === namespace).slice(0, limit)
-      : result.entities;
+    // Post-filter by namespace (provider doesn't support namespace-scoped search)
+    const memories = result.memories.filter((m) => m.namespace === namespace).slice(0, limit);
+    const edges = result.edges.filter((e) => e.namespace === namespace).slice(0, limit);
+    const entities = result.entities.filter((e) => e.namespace === namespace).slice(0, limit);
 
     return {
       memories,

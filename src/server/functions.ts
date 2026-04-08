@@ -18,13 +18,13 @@ import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity } from "../ty
 // ============================================================================
 
 const namespaceFilterSchema = z.object({
-  namespace: z.string().optional(),
+  namespace: z.string().default("default"),
 });
 
 export const getGraphData = createServerFn()
   .inputValidator((data: unknown) => namespaceFilterSchema.parse(data ?? {}))
   .handler(async ({ data }) => {
-    const result = await ops.getGraphData(data.namespace || undefined);
+    const result = await ops.getGraphData(data.namespace);
     return {
       nodes: result.nodes,
       edges: result.links.map((link) => ({
@@ -42,7 +42,7 @@ export const getGraphData = createServerFn()
 export const getStats = createServerFn()
   .inputValidator((data: unknown) => namespaceFilterSchema.parse(data ?? {}))
   .handler(({ data }) =>
-    analyticsContext.run({ source: "web" }, () => ops.stats(data.namespace || undefined)),
+    analyticsContext.run({ source: "web" }, () => ops.stats(data.namespace)),
   );
 
 export const listNamespaces = createServerFn().handler(async () => {
@@ -52,7 +52,7 @@ export const listNamespaces = createServerFn().handler(async () => {
 const searchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().max(100).default(10),
-  namespace: z.string().optional(),
+  namespace: z.string().default("default"),
 });
 
 export const searchMemories = createServerFn()
@@ -94,13 +94,13 @@ export const searchMemories = createServerFn()
 
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
-  namespace: z.string().optional(),
+  namespace: z.string().default("default"),
 });
 
 export const getMemory = createServerFn()
   .inputValidator((data: unknown) => getMemorySchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.getByName(data.name, data.namespace || undefined);
+    const result = await ops.getByName(data.name, data.namespace);
 
     if (!result.memory && !result.entity) {
       throw new Error(`Nothing found with name "${data.name}"`);

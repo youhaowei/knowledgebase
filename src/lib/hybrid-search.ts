@@ -51,10 +51,11 @@ export async function hybridSearch(
   query: string,
   namespace?: string,
   limit = 10,
+  tags?: string[],
 ): Promise<HybridSearchResult> {
   const [graphResult, fileResults] = await Promise.all([
     graphSearchWithTimeout(query, namespace, limit),
-    fileSearch(query, namespace ?? "default", { limit }),
+    fileSearch(query, namespace ?? "default", { limit, tags }),
   ]);
 
   // Build set of memory IDs from graph results for dedup (graph wins)

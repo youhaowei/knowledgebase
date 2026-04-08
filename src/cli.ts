@@ -23,7 +23,10 @@ function parseArgs(argv: string[]): ParsedArgs {
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i]!;
-    if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op" || arg === "--origin") {
+    if (arg === "--tag") {
+      const existing = flags["--tag"] ?? "";
+      flags["--tag"] = existing ? `${existing},${argv[++i] ?? ""}` : (argv[++i] ?? "");
+    } else if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op" || arg === "--origin") {
       const key = arg === "--ns" ? "--namespace" : arg;
       flags[key] = argv[++i] ?? "";
     } else if (arg === "--json" || arg === "-i" || arg === "--dry-run") {
@@ -103,7 +106,8 @@ async function handleAdd(ctx: CmdContext) {
     throw new UsageError(`Invalid --origin: "${originRaw}". Must be one of: ${validOrigins.join(", ")}`);
   }
   const origin = originRaw as import("./lib/fs-memory.js").Origin;
-  const result = await ops.addMemory(text, name, ctx.namespace, origin);
+  const tags = ctx.flags["--tag"]?.split(",").filter(Boolean) ?? [];
+  const result = await ops.addMemory(text, name, ctx.namespace, origin, tags);
   const msg = result.status === "existing"
     ? `Memory already exists: ${result.id}`
     : `Written ${result.path}`;
@@ -142,7 +146,8 @@ async function handleSearch(ctx: CmdContext) {
   if (!query) throw new UsageError("Usage: kb search <query> [--limit <n>] [--ns <namespace>]");
   const parsed = parseInt(ctx.flags["--limit"] ?? "", 10);
   const limit = Number.isNaN(parsed) ? 10 : parsed;
-  const result = await hybridSearch(query, ctx.namespace, limit);
+  const tags = ctx.flags["--tag"]?.split(",").filter(Boolean);
+  const result = await hybridSearch(query, ctx.namespace, limit, tags);
 
   if (ctx.json) {
     out(ctx, result);
@@ -302,6 +307,7 @@ Flags:
   --env <name>                  Environment (data isolation, e.g. "test")
   --name <name>                 Name for add command
   --origin <type>               Origin type (manual|retro|mcp|import)
+  --tag <tag>                   Tag (repeatable: --tag bug --tag ui)
   --limit <n>                   Result limit for search (default: 10)
   --json                        Output raw JSON
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)
