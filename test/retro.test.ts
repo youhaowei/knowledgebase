@@ -1,6 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
+const KB_TEST_DIR = join(tmpdir(), `kb-retro-test-${process.pid}`);
 const CLI = ["bun", "run", "src/cli.ts"];
 const TEST_ENV = ["--env", "retro-test"];
 
@@ -9,6 +12,7 @@ const BUN_NATIVE_SEGFAULT = 133;
 function cleanTestDb() {
   rmSync(".ladybug-retro-test", { recursive: true, force: true });
   rmSync(".ladybug-retro-test.wal", { force: true });
+  rmSync(KB_TEST_DIR, { recursive: true, force: true });
 }
 
 async function run(...args: string[]) {
@@ -16,6 +20,7 @@ async function run(...args: string[]) {
     stdout: "pipe",
     stderr: "pipe",
     cwd: import.meta.dir + "/..",
+    env: { ...process.env, KB_MEMORY_PATH: KB_TEST_DIR },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -35,7 +40,7 @@ beforeAll(cleanTestDb);
 afterAll(cleanTestDb);
 
 describe("retro namespace operations", () => {
-  test("add with --ns retro queues a memory", async () => {
+  test("add with --ns retro writes a memory", async () => {
     const { stdout, exitCode } = await run(
       "add",
       "[retro/bug/high] Bun install fails: Bun install fails in git worktrees",
@@ -46,7 +51,7 @@ describe("retro namespace operations", () => {
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
     expect(parsed).toHaveProperty("id");
-    expect(parsed).toHaveProperty("queued", true);
+    expect(parsed.status).toBe("written");
   }, 60_000);
 
   test("add with same name returns existing (dedup)", async () => {
@@ -60,8 +65,7 @@ describe("retro namespace operations", () => {
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
     expect(parsed).toHaveProperty("id");
-    expect(parsed.existing).toBe(true);
-    expect(parsed.queued).toBe(false);
+    expect(parsed.status).toBe("existing");
   }, 60_000);
 
   test("add with different name creates new memory", async () => {
@@ -74,8 +78,7 @@ describe("retro namespace operations", () => {
     );
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
-    expect(parsed).toHaveProperty("queued", true);
-    expect(parsed.existing).toBeUndefined();
+    expect(parsed.status).toBe("written");
   }, 60_000);
 });
 
@@ -108,7 +111,6 @@ describe("dedup edge cases", () => {
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
     // retro-10 should NOT match retro-1 (exact match, not CONTAINS)
-    expect(parsed).toHaveProperty("queued", true);
-    expect(parsed.existing).toBeUndefined();
+    expect(parsed.status).toBe("written");
   }, 60_000);
 });

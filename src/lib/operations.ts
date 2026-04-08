@@ -199,7 +199,17 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
 export async function stats(namespace?: string) {
   return tracked("stats", { namespace: namespace ?? "all" }, async () => {
     const gp = await getProvider();
-    return gp.stats(namespace);
+    const graphStats = await gp.stats(namespace);
+    // Filesystem is the source of truth for memory count
+    const ns = namespace ?? "default";
+    const files = listMemoryFiles(ns);
+    const indexed = files.filter((f) => f.indexed).length;
+    return {
+      ...graphStats,
+      memories: Math.max(graphStats.memories, files.length),
+      filesOnDisk: files.length,
+      indexed,
+    };
   });
 }
 

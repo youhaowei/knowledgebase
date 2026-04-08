@@ -1,6 +1,9 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
+const KB_TEST_DIR = join(tmpdir(), `kb-cli-test-${process.pid}`);
 const CLI = ["bun", "run", "src/cli.ts"];
 const TEST_ENV = ["--env", "cli-test"];
 
@@ -14,6 +17,7 @@ async function run(...args: string[]) {
     stdout: "pipe",
     stderr: "pipe",
     cwd: import.meta.dir + "/..",
+    env: { ...process.env, KB_MEMORY_PATH: KB_TEST_DIR },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -32,6 +36,7 @@ afterAll(() => {
     rmSync(name, { recursive: true, force: true });
     rmSync(`${name}.wal`, { force: true });
   }
+  rmSync(KB_TEST_DIR, { recursive: true, force: true });
 });
 
 describe("CLI arg parsing and help", () => {
@@ -82,18 +87,18 @@ describe("CLI arg parsing and help", () => {
   });
 });
 
-// add commands trigger AI extraction (~20s each), so use longer timeout
-describe("CLI data operations (slow - involves extraction)", () => {
-  test("add queues a memory", async () => {
+// add writes to filesystem instantly (no extraction, no server needed)
+describe("CLI data operations (filesystem write)", () => {
+  test("add writes a memory", async () => {
     const { stdout, exitCode } = await run("add", "TypeScript is great for type safety");
     expectSuccess(exitCode);
-    expect(stdout).toContain("Queued memory");
+    expect(stdout).toContain("Written ");
   }, 60_000);
 
   test("add with --name flag", async () => {
     const { stdout, exitCode } = await run("add", "React hooks are useful", "--name", "react-hooks");
     expectSuccess(exitCode);
-    expect(stdout).toContain("Queued memory");
+    expect(stdout).toContain("Written ");
   }, 60_000);
 
   test("add with --json outputs JSON", async () => {
@@ -101,7 +106,7 @@ describe("CLI data operations (slow - involves extraction)", () => {
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
     expect(parsed).toHaveProperty("id");
-    expect(parsed).toHaveProperty("queued", true);
+    expect(parsed.status).toBe("written");
   }, 60_000);
 });
 

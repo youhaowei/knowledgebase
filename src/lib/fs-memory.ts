@@ -44,7 +44,7 @@ export interface MemoryFileEntry {
 // Paths
 // ---------------------------------------------------------------------------
 
-const KB_ROOT = join(homedir(), ".kb", "memories");
+const KB_ROOT = process.env.KB_MEMORY_PATH ?? join(homedir(), ".kb", "memories");
 
 /**
  * Returns the directory path for a namespace, creating it if needed.
