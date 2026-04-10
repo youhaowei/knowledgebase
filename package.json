@@ -20,6 +20,7 @@
     "db:reextract": "bun run src/lib/reextract.ts",
     "db:backfill-canonical": "bun run src/lib/backfill-canonical.ts",
     "db:migrate-fs": "bun run src/lib/migrate-to-fs.ts",
+    "db:reindex": "bun run scripts/clear-indexed.ts",
     "test": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts test/fs-memory.test.ts test/file-search.test.ts test/hybrid-search.test.ts test/operations.test.ts test/analytics.test.ts && bun test test/provider.test.ts",
     "test:cli": "bun test test/cli.test.ts && bun test test/retro.test.ts",
     "test:all": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts test/fs-memory.test.ts test/file-search.test.ts test/hybrid-search.test.ts test/operations.test.ts test/analytics.test.ts && bun test test/provider.test.ts && bun test test/cli.test.ts && bun test test/retro.test.ts",
