@@ -36,7 +36,7 @@ describe("Embedder", () => {
     expect(Array.isArray(result.embedding)).toBe(true);
     expect(result.embedding.length).toBe(result.dimension);
     expect(result.dimension).toBeGreaterThan(0);
-    expect(["ollama", "fallback"]).toContain(result.source);
+    expect(["ollama", "builtin"]).toContain(result.source);
   });
 
   test("embedDual returns both dimensions", async () => {

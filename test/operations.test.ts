@@ -8,9 +8,6 @@ process.env.KB_MEMORY_PATH = tempDir;
 process.env.__ANALYTICS_DB_PATH = join(tempDir, "analytics.db");
 process.env.LADYBUG_DATA_PATH = join(tempDir, "ladybug");
 
-const originalFetch = globalThis.fetch;
-globalThis.fetch = (() => Promise.resolve(new Response(null, { status: 202 }))) as typeof fetch;
-
 const ops = await import("../src/lib/operations.js");
 const { listMemoryFiles, readMemoryFile, deleteMemoryFile } = await import("../src/lib/fs-memory");
 
@@ -19,7 +16,6 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  globalThis.fetch = originalFetch;
   rmSync(tempDir, { recursive: true, force: true });
   delete process.env.KB_MEMORY_PATH;
   delete process.env.__ANALYTICS_DB_PATH;
@@ -31,7 +27,7 @@ describe("operations.addMemory", () => {
     const result = await ops.addMemory("First line title\nMore detail below.", undefined, "default");
     expect(result.name).toBe("First line title");
 
-    const { frontmatter } = await readMemoryFile(result.path);
+    const { frontmatter } = readMemoryFile(result.path);
     expect(frontmatter.name).toBe("First line title");
   });
 

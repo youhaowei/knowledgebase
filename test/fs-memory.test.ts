@@ -176,7 +176,7 @@ describe("writeMemoryFile + readMemoryFile", () => {
     // For testing, we override by writing to the namespace inside tempDir
     // We test the real ensureNamespacePath since we can't easily override it,
     // but we can verify file creation by checking path existence
-    const filePath = await writeMemoryFile(id, text, fm);
+    const filePath = writeMemoryFile(id, text, fm);
     expect(existsSync(filePath)).toBe(true);
 
     const raw = readFileSync(filePath, "utf-8");
@@ -193,11 +193,11 @@ describe("writeMemoryFile + readMemoryFile", () => {
     const id = randomUUID();
     const fm = makeFrontmatter({ id, namespace: "default" });
 
-    await writeMemoryFile(id, "Some text", fm);
+    writeMemoryFile(id, "Some text", fm);
 
     // Find the namespace path
     const nsPath = ensureNamespacePath("default");
-    const tmpPath = join(nsPath, `.${id}.md.tmp`);
+    const tmpPath = join(nsPath, `${id}.md.tmp`);
     expect(existsSync(tmpPath)).toBe(false); // temp file must be gone
 
     // Cleanup
@@ -222,8 +222,8 @@ describe("writeMemoryFile + readMemoryFile", () => {
     });
     const text = "Round trip memory body.";
 
-    const filePath = await writeMemoryFile(id, text, fm);
-    const result = await readMemoryFile(filePath);
+    const filePath = writeMemoryFile(id, text, fm);
+    const result = readMemoryFile(filePath);
 
     expect(result.frontmatter.id).toBe(id);
     expect(result.frontmatter.name).toBe("Round Trip Test");
@@ -244,8 +244,8 @@ describe("writeMemoryFile + readMemoryFile", () => {
     const id = randomUUID();
     const fm = makeFrontmatter({ id, namespace: "default" });
 
-    const filePath = await writeMemoryFile(id, "  trimmed text  \n", fm);
-    const result = await readMemoryFile(filePath);
+    const filePath = writeMemoryFile(id, "  trimmed text  \n", fm);
+    const result = readMemoryFile(filePath);
     expect(result.text).toBe("trimmed text");
 
     // Cleanup
@@ -263,8 +263,8 @@ describe("listMemoryFiles", () => {
     const id1 = randomUUID();
     const id2 = randomUUID();
 
-    await writeMemoryFile(id1, "Memory 1", makeFrontmatter({ id: id1, namespace: ns, name: "First" }));
-    await writeMemoryFile(id2, "Memory 2", makeFrontmatter({ id: id2, namespace: ns, name: "Second", indexedAt: new Date().toISOString() }));
+    writeMemoryFile(id1, "Memory 1", makeFrontmatter({ id: id1, namespace: ns, name: "First" }));
+    writeMemoryFile(id2, "Memory 2", makeFrontmatter({ id: id2, namespace: ns, name: "Second", indexedAt: new Date().toISOString() }));
 
     // Write an _index.md that should be excluded
     const nsPath = ensureNamespacePath(ns);
@@ -284,7 +284,7 @@ describe("listMemoryFiles", () => {
 
   test("returns empty array for missing namespace", () => {
     const entries = listMemoryFiles(`nonexistent-ns-${randomUUID()}`);
-    // listMemoryFiles calls ensureNamespacePath which creates the dir — so it returns empty array
+    // listMemoryFiles calls resolveNamespacePath (read-only) — returns empty array for missing dirs
     expect(entries).toEqual([]);
   });
 });
@@ -301,8 +301,8 @@ describe("generateIndex", () => {
     const id2 = randomUUID();
     const now = new Date().toISOString();
 
-    await writeMemoryFile(id1, "Alpha text", makeFrontmatter({ id: id1, namespace: ns, name: "Alpha", tags: ["a"], createdAt: "2026-01-01T00:00:00.000Z" }));
-    await writeMemoryFile(id2, "Beta text", makeFrontmatter({ id: id2, namespace: ns, name: "Beta", tags: ["b", "c"], createdAt: "2026-02-01T00:00:00.000Z", indexedAt: now }));
+    writeMemoryFile(id1, "Alpha text", makeFrontmatter({ id: id1, namespace: ns, name: "Alpha", tags: ["a"], createdAt: "2026-01-01T00:00:00.000Z" }));
+    writeMemoryFile(id2, "Beta text", makeFrontmatter({ id: id2, namespace: ns, name: "Beta", tags: ["b", "c"], createdAt: "2026-02-01T00:00:00.000Z", indexedAt: now }));
 
     generateIndex(nsPath);
 
@@ -346,7 +346,7 @@ describe("appendToIndex", () => {
     const id1 = randomUUID();
     const id2 = randomUUID();
 
-    await writeMemoryFile(id1, "First", makeFrontmatter({ id: id1, namespace: ns, name: "First" }));
+    writeMemoryFile(id1, "First", makeFrontmatter({ id: id1, namespace: ns, name: "First" }));
     generateIndex(nsPath); // create initial index with 1 entry
 
     const indexPath = join(nsPath, "_index.md");
@@ -394,7 +394,7 @@ describe("deleteMemoryFile", () => {
     const id = randomUUID();
     const name = "Protected";
 
-    await writeMemoryFile(id, "Protected body", makeFrontmatter({ id, namespace: ns, name }));
+    writeMemoryFile(id, "Protected body", makeFrontmatter({ id, namespace: ns, name }));
 
     chmodSync(nsPath, 0o555);
     try {
