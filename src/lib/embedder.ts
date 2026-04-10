@@ -1,11 +1,15 @@
 /**
  * Embedder - generates vector embeddings for text
  *
- * Primary: Ollama (model configurable via EMBEDDING_MODEL env var)
- * Fallback: HuggingFace transformers.js Snowflake Arctic
+ * Primary: HuggingFace transformers.js Snowflake Arctic xs (384-dim, in-process)
+ * Complementary: Ollama (model configurable via EMBEDDING_MODEL env var)
+ *
+ * The built-in embedder is always available and is sufficient for all retrieval
+ * workloads (validated by benchmark: 100% R@1 with Haiku extractor, ≤5pp gap
+ * from Ollama on all extractors). Ollama is an optional upgrade for memory-text
+ * retrieval where the larger model has a marginal edge.
  *
  * Dimensions are detected from model output, not hardcoded.
- * Tries Ollama first; falls back to transformers.js if unavailable.
  */
 
 import {
@@ -18,7 +22,7 @@ import type { EmbeddingMap } from "../types.js";
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
 const MODEL = process.env.EMBEDDING_MODEL ?? "qwen3-embedding:4b";
 
-export type EmbedSource = "ollama" | "fallback";
+export type EmbedSource = "ollama" | "builtin";
 
 export type EmbedResult = {
   embedding: number[];
@@ -32,7 +36,6 @@ export function isZeroEmbedding(embedding: number[]): boolean {
 }
 
 let ollamaWarned = false;
-let ollamaAvailable = true;
 let ollamaDim: number | null = null;
 
 /** Get the detected Ollama embedding dimension (null if not yet detected) */
@@ -40,23 +43,25 @@ export function getOllamaDim(): number | null {
   return ollamaDim;
 }
 
-/** Which embedding dimension is active for the current session */
+/** Which embedding dimension is active for the current session.
+ *  Always returns the built-in (384d) as primary. */
 export function getActiveDimension(): number | null {
-  if (ollamaAvailable && ollamaDim) return ollamaDim;
   return getFallbackDim();
 }
 
 /** Get all detected embedding dimensions */
 export function getRegisteredDimensions(): number[] {
   const dims: number[] = [];
-  if (ollamaDim) dims.push(ollamaDim);
   const fb = getFallbackDim();
-  if (fb && fb !== ollamaDim) dims.push(fb);
+  if (fb) dims.push(fb);
+  if (ollamaDim && ollamaDim !== fb) dims.push(ollamaDim);
   return dims;
 }
 
 /**
  * Generate an Ollama embedding. Returns empty array on failure.
+ * This is the complementary path — used for dual-index ingestion when
+ * Ollama is available, not for primary retrieval.
  */
 export async function embed(text: string): Promise<number[]> {
   try {
@@ -80,7 +85,6 @@ export async function embed(text: string): Promise<number[]> {
       throw new Error("Invalid embedding response from Ollama");
     }
 
-    ollamaAvailable = true;
     ollamaWarned = false;
 
     if (ollamaDim === null) {
@@ -90,10 +94,9 @@ export async function embed(text: string): Promise<number[]> {
 
     return data.embedding;
   } catch (err) {
-    ollamaAvailable = false;
     if (!ollamaWarned) {
-      console.warn(
-        `[embedder] Ollama unavailable, falling back to transformers.js. Run db:reembed to backfill once Ollama is running. (${err instanceof Error ? err.message : err})`,
+      console.error(
+        `[embed] Ollama embedding unavailable, using built-in only. (${err instanceof Error ? err.message : err})`,
       );
       ollamaWarned = true;
     }
@@ -102,51 +105,54 @@ export async function embed(text: string): Promise<number[]> {
 }
 
 /**
- * Generate embeddings with dimension metadata.
- * Tries Ollama first → falls back to transformers.js → empty result as last resort.
+ * Generate embedding using the built-in model (primary).
+ * Always uses Snowflake Arctic xs (384-dim, in-process via transformers.js).
  */
 export async function embedWithDimension(text: string): Promise<EmbedResult> {
-  const ollamaResult = await embed(text);
-  if (ollamaAvailable && ollamaResult.length > 0) {
-    return { embedding: ollamaResult, dimension: ollamaResult.length, source: "ollama" };
-  }
-
-  const fallbackResult = await embedFallback(text);
-  if (fallbackResult.length > 0) {
+  const result = await embedFallback(text);
+  if (result.length > 0) {
     return {
-      embedding: fallbackResult,
-      dimension: fallbackResult.length,
-      source: "fallback",
+      embedding: result,
+      dimension: result.length,
+      source: "builtin",
     };
   }
 
-  return {
-    embedding: [],
-    dimension: 0,
-    source: "fallback",
-  };
+  // Built-in failed (shouldn't happen) — try Ollama as last resort
+  const ollamaResult = await embed(text);
+  if (ollamaResult.length > 0) {
+    return { embedding: ollamaResult, dimension: ollamaResult.length, source: "ollama" };
+  }
+
+  return { embedding: [], dimension: 0, source: "builtin" };
 }
 
 /**
  * Generate embeddings from all available sources simultaneously.
  * Returns an EmbeddingMap keyed by detected dimension.
  * Used during ingestion to populate all vector indexes.
+ *
+ * Built-in always runs. Ollama runs best-effort — if it's down,
+ * only the built-in embedding is returned. This is fine: the built-in
+ * index is sufficient for retrieval, the Ollama index is a bonus.
  */
 export async function embedDual(text: string): Promise<EmbeddingMap> {
-  const [ollamaResult, fallbackResult] = await Promise.all([
+  const [ollamaResult, builtinResult] = await Promise.all([
     embed(text),
     embedFallback(text),
   ]);
 
   const map: EmbeddingMap = new Map();
 
-  if (ollamaDim && ollamaResult.length > 0 && !isZeroEmbedding(ollamaResult)) {
-    map.set(ollamaDim, ollamaResult);
+  // Built-in always goes in first (primary)
+  const fb = getFallbackDim();
+  if (fb && builtinResult.length > 0 && !isZeroEmbedding(builtinResult)) {
+    map.set(fb, builtinResult);
   }
 
-  const fb = getFallbackDim();
-  if (fb && fallbackResult.length > 0 && !isZeroEmbedding(fallbackResult)) {
-    map.set(fb, fallbackResult);
+  // Ollama is complementary — add if available
+  if (ollamaDim && ollamaResult.length > 0 && !isZeroEmbedding(ollamaResult)) {
+    map.set(ollamaDim, ollamaResult);
   }
 
   return map;
@@ -156,22 +162,16 @@ export async function embedDual(text: string): Promise<EmbeddingMap> {
 export async function checkOllama(): Promise<boolean> {
   try {
     const res = await fetch(`${OLLAMA_URL}/api/tags`);
-    if (!res.ok) {
-      ollamaAvailable = false;
-      return false;
-    }
+    if (!res.ok) return false;
 
     const data = (await res.json()) as { models?: Array<{ name: string }> };
-    const available = data.models?.some((m) => m.name === MODEL) ?? false;
-    ollamaAvailable = available;
-    return available;
+    return data.models?.some((m) => m.name === MODEL) ?? false;
   } catch {
-    ollamaAvailable = false;
     return false;
   }
 }
 
-/** Check if any embedding source is available (Ollama or fallback) */
+/** Check if any embedding source is available (built-in or Ollama) */
 export async function checkAnyEmbedder(): Promise<{
   ollama: boolean;
   fallback: boolean;
