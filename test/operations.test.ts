@@ -101,3 +101,47 @@ describe("deleteMemoryFile", () => {
     expect(remaining.find((f) => f.id === addResult.id)).toBeUndefined();
   });
 });
+
+describe("operations.forget", () => {
+  test("removes memory file from disk", async () => {
+    const ns = "ops-forget-test";
+    const addResult = await ops.addMemory("Forgettable content", "forget-me", ns);
+    expect(addResult.status).toBe("written");
+
+    const result = await ops.forget("forget-me", ns);
+    expect(result.deleted).toBe(true);
+
+    // File should be gone
+    const remaining = listMemoryFiles(ns);
+    expect(remaining.find((f) => f.id === addResult.id)).toBeUndefined();
+  });
+
+  test("returns deleted:false for nonexistent name", async () => {
+    const result = await ops.forget("does-not-exist", "ops-forget-test");
+    expect(result.deleted).toBe(false);
+    expect(result.reason).toBe("Not found");
+  });
+
+  test("case-insensitive forget matches addMemory dedup", async () => {
+    const ns = "ops-forget-ci";
+    await ops.addMemory("Case test content", "My React Hooks", ns);
+    const result = await ops.forget("my react hooks", ns);
+    expect(result.deleted).toBe(true);
+
+    const remaining = listMemoryFiles(ns);
+    expect(remaining.find((f) => f.name === "My React Hooks")).toBeUndefined();
+  });
+});
+
+describe("operations.stats", () => {
+  test("returns filesystem-based memory count", async () => {
+    const ns = "ops-stats-test";
+    await ops.addMemory("Stats test 1", "stats-mem-1", ns);
+    await ops.addMemory("Stats test 2", "stats-mem-2", ns);
+
+    const result = await ops.stats(ns);
+    expect(result.filesOnDisk).toBe(2);
+    expect(result.memories).toBe(2);
+    expect(result.indexed).toBe(0); // not indexed yet
+  });
+});

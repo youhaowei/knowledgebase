@@ -62,7 +62,7 @@ async function persistProcessedMemory(
   };
 
   await withNamespaceLock(frontmatter.namespace, async () => {
-    await writeMemoryFile(memory.id, memory.text, nextFrontmatter);
+    writeMemoryFile(memory.id, memory.text, nextFrontmatter);
     generateIndex(resolveNamespacePath(frontmatter.namespace));
   });
 }
@@ -134,7 +134,7 @@ async function addMemoryLocked(
       createdAt: new Date().toISOString(),
     };
 
-    const filePath = await writeMemoryFile(id, text, frontmatter);
+    const filePath = writeMemoryFile(id, text, frontmatter);
     appendToIndex(nsPath, frontmatter);
 
     triggerRemoteIndex(id, namespace);
@@ -160,7 +160,7 @@ function triggerRemoteIndex(id: string, namespace: string): void {
       console.error(`[kb] Saved. Server returned ${res.status} — will be indexed on next start.`);
     }
   }).catch(() => {
-    console.error("[kb] Saved. Server not running — will be indexed on next start.");
+    console.error("[kb] Saved. Server notification timed out — will be indexed on next start.");
   }).finally(() => {
     clearTimeout(timeout);
     pendingNotifications.delete(p);
@@ -203,23 +203,27 @@ export async function queueMemoryForIndexing(id: string, namespace: string): Pro
 
   inFlightIndexing.add(key);
   const path = join(resolveNamespacePath(namespace), `${id}.md`);
-  try {
-    const { frontmatter, text } = await readMemoryFile(path);
-    if (frontmatter.indexedAt) {
-      return false;
-    }
 
-    const memory = buildPendingMemory(frontmatter, text);
-    const q = await getQueue();
-    await q.add(memory);
-    await persistProcessedMemory(frontmatter, memory);
-    return true;
-  } finally {
+  const { frontmatter, text } = readMemoryFile(path);
+  if (frontmatter.indexedAt) {
     inFlightIndexing.delete(key);
+    return false;
   }
+
+  const memory = buildPendingMemory(frontmatter, text);
+  const q = await getQueue();
+
+  // Fire-and-forget: enqueue and let the Queue drain in the background.
+  // Heavy work (extraction + embedding) happens asynchronously.
+  q.add(memory)
+    .then(() => persistProcessedMemory(frontmatter, memory))
+    .catch((err) => console.error(`[kb] Indexing failed for ${id}:`, err))
+    .finally(() => inFlightIndexing.delete(key));
+
+  return true;
 }
 
-export async function queueUnindexedMemories(namespace?: string): Promise<number> {
+export async function processUnindexedMemories(namespace?: string): Promise<number> {
   const namespaces = namespace ? [namespace] : listNamespaceDirs();
   let queued = 0;
 
@@ -257,7 +261,8 @@ export async function addMemory(
   }));
 }
 
-export async function search(
+/** Graph-only search. For combined file + graph results, use hybridSearch. */
+export async function graphSearch(
   query: string,
   namespace = "default",
   limit = 10,
@@ -399,7 +404,7 @@ export async function stats(namespace?: string) {
 
     return {
       ...graphStats,
-      memories: Math.max(graphStats.memories, totalFiles),
+      memories: totalFiles,
       filesOnDisk: totalFiles,
       indexed: totalIndexed,
     };

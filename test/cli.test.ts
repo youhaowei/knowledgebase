@@ -128,15 +128,49 @@ describe("CLI read operations", () => {
     expect(parsed).toHaveProperty("edges");
   });
 
-  test("search returns results (may be empty)", async () => {
-    const { exitCode } = await run("search", "typescript");
+  test("search returns results with content", async () => {
+    const { stdout, exitCode } = await run("search", "typescript");
     expectSuccess(exitCode);
+    // Should find the memory added in the write tests above
+    expect(stdout).toContain("TypeScript");
   });
 
   test("get for non-existent entity", async () => {
     const { stdout, exitCode } = await run("get", "NonExistentEntity12345");
     expectSuccess(exitCode);
     expect(stdout).toContain("not found");
+  });
+});
+
+describe("CLI --tag and --origin flags", () => {
+  test("add with --tag stores tags", async () => {
+    const { stdout, exitCode } = await run("add", "Bun is fast", "--name", "bun-speed", "--tag", "runtime", "--tag", "perf", "--json");
+    expectSuccess(exitCode);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.status).toBe("written");
+  }, 60_000);
+
+  test("search with --tag filters results", async () => {
+    const { stdout, exitCode } = await run("search", "fast", "--tag", "runtime", "--json");
+    expectSuccess(exitCode);
+    const parsed = JSON.parse(stdout);
+    // File results should only include tagged entries
+    for (const f of parsed.files ?? []) {
+      expect(f.tags).toContain("runtime");
+    }
+  }, 60_000);
+
+  test("add with --origin sets origin", async () => {
+    const { stdout, exitCode } = await run("add", "retro finding", "--name", "retro-test-1", "--origin", "retro", "--json");
+    expectSuccess(exitCode);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.status).toBe("written");
+  }, 60_000);
+
+  test("add with invalid --origin errors", async () => {
+    const { stderr, exitCode } = await run("add", "bad origin", "--origin", "invalid");
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("Invalid --origin");
   });
 });
 

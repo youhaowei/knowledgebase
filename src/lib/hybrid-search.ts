@@ -56,7 +56,7 @@ async function graphSearchWithTimeout(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
-      ops.search(query, namespace, limit),
+      ops.graphSearch(query, namespace, limit),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error("Graph search timeout")),

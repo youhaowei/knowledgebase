@@ -1,4 +1,4 @@
-import { queueUnindexedMemories } from "../lib/operations.js";
+import { processUnindexedMemories } from "../lib/operations.js";
 
 const RECONCILIATION_INTERVAL_MS = 60_000;
 
@@ -22,7 +22,7 @@ async function runSweep(): Promise<void> {
 
   state.sweep = (async () => {
     try {
-      const queued = await queueUnindexedMemories();
+      const queued = await processUnindexedMemories();
       if (queued > 0) {
         console.error(`[kb] Catch-up queued ${queued} unindexed memories`);
       }
