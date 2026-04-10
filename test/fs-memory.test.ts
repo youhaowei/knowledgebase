@@ -1,15 +1,17 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 
-// Override KB root before importing fs-memory, using test temp dir
-const TEST_NAMESPACE = "test-ns";
-let tempDir: string;
-let testNsPath: string;
+// Set KB_MEMORY_PATH BEFORE importing fs-memory — the module reads env lazily
+// via getKbRoot(), so this must be set before any fs-memory function is called.
+const tempDir = mkdtempSync(join(tmpdir(), "kb-fs-test-"));
+process.env.KB_MEMORY_PATH = tempDir;
 
-// We import after setting up the temp dir via direct path injection
+const TEST_NAMESPACE = "test-ns";
+const testNsPath = join(tempDir, TEST_NAMESPACE);
+
 import {
   normalizeTags,
   parseFrontmatter,
@@ -18,7 +20,8 @@ import {
   listMemoryFiles,
   generateIndex,
   appendToIndex,
-  getNamespacePath,
+  ensureNamespacePath,
+  deleteMemoryFile,
   type MemoryFrontmatter,
 } from "../src/lib/fs-memory";
 
@@ -27,16 +30,12 @@ import {
 // ---------------------------------------------------------------------------
 
 beforeAll(() => {
-  tempDir = mkdtempSync(join(tmpdir(), "kb-fs-test-"));
-  // Create a namespace directory inside our temp dir for direct testing
-  testNsPath = join(tempDir, TEST_NAMESPACE);
-  mkdtempSync(testNsPath); // won't work - mkdtempSync adds random suffix
+  mkdirSync(testNsPath, { recursive: true });
 });
 
 afterAll(() => {
-  if (tempDir) {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
+  rmSync(tempDir, { recursive: true, force: true });
+  delete process.env.KB_MEMORY_PATH;
 });
 
 // ---------------------------------------------------------------------------
@@ -162,14 +161,19 @@ Text.`;
 // ---------------------------------------------------------------------------
 
 describe("writeMemoryFile + readMemoryFile", () => {
+  test("rejects invalid memory ids before writing", () => {
+    const fm = makeFrontmatter({ id: randomUUID(), namespace: "default" });
+    expect(() => writeMemoryFile("../escape", "bad", fm)).toThrow("Invalid memory id");
+  });
+
   test("creates file with correct frontmatter", async () => {
     const id = randomUUID();
     const fm = makeFrontmatter({ id, namespace: "default" });
     const text = "This is my memory text.";
 
-    // writeMemoryFile uses getNamespacePath which writes to ~/.kb
+    // writeMemoryFile uses ensureNamespacePath which writes to ~/.kb
     // For testing, we override by writing to the namespace inside tempDir
-    // We test the real getNamespacePath since we can't easily override it,
+    // We test the real ensureNamespacePath since we can't easily override it,
     // but we can verify file creation by checking path existence
     const filePath = await writeMemoryFile(id, text, fm);
     expect(existsSync(filePath)).toBe(true);
@@ -191,7 +195,7 @@ describe("writeMemoryFile + readMemoryFile", () => {
     await writeMemoryFile(id, "Some text", fm);
 
     // Find the namespace path
-    const nsPath = getNamespacePath("default");
+    const nsPath = ensureNamespacePath("default");
     const tmpPath = join(nsPath, `.${id}.md.tmp`);
     expect(existsSync(tmpPath)).toBe(false); // temp file must be gone
 
@@ -209,6 +213,11 @@ describe("writeMemoryFile + readMemoryFile", () => {
       tags: ["round-trip", "test"],
       createdAt: now,
       indexedAt: now,
+      abstract: "Round trip abstract",
+      summary: "Round trip summary",
+      category: "pattern",
+      schemaVersion: "1.2.3",
+      versionedAt: now,
     });
     const text = "Round trip memory body.";
 
@@ -219,6 +228,11 @@ describe("writeMemoryFile + readMemoryFile", () => {
     expect(result.frontmatter.name).toBe("Round Trip Test");
     expect(result.frontmatter.tags).toEqual(["round-trip", "test"]);
     expect(result.frontmatter.indexedAt).toBe(now);
+    expect(result.frontmatter.abstract).toBe("Round trip abstract");
+    expect(result.frontmatter.summary).toBe("Round trip summary");
+    expect(result.frontmatter.category).toBe("pattern");
+    expect(result.frontmatter.schemaVersion).toBe("1.2.3");
+    expect(result.frontmatter.versionedAt).toBe(now);
     expect(result.text).toBe(text);
 
     // Cleanup
@@ -252,7 +266,7 @@ describe("listMemoryFiles", () => {
     await writeMemoryFile(id2, "Memory 2", makeFrontmatter({ id: id2, namespace: ns, name: "Second", indexedAt: new Date().toISOString() }));
 
     // Write an _index.md that should be excluded
-    const nsPath = getNamespacePath(ns);
+    const nsPath = ensureNamespacePath(ns);
     await Bun.write(join(nsPath, "_index.md"), "# index\n");
 
     const entries = listMemoryFiles(ns);
@@ -269,7 +283,7 @@ describe("listMemoryFiles", () => {
 
   test("returns empty array for missing namespace", () => {
     const entries = listMemoryFiles(`nonexistent-ns-${randomUUID()}`);
-    // listMemoryFiles calls getNamespacePath which creates the dir — so it returns empty array
+    // listMemoryFiles calls ensureNamespacePath which creates the dir — so it returns empty array
     expect(entries).toEqual([]);
   });
 });
@@ -281,7 +295,7 @@ describe("listMemoryFiles", () => {
 describe("generateIndex", () => {
   test("creates _index.md with correct format", async () => {
     const ns = `gen-idx-${randomUUID().slice(0, 8)}`;
-    const nsPath = getNamespacePath(ns);
+    const nsPath = ensureNamespacePath(ns);
     const id1 = randomUUID();
     const id2 = randomUUID();
     const now = new Date().toISOString();
@@ -309,7 +323,7 @@ describe("generateIndex", () => {
 
   test("generates empty index for namespace with no memories", () => {
     const ns = `empty-${randomUUID().slice(0, 8)}`;
-    const nsPath = getNamespacePath(ns);
+    const nsPath = ensureNamespacePath(ns);
 
     generateIndex(nsPath);
 
@@ -327,7 +341,7 @@ describe("generateIndex", () => {
 describe("appendToIndex", () => {
   test("appends a row without regenerating the whole file", async () => {
     const ns = `append-${randomUUID().slice(0, 8)}`;
-    const nsPath = getNamespacePath(ns);
+    const nsPath = ensureNamespacePath(ns);
     const id1 = randomUUID();
     const id2 = randomUUID();
 
@@ -345,13 +359,15 @@ describe("appendToIndex", () => {
     expect(linesAfter).toBe(linesBefore + 1); // exactly one new line added
 
     const content = readFileSync(indexPath, "utf-8");
+    expect(content).toContain("2 memories");
+    expect(content).toContain("1 unindexed");
     expect(content).toContain("Second");
     expect(content).toContain("✓"); // indexed
   });
 
   test("creates _index.md with header if it doesn't exist", () => {
     const ns = `append-new-${randomUUID().slice(0, 8)}`;
-    const nsPath = getNamespacePath(ns);
+    const nsPath = ensureNamespacePath(ns);
     const fm = makeFrontmatter({ id: randomUUID(), namespace: ns, name: "OnlyEntry" });
 
     appendToIndex(nsPath, fm);
@@ -359,7 +375,32 @@ describe("appendToIndex", () => {
     const indexPath = join(nsPath, "_index.md");
     expect(existsSync(indexPath)).toBe(true);
     const content = readFileSync(indexPath, "utf-8");
+    expect(content).toContain("1 memories");
+    expect(content).toContain("1 unindexed");
     expect(content).toContain("| ID | Name | Tags | Indexed |");
     expect(content).toContain("OnlyEntry");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteMemoryFile
+// ---------------------------------------------------------------------------
+
+describe("deleteMemoryFile", () => {
+  test("throws underlying filesystem errors instead of masking them as not found", async () => {
+    const ns = `delete-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const id = randomUUID();
+    const name = "Protected";
+
+    await writeMemoryFile(id, "Protected body", makeFrontmatter({ id, namespace: ns, name }));
+
+    chmodSync(nsPath, 0o555);
+    try {
+      expect(() => deleteMemoryFile(name, ns)).toThrow();
+    } finally {
+      chmodSync(nsPath, 0o755);
+      rmSync(nsPath, { recursive: true, force: true });
+    }
   });
 });
