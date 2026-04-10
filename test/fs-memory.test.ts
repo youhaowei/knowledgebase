@@ -21,6 +21,7 @@ import {
   generateIndex,
   appendToIndex,
   ensureNamespacePath,
+  resolveNamespacePath,
   deleteMemoryFile,
   type MemoryFrontmatter,
 } from "../src/lib/fs-memory";
@@ -402,5 +403,59 @@ describe("deleteMemoryFile", () => {
       chmodSync(nsPath, 0o755);
       rmSync(nsPath, { recursive: true, force: true });
     }
+  });
+
+  test("deletes case-insensitively to match addMemory dedup", () => {
+    const ns = `delete-ci-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    const name = "React Hooks";
+
+    writeMemoryFile(id, "body", makeFrontmatter({ id, namespace: ns, name }));
+    const result = deleteMemoryFile("react hooks", ns);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe(id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveNamespacePath — path traversal
+// ---------------------------------------------------------------------------
+
+describe("resolveNamespacePath", () => {
+  test("rejects path traversal with ../", () => {
+    expect(() => resolveNamespacePath("../etc")).toThrow("Invalid namespace");
+  });
+
+  test("rejects namespaces starting with .", () => {
+    expect(() => resolveNamespacePath(".locks")).toThrow("Invalid namespace");
+    expect(() => resolveNamespacePath(".hidden")).toThrow("Invalid namespace");
+  });
+
+  test("accepts valid namespace names", () => {
+    const path = resolveNamespacePath("default");
+    expect(path).toContain("default");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listMemoryFiles — malformed frontmatter
+// ---------------------------------------------------------------------------
+
+describe("listMemoryFiles — malformed files", () => {
+  test("skips files with invalid frontmatter without crashing", () => {
+    const ns = `malformed-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+
+    // Write a valid file
+    const validId = randomUUID();
+    writeMemoryFile(validId, "valid body", makeFrontmatter({ id: validId, namespace: ns, name: "Valid" }));
+
+    // Write a malformed file directly (bad YAML)
+    const { writeFileSync: wfs } = require("fs");
+    wfs(join(nsPath, `${randomUUID()}.md`), "---\nid: not-a-uuid\n---\nbad");
+
+    const entries = listMemoryFiles(ns);
+    expect(entries.length).toBe(1);
+    expect(entries[0]!.name).toBe("Valid");
   });
 });

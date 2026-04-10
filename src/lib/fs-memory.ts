@@ -46,7 +46,7 @@ export interface MemoryFileEntry {
 }
 
 const MEMORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NAMESPACE_LOCK_TIMEOUT_MS = 2000;
+const NAMESPACE_LOCK_TIMEOUT_MS = 10_000;
 const NAMESPACE_LOCK_RETRY_MS = 25;
 const STALE_LOCK_AGE_MS = 10_000;
 
@@ -65,6 +65,9 @@ function getKbRoot(): string {
  */
 export function resolveNamespacePath(namespace: string): string {
   const root = getKbRoot();
+  if (namespace.startsWith(".")) {
+    throw new Error(`Invalid namespace: "${namespace}"`);
+  }
   const nsPath = resolve(root, namespace);
   if (!nsPath.startsWith(`${resolve(root)}${sep}`)) {
     throw new Error(`Invalid namespace: "${namespace}"`);
@@ -89,9 +92,14 @@ export function assertValidMemoryId(id: string): void {
   }
 }
 
+let lockRootCreated = false;
+
 function getNamespaceLockPath(namespace: string): string {
   const lockRoot = join(getKbRoot(), ".locks");
-  mkdirSync(lockRoot, { recursive: true });
+  if (!lockRootCreated) {
+    mkdirSync(lockRoot, { recursive: true });
+    lockRootCreated = true;
+  }
   return join(lockRoot, `${encodeURIComponent(namespace)}.lock`);
 }
 
@@ -194,6 +202,16 @@ export function parseFrontmatter(content: string): { frontmatter: MemoryFrontmat
 // ---------------------------------------------------------------------------
 
 /**
+ * Atomic file write: write to .tmp sibling then rename.
+ * Safe against crashes — either the old content or new content exists, never partial.
+ */
+function atomicWriteFile(filePath: string, content: string): void {
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, content);
+  renameSync(tmpPath, filePath);
+}
+
+/**
  * Writes a memory file atomically (write to .tmp then rename).
  * Returns the final file path.
  */
@@ -205,13 +223,11 @@ export function writeMemoryFile(
   assertValidMemoryId(id);
   const nsPath = ensureNamespacePath(frontmatter.namespace);
   const finalPath = join(nsPath, `${id}.md`);
-  const tmpPath = join(nsPath, `.${id}.md.tmp`);
 
   // Serialize frontmatter + body using gray-matter
   const fileContent = matter.stringify(text.trim(), frontmatter as Record<string, unknown>);
 
-  writeFileSync(tmpPath, fileContent);
-  renameSync(tmpPath, finalPath); // atomic on same filesystem
+  atomicWriteFile(finalPath, fileContent);
 
   return finalPath;
 }
@@ -232,7 +248,8 @@ export function readMemoryFile(
  */
 export function deleteMemoryFile(name: string, namespace: string): { id: string; path: string } | null {
   const entries = listMemoryFiles(namespace);
-  const match = entries.find((e) => e.name === name);
+  const nameLower = name.toLowerCase();
+  const match = entries.find((e) => e.name.toLowerCase() === nameLower);
   if (!match) return null;
   try {
     unlinkSync(match.path);
@@ -323,15 +340,16 @@ export function generateIndex(namespacePath: string): void {
 
   for (const e of entries) {
     const shortId = e.id.slice(0, 7);
-    const tags = e.tags.join(", ");
+    const tags = e.tags.join(", ").replace(/\|/g, "\\|");
+    const escapedName = e.name.replace(/\|/g, "\\|");
     const indexed = e.indexedAt ? "✓" : "✗";
-    lines.push(`| ${shortId} | ${e.name} | ${tags} | ${indexed} |`);
+    lines.push(`| ${shortId} | ${escapedName} | ${tags} | ${indexed} |`);
   }
 
   lines.push(""); // trailing newline
 
   const indexPath = join(namespacePath, "_index.md");
-  writeFileSync(indexPath, lines.join("\n"));
+  atomicWriteFile(indexPath, lines.join("\n"));
 }
 
 function formatIndexHeader(namespace: string, total: number, unindexed: number): string {
@@ -368,9 +386,10 @@ export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): 
   const indexPath = join(namespacePath, "_index.md");
   const namespace = basename(namespacePath);
   const shortId = entry.id.slice(0, 7);
-  const tags = entry.tags.join(", ");
+  const escapedName = entry.name.replace(/\|/g, "\\|");
+  const tags = entry.tags.join(", ").replace(/\|/g, "\\|");
   const indexed = entry.indexedAt ? "✓" : "✗";
-  const row = `| ${shortId} | ${entry.name} | ${tags} | ${indexed} |`;
+  const row = `| ${shortId} | ${escapedName} | ${tags} | ${indexed} |`;
 
   if (!existsSync(indexPath)) {
     const lines = [
@@ -381,7 +400,7 @@ export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): 
       row,
       "",
     ];
-    writeFileSync(indexPath, lines.join("\n"));
+    atomicWriteFile(indexPath, lines.join("\n"));
     return;
   }
 
@@ -399,5 +418,5 @@ export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): 
   );
   nextLines.push(row, "");
 
-  writeFileSync(indexPath, nextLines.join("\n"));
+  atomicWriteFile(indexPath, nextLines.join("\n"));
 }
