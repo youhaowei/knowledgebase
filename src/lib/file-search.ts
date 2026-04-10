@@ -13,7 +13,6 @@ import { listMemoryFiles, normalizeTags, resolveNamespacePath, type MemoryFileEn
 export interface FileSearchResult {
   id: string;
   name: string;
-  abstract?: string;    // from frontmatter (may be empty for unindexed)
   source: "file";
   indexed: boolean;     // whether indexedAt is set
   stale: boolean;       // false for Phase 1 (no staleness detection yet)
@@ -57,7 +56,7 @@ function indexScanFromEntries(
     .map((entry) => ({
       id: entry.id,
       name: entry.name,
-      abstract: undefined,
+
       source: "file" as const,
       indexed: entry.indexed,
       stale: false,
@@ -75,15 +74,16 @@ async function rgSearch(
 ): Promise<Map<string, string>> {
   if (query.trim() === "") return new Map();
   const result = new Map<string, string>();
+  let proc: ReturnType<typeof Bun.spawn> | undefined;
   try {
-    const proc = Bun.spawn(
+    proc = Bun.spawn(
       ["rg", "--json", "-F", "-i", "--no-heading", query, namespacePath],
       {
         stdout: "pipe",
         stderr: "ignore",
       },
     );
-    const output = await new Response(proc.stdout).text();
+    const output = await new Response(proc.stdout as ReadableStream).text();
     await proc.exited;
     const lines = output.trim().split("\n").filter(Boolean);
     for (const line of lines) {
@@ -102,6 +102,7 @@ async function rgSearch(
       }
     }
   } catch {
+    proc?.kill();
     console.error("[file-search] ripgrep not found, skipping body search");
   }
   return result;
@@ -135,7 +136,7 @@ function mergeRgMatches(
       resultById.set(entry.id, {
         id: entry.id,
         name: entry.name,
-        abstract: undefined,
+  
         source: "file",
         indexed: entry.indexed,
         stale: false,
