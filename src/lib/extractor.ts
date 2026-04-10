@@ -203,6 +203,10 @@ async function extractWithOllama(text: string, existingEntities?: EntityCatalogE
       return await singleOllamaExtraction(text, existingEntities);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      // Don't retry timeouts — a stuck model will time out again
+      if (lastError.message.includes("timeout") || lastError.name === "AbortError") {
+        throw lastError;
+      }
       if (attempt < MAX_EXTRACT_RETRIES) {
         console.error(`[extractor] attempt ${attempt}/${MAX_EXTRACT_RETRIES} failed: ${lastError.message.slice(0, 80)}. Retrying...`);
       }

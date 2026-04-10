@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as McpRouteImport } from './routes/mcp'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as ApiTriggerIndexRouteImport } from './routes/api.trigger-index'
 
 const McpRoute = McpRouteImport.update({
   id: '/mcp',
@@ -29,44 +28,35 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiTriggerIndexRoute = ApiTriggerIndexRouteImport.update({
-  id: '/api/trigger-index',
-  path: '/api/trigger-index',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/mcp': typeof McpRoute
-  '/api/trigger-index': typeof ApiTriggerIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/mcp': typeof McpRoute
-  '/api/trigger-index': typeof ApiTriggerIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/health': typeof HealthRoute
   '/mcp': typeof McpRoute
-  '/api/trigger-index': typeof ApiTriggerIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/health' | '/mcp' | '/api/trigger-index'
+  fullPaths: '/' | '/health' | '/mcp'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/health' | '/mcp' | '/api/trigger-index'
-  id: '__root__' | '/' | '/health' | '/mcp' | '/api/trigger-index'
+  to: '/' | '/health' | '/mcp'
+  id: '__root__' | '/' | '/health' | '/mcp'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   HealthRoute: typeof HealthRoute
   McpRoute: typeof McpRoute
-  ApiTriggerIndexRoute: typeof ApiTriggerIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -92,13 +82,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/trigger-index': {
-      id: '/api/trigger-index'
-      path: '/api/trigger-index'
-      fullPath: '/api/trigger-index'
-      preLoaderRoute: typeof ApiTriggerIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
@@ -106,7 +89,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   HealthRoute: HealthRoute,
   McpRoute: McpRoute,
-  ApiTriggerIndexRoute: ApiTriggerIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -46,7 +46,7 @@ export const _state = {
 
 async function graphSearchWithTimeout(
   query: string,
-  namespace: string | undefined,
+  namespace: string,
   limit: number,
 ): Promise<GraphSearchPayload | null> {
   if (Date.now() < _state.graphFailureCooldownUntil) {
@@ -105,7 +105,7 @@ export function filterGraphResultsByTaggedFileIds(
 
 export async function hybridSearch(
   query: string,
-  namespace?: string,
+  namespace = "default",
   limit = 10,
   tags?: string[],
 ): Promise<HybridSearchResult> {
@@ -114,7 +114,7 @@ export async function hybridSearch(
   // Run both searches in parallel — graph has a timeout cap
   const [graphResult, fileResults] = await Promise.all([
     graphSearchWithTimeout(query, namespace, limit),
-    fileSearch(query, namespace ?? "default", { limit, tags: normalizedTags }),
+    fileSearch(query, namespace, { limit, tags: normalizedTags }),
   ]);
 
   let memories = graphResult?.memories ?? [];

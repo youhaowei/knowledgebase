@@ -47,23 +47,39 @@ function buildPendingMemory(frontmatter: MemoryFrontmatter, text: string): Memor
 }
 
 async function persistProcessedMemory(
-  frontmatter: MemoryFrontmatter,
+  originalFrontmatter: MemoryFrontmatter,
   memory: Memory,
 ): Promise<void> {
-  const nextFrontmatter: MemoryFrontmatter = {
-    ...frontmatter,
-    name: memory.name,
-    indexedAt: new Date().toISOString(),
-    abstract: memory.abstract || undefined,
-    summary: memory.summary || undefined,
-    category: memory.category,
-    schemaVersion: memory.schemaVersion || "0.0.0",
-    versionedAt: memory.versionedAt,
-  };
+  const ns = originalFrontmatter.namespace;
 
-  await withNamespaceLock(frontmatter.namespace, async () => {
-    writeMemoryFile(memory.id, memory.text, nextFrontmatter);
-    generateIndex(resolveNamespacePath(frontmatter.namespace));
+  await withNamespaceLock(ns, async () => {
+    // Re-read from disk to avoid overwriting user edits made during async extraction.
+    // The extraction window (30-120s) is long enough for the file to be modified or deleted.
+    const path = join(resolveNamespacePath(ns), `${memory.id}.md`);
+    let currentFrontmatter: MemoryFrontmatter;
+    let currentText: string;
+    try {
+      const current = readMemoryFile(path);
+      currentFrontmatter = current.frontmatter;
+      currentText = current.text;
+    } catch {
+      // File was deleted during extraction — nothing to persist
+      return;
+    }
+
+    const nextFrontmatter: MemoryFrontmatter = {
+      ...currentFrontmatter,
+      name: memory.name,
+      indexedAt: new Date().toISOString(),
+      abstract: memory.abstract || undefined,
+      summary: memory.summary || undefined,
+      category: memory.category,
+      schemaVersion: memory.schemaVersion || "0.0.0",
+      versionedAt: memory.versionedAt,
+    };
+
+    writeMemoryFile(memory.id, currentText, nextFrontmatter);
+    generateIndex(resolveNamespacePath(ns));
   });
 }
 
@@ -137,40 +153,8 @@ async function addMemoryLocked(
     const filePath = writeMemoryFile(id, text, frontmatter);
     appendToIndex(nsPath, frontmatter);
 
-    triggerRemoteIndex(id, namespace);
-
     return { id, name: resolvedName, path: filePath, status: "written" as const };
   });
-}
-
-const pendingNotifications = new Set<Promise<void>>();
-
-function triggerRemoteIndex(id: string, namespace: string): void {
-  const serverUrl = process.env.KB_SERVER_URL ?? "http://localhost:8000";
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
-  const p = fetch(`${serverUrl}/api/trigger-index`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, namespace }),
-    signal: controller.signal,
-  }).then((res) => {
-    if (!res.ok) {
-      console.error(`[kb] Saved. Server returned ${res.status} — will be indexed on next start.`);
-    }
-  }).catch(() => {
-    console.error("[kb] Saved. Server notification timed out — will be indexed on next start.");
-  }).finally(() => {
-    clearTimeout(timeout);
-    pendingNotifications.delete(p);
-  });
-  pendingNotifications.add(p);
-}
-
-/** Drains in-flight server notifications. Call before process exit in CLI. */
-export function drainPendingNotifications(): Promise<void[]> {
-  return Promise.all([...pendingNotifications]);
 }
 
 /** Shared provider singleton. Exported for modules that need direct provider access. */
@@ -231,8 +215,13 @@ export async function processUnindexedMemories(namespace?: string): Promise<numb
     const files = listMemoryFiles(ns);
     for (const file of files) {
       if (file.indexed) continue;
-      if (await queueMemoryForIndexing(file.id, ns)) {
-        queued += 1;
+      try {
+        if (await queueMemoryForIndexing(file.id, ns)) {
+          queued += 1;
+        }
+      } catch (err) {
+        // File may have been deleted between list and read — skip and continue
+        console.error(`[kb] Skipping ${file.id} in ${ns}:`, (err as Error).message);
       }
     }
   }

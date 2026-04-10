@@ -92,14 +92,9 @@ export function assertValidMemoryId(id: string): void {
   }
 }
 
-let lockRootCreated = false;
-
 function getNamespaceLockPath(namespace: string): string {
   const lockRoot = join(getKbRoot(), ".locks");
-  if (!lockRootCreated) {
-    mkdirSync(lockRoot, { recursive: true });
-    lockRootCreated = true;
-  }
+  mkdirSync(lockRoot, { recursive: true });
   return join(lockRoot, `${encodeURIComponent(namespace)}.lock`);
 }
 

@@ -396,7 +396,6 @@ async function repl() {
   });
 
   rl.on("close", async () => {
-    await ops.drainPendingNotifications();
     await ops.close();
     process.exit(0);
   });
@@ -411,7 +410,6 @@ try {
     await repl();
   } else {
     await runCommand(ctx);
-    await ops.drainPendingNotifications();
     process.exit(0);
   }
 } catch (err) {
