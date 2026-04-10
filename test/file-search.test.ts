@@ -1,7 +1,14 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { rmSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { randomUUID } from "crypto";
-import { writeMemoryFile, getNamespacePath, type MemoryFrontmatter } from "../src/lib/fs-memory";
+
+// Set KB_MEMORY_PATH before importing fs-memory
+const tempDir = mkdtempSync(join(tmpdir(), "kb-search-test-"));
+process.env.KB_MEMORY_PATH = tempDir;
+
+import { writeMemoryFile, ensureNamespacePath, type MemoryFrontmatter } from "../src/lib/fs-memory";
 import { fileSearch } from "../src/lib/file-search";
 
 // ---------------------------------------------------------------------------
@@ -25,12 +32,14 @@ let idAlpha: string;
 let idBeta: string;
 let idGamma: string;
 let idTagged: string;
+let idIndexedNotes: string;
 
 beforeAll(async () => {
   idAlpha = randomUUID();
   idBeta = randomUUID();
   idGamma = randomUUID();
   idTagged = randomUUID();
+  idIndexedNotes = randomUUID();
 
   // "alpha memory" — name matches "alpha"
   await writeMemoryFile(
@@ -59,11 +68,18 @@ beforeAll(async () => {
     "Tagged item body.",
     makeFrontmatter({ id: idTagged, name: "tagged item", tags: ["important"] }),
   );
+
+  // "indexed notes" — indexed, shares "notes" with gamma (unindexed) for sort testing
+  writeMemoryFile(
+    idIndexedNotes,
+    "Some indexed notes body.",
+    makeFrontmatter({ id: idIndexedNotes, name: "indexed notes", indexedAt: new Date().toISOString() }),
+  );
 });
 
 afterAll(() => {
-  const nsPath = getNamespacePath(TEST_NS);
-  rmSync(nsPath, { recursive: true, force: true });
+  rmSync(tempDir, { recursive: true, force: true });
+  delete process.env.KB_MEMORY_PATH;
 });
 
 // ---------------------------------------------------------------------------
@@ -103,18 +119,15 @@ describe("fileSearch — name matching (index scan)", () => {
   });
 
   test("indexed files sort before unindexed", async () => {
-    // Both "alpha" and "beta" names contain no common query, but search for something
-    // that could match either — use a prefix-less word to hit both via rg
-    // Just test with beta specifically for the sort guarantee
-    const results = await fileSearch("beta", TEST_NS);
-    if (results.length > 1) {
-      // All results matching "beta" — indexed should come first
-      const indexedIdx = results.findIndex((r) => r.indexed);
-      const unindexedIdx = results.findIndex((r) => !r.indexed);
-      if (indexedIdx !== -1 && unindexedIdx !== -1) {
-        expect(indexedIdx).toBeLessThan(unindexedIdx);
-      }
-    }
+    // "notes" matches both "gamma notes" (unindexed) and "indexed notes" (indexed)
+    const results = await fileSearch("notes", TEST_NS);
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    const gammaIdx = results.findIndex((r) => r.id === idGamma);
+    const indexedNotesIdx = results.findIndex((r) => r.id === idIndexedNotes);
+    expect(gammaIdx).not.toBe(-1);
+    expect(indexedNotesIdx).not.toBe(-1);
+    // Indexed should come before unindexed
+    expect(indexedNotesIdx).toBeLessThan(gammaIdx);
   });
 });
 
@@ -129,10 +142,8 @@ describe("fileSearch — body text matching (ripgrep)", () => {
     const results = await fileSearch("ripgrep target", TEST_NS);
     const found = results.find((r) => r.id === idBeta);
     expect(found).toBeDefined();
-    // matchContext should contain the matched text
-    if (found?.matchContext) {
-      expect(found.matchContext.toLowerCase()).toContain("ripgrep");
-    }
+    expect(found!.matchContext).toBeDefined();
+    expect(found!.matchContext!.toLowerCase()).toContain("ripgrep");
   });
 
   test("finds exclusive body phrase not in name", async () => {
@@ -184,6 +195,11 @@ describe("fileSearch — tag filter", () => {
     const results = await fileSearch("tagged", TEST_NS, { tags: ["important"] });
     expect(results.find((r) => r.id === idTagged)).toBeDefined();
   });
+
+  test("normalizes tag filters before matching", async () => {
+    const results = await fileSearch("alpha", TEST_NS, { tags: ["Tech"] });
+    expect(results.find((r) => r.id === idAlpha)).toBeDefined();
+  });
 });
 
 describe("fileSearch — edge cases", () => {
@@ -214,7 +230,7 @@ describe("fileSearch — edge cases", () => {
       const results = await fileSearch("memory", ns, { limit: 3 });
       expect(results.length).toBeLessThanOrEqual(3);
     } finally {
-      rmSync(getNamespacePath(ns), { recursive: true, force: true });
+      rmSync(ensureNamespacePath(ns), { recursive: true, force: true });
     }
   });
 

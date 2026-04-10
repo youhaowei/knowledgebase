@@ -8,7 +8,7 @@
  * Results are merged and deduped by memory ID. Target: <50ms for 100 files.
  */
 
-import { listMemoryFiles, getNamespacePath } from "./fs-memory.js";
+import { listMemoryFiles, normalizeTags, resolveNamespacePath, type MemoryFileEntry } from "./fs-memory.js";
 
 export interface FileSearchResult {
   id: string;
@@ -26,26 +26,33 @@ export interface FileSearchOptions {
   limit?: number;  // default 20
 }
 
+function normalizeTagFilter(tags?: string[]): string[] | undefined {
+  if (!tags || tags.length === 0) return undefined;
+  const normalized = normalizeTags(tags);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function matchesTagFilter(entryTags: string[], tagFilter?: string[]): boolean {
+  if (!tagFilter || tagFilter.length === 0) return true;
+  const entryTagSet = new Set(entryTags);
+  return tagFilter.every((tag) => entryTagSet.has(tag));
+}
+
 /**
- * Fast path: substring match on name from listMemoryFiles metadata.
- * No file reads needed — name is in the MemoryFileEntry returned by listMemoryFiles.
+ * Fast path: substring match on name from pre-loaded entries.
+ * No file reads needed — name is in the MemoryFileEntry.
  */
-function indexScan(
+function indexScanFromEntries(
   query: string,
-  namespace: string,
-  options?: FileSearchOptions,
+  entries: MemoryFileEntry[],
+  tagFilter?: string[],
 ): FileSearchResult[] {
-  const entries = listMemoryFiles(namespace);
   const q = query.toLowerCase();
 
   return entries
     .filter((entry) => {
       if (!entry.name.toLowerCase().includes(q)) return false;
-      if (options?.tags && options.tags.length > 0) {
-        const entryTagSet = new Set(entry.tags);
-        return options.tags.some((t) => entryTagSet.has(t));
-      }
-      return true;
+      return matchesTagFilter(entry.tags, tagFilter);
     })
     .map((entry) => ({
       id: entry.id,
@@ -73,10 +80,11 @@ async function rgSearch(
       ["rg", "--json", "-F", "-i", "--no-heading", query, namespacePath],
       {
         stdout: "pipe",
-        stderr: "pipe",
+        stderr: "ignore",
       },
     );
     const output = await new Response(proc.stdout).text();
+    await proc.exited;
     const lines = output.trim().split("\n").filter(Boolean);
     for (const line of lines) {
       try {
@@ -102,23 +110,22 @@ async function rgSearch(
 /**
  * Merge ripgrep matches into the result map. Adds matchContext to existing
  * entries or creates new rg-only entries with file metadata.
+ * Accepts pre-loaded entries to avoid re-reading files.
  */
 function mergeRgMatches(
   resultById: Map<string, FileSearchResult>,
   rgMatches: Map<string, string>,
-  namespace: string,
+  entries: MemoryFileEntry[],
   tagFilter?: string[],
 ): void {
-  const allEntries = listMemoryFiles(namespace);
-  const entryByPath = new Map(allEntries.map((e) => [e.path, e]));
+  const entryByPath = new Map(entries.map((e) => [e.path, e]));
 
   for (const [filePath, context] of rgMatches) {
     const entry = entryByPath.get(filePath);
     if (!entry) continue;
 
-    if (tagFilter && tagFilter.length > 0) {
-      const entryTagSet = new Set(entry.tags);
-      if (!tagFilter.some((t) => entryTagSet.has(t))) continue;
+    if (!matchesTagFilter(entry.tags, tagFilter)) {
+      continue;
     }
 
     const existing = resultById.get(entry.id);
@@ -150,10 +157,14 @@ export async function fileSearch(
   options?: FileSearchOptions,
 ): Promise<FileSearchResult[]> {
   const limit = options?.limit ?? 20;
-  const namespacePath = getNamespacePath(namespace);
+  const namespacePath = resolveNamespacePath(namespace);
+
+  // Load entries once, share between indexScan and mergeRgMatches
+  const allEntries = listMemoryFiles(namespace);
+  const normalizedTags = normalizeTagFilter(options?.tags);
 
   const [indexResults, rgMatches] = await Promise.all([
-    Promise.resolve(indexScan(query, namespace, options)),
+    Promise.resolve(indexScanFromEntries(query, allEntries, normalizedTags)),
     rgSearch(query, namespacePath),
   ]);
 
@@ -163,7 +174,7 @@ export async function fileSearch(
   }
 
   if (rgMatches.size > 0) {
-    mergeRgMatches(resultById, rgMatches, namespace, options?.tags);
+    mergeRgMatches(resultById, rgMatches, allEntries, normalizedTags);
   }
 
   const q = query.toLowerCase();
