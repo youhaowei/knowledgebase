@@ -30,7 +30,8 @@ function originForNamespace(namespace: string): Origin {
 
 /** Pre-computed path for existence check without creating directories. */
 function expectedFilePath(namespace: string, id: string): string {
-  return join(homedir(), ".kb", "memories", namespace, `${id}.md`);
+  const root = process.env.KB_MEMORY_PATH ?? join(homedir(), ".kb", "memories");
+  return join(root, namespace, `${id}.md`);
 }
 
 /** Detect name collisions across namespaces. */
@@ -106,22 +107,24 @@ export async function migrate(dryRun = false): Promise<void> {
   const namespaces = await gp.listNamespaces();
   console.error(`[migrate] Found namespaces: ${namespaces.join(", ") || "(none)"}`);
 
-  // Phase 1: Collect + preflight
+  // Phase 1: Collect + preflight (query once, reuse for write phase)
   const allSummaries: MemorySummary[] = [];
+  const memoriesByNs = new Map<string, MigrateMemory[]>();
   for (const ns of namespaces) {
     const active = filterActive(await gp.findMemories({ namespace: ns }, 10000));
+    memoriesByNs.set(ns, active);
     for (const m of active) {
       allSummaries.push({ id: m.id, name: m.name, namespace: ns });
     }
   }
   checkNameCollisions(allSummaries);
 
-  // Phase 2: Write files
+  // Phase 2: Write files (reuse cached query results)
   const now = new Date().toISOString();
   const counters: MigrateCounter = { written: 0, skipped: 0, failed: 0 };
 
   for (const ns of namespaces) {
-    const active = filterActive(await gp.findMemories({ namespace: ns }, 10000));
+    const active = memoriesByNs.get(ns) ?? [];
     console.error(`[migrate] Namespace "${ns}": ${active.length} memories`);
     for (const m of active) {
       await migrateOne(m, ns, dryRun, now, counters);
