@@ -64,7 +64,7 @@ export function createKnowledgebaseMcpServer() {
 
   server.tool(
     "add",
-    "Save a new memory to the knowledge graph. Extracts entities and relationships automatically.",
+    "Save a memory to disk. Background indexing extracts entities and relationships when the server is running.",
     {
       text: z.string().describe("The text to remember"),
       name: z.string().optional().describe("Optional name for the memory"),
@@ -72,10 +72,12 @@ export function createKnowledgebaseMcpServer() {
         .string()
         .default("default")
         .describe("Namespace for isolation (e.g., project name)"),
+      tags: z.array(z.string()).default([]).describe("Tags for organization (e.g., ['bug', 'worktree'])"),
+      origin: z.enum(["manual", "retro", "mcp", "import"]).default("mcp").describe("Origin of the memory"),
     },
-    withMcpSource(async ({ text, name, namespace }) => {
+    withMcpSource(async ({ text, name, namespace, tags, origin }) => {
       try {
-        const result = await ops.addMemory(text, name, namespace, "mcp");
+        const result = await ops.addMemory(text, name, namespace, origin, tags);
         return {
           content: [
             {
@@ -109,10 +111,11 @@ export function createKnowledgebaseMcpServer() {
         .describe("Namespace to search within"),
       limit: z.number().default(10).describe("Max results"),
       detail: z.enum(["summary", "full", "source"]).default("full").describe("Response detail level: summary (L0 abstracts), full (L1 summaries, default), source (L2 full text)"),
+      tags: z.array(z.string()).optional().describe("Filter by tags (e.g., ['bug', 'worktree'])"),
     },
-    withMcpSource(async ({ query, namespace, limit, detail }) => {
+    withMcpSource(async ({ query, namespace, limit, detail, tags }) => {
       try {
-        const result = await hybridSearch(query, namespace, limit);
+        const result = await hybridSearch(query, namespace, limit, tags);
         return {
           content: [
             {
@@ -124,7 +127,10 @@ export function createKnowledgebaseMcpServer() {
                   edges: result.edges.map((e) => formatEdge(e, detail)),
                   entities: result.entities.map((e) => formatEntity(e, detail)),
                   files: result.files,
-                  guidance: result.guidance,
+                  guidance: result.guidance
+                    + (result.files.some((f) => !f.indexed)
+                      ? " Some results are recently added and not yet indexed — entities/edges haven't been extracted. Full text is available at the file path."
+                      : ""),
                 },
                 null,
                 2,

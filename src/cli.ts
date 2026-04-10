@@ -109,16 +109,17 @@ async function handleAdd(ctx: CmdContext) {
   const tags = ctx.flags["--tag"]?.split(",").filter(Boolean) ?? [];
   const result = await ops.addMemory(text, name, ctx.namespace, origin, tags);
   const msg = result.status === "existing"
-    ? `Memory already exists: ${result.id}`
+    ? `Memory already exists: ${result.id}. To update, edit: ${result.path}`
     : `Written ${result.path}`;
   out(ctx, ctx.json ? result : msg);
 }
 
-function formatFileResult(f: { name: string; indexed: boolean; tags: string[]; matchContext?: string }): string {
+function formatFileResult(f: { id: string; name: string; indexed: boolean; tags: string[]; matchContext?: string }): string {
+  const label = f.name || `(unnamed: ${f.id.slice(0, 7)})`;
   const status = f.indexed ? "" : " [unindexed]";
   const tags = f.tags.length ? ` [${f.tags.join(", ")}]` : "";
   const context = f.matchContext ? `\n    ...${f.matchContext.slice(0, 80)}...` : "";
-  return `  ${f.name}${status}${tags}${context}`;
+  return `  ${label}${status}${tags}${context}`;
 }
 
 function formatMemory(m: { id: string; name: string; summary: string; text: string }): string {
@@ -166,12 +167,20 @@ async function handleGet(ctx: CmdContext) {
     return;
   }
 
-  if (!result.entity) {
-    console.log(`Entity "${name}" not found.`);
+  if (!result.entity && !result.memory) {
+    console.log(`"${name}" not found.`);
     return;
   }
 
-  console.log(`\n${formatEntity(result.entity)}`);
+  if (result.memory) {
+    const m = result.memory;
+    const status = m.status === "pending" ? " [unindexed]" : "";
+    console.log(`\n  Memory: ${m.name || "(unnamed)"}${status}`);
+    console.log(`  ${m.summary || m.text.slice(0, 120)}`);
+  }
+  if (result.entity) {
+    console.log(`\n${formatEntity(result.entity)}`);
+  }
   if (result.edges.length > 0) {
     console.log(`\nEdges (${result.edges.length}):`);
     for (const e of result.edges) {
@@ -293,8 +302,8 @@ Knowledgebase CLI
 Usage: kb <command> [args] [flags]
 
 Commands:
-  add <text>                    Add a memory (extracts entities + edges)
-  search <query>                Semantic search
+  add <text>                    Save a memory to disk (background indexing)
+  search <query>                Hybrid search (file + semantic)
   get <name>                    Look up entity by name
   forget <name>                 Remove entity
   forget-edge <id> <reason>     Invalidate an edge with reason
@@ -307,7 +316,7 @@ Flags:
   --env <name>                  Environment (data isolation, e.g. "test")
   --name <name>                 Name for add command
   --origin <type>               Origin type (manual|retro|mcp|import)
-  --tag <tag>                   Tag (repeatable: --tag bug --tag ui)
+  --tag <tag>                   Tag for add/search (repeatable: --tag bug --tag ui)
   --limit <n>                   Result limit for search (default: 10)
   --json                        Output raw JSON
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)
@@ -387,6 +396,7 @@ async function repl() {
   });
 
   rl.on("close", async () => {
+    await ops.drainPendingNotifications();
     await ops.close();
     process.exit(0);
   });
@@ -401,6 +411,7 @@ try {
     await repl();
   } else {
     await runCommand(ctx);
+    await ops.drainPendingNotifications();
     process.exit(0);
   }
 } catch (err) {

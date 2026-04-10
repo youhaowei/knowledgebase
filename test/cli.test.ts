@@ -142,10 +142,12 @@ describe("CLI read operations", () => {
 
 describe("CLI environment isolation", () => {
   test("--env creates separate data directory", async () => {
+    const otherKbDir = join(KB_TEST_DIR, "isolated");
     const proc = Bun.spawn([...CLI, "--env", "cli-test-other", "stats", "--json"], {
       stdout: "pipe",
       stderr: "pipe",
       cwd: import.meta.dir + "/..",
+      env: { ...process.env, KB_MEMORY_PATH: otherKbDir },
     });
     const stdout = await new Response(proc.stdout).text();
     const exitCode = await proc.exited;
