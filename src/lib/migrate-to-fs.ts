@@ -73,7 +73,6 @@ async function migrateOne(
   }
   if (dryRun) {
     console.error(`[migrate]   (dry-run) would write: ${m.id} (${label})`);
-    counters.written++;
     return;
   }
 
@@ -84,7 +83,7 @@ async function migrateOne(
   };
 
   try {
-    await writeMemoryFile(m.id, m.text ?? "", frontmatter);
+    writeMemoryFile(m.id, m.text ?? "", frontmatter);
     console.error(`[migrate]   wrote: ${m.id} (${label})`);
     counters.written++;
   } catch (err) {
