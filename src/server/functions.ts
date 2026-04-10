@@ -408,8 +408,15 @@ function edgeSentimentLabel(s: number) {
   return "";
 }
 
-function buildSearchContext(searchResult: Awaited<ReturnType<typeof ops.search>>) {
+function buildSearchContext(searchResult: Awaited<ReturnType<typeof hybridSearch>>) {
   const sections: string[] = [];
+
+  const fileLines = searchResult.files
+    .map((f) => {
+      const ctx = f.matchContext ? `: ${f.matchContext.slice(0, 100)}` : "";
+      return `- ${f.name}${f.indexed ? "" : " [unindexed]"}${ctx}`;
+    });
+  if (fileLines.length > 0) sections.push("**File Results:**\n" + fileLines.join("\n"));
 
   const edgeLines = searchResult.edges.map((edge) => {
     const sentiment = edgeSentimentLabel(edge.sentiment);
@@ -441,10 +448,7 @@ const askLLMSchema = z.object({
 export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    // Uses ops.search (graph-only) instead of hybridSearch — acceptable since
-    // askLLM only runs in the web UI where the graph DB is always available.
-    // TODO(phase2): switch to hybridSearch to include unindexed file results.
-    const searchResult = await ops.search(data.question, undefined, 5);
+    const searchResult = await hybridSearch(data.question, undefined, 5);
     const context = buildSearchContext(searchResult);
 
     const result = await prompt("claude", `You are a helpful assistant with access to a personal knowledge base.
@@ -468,10 +472,11 @@ Instructions:
 
     return {
       answer: answer || "I couldn't generate an answer. Please try rephrasing your question.",
-      hasContext: searchResult.edges.length > 0 || searchResult.memories.length > 0 || searchResult.entities.length > 0,
+      hasContext: searchResult.edges.length > 0 || searchResult.memories.length > 0 || searchResult.entities.length > 0 || searchResult.files.length > 0,
       edgesUsed: searchResult.edges.length,
       memoriesUsed: searchResult.memories.length,
       entitiesUsed: searchResult.entities.length,
+      filesUsed: searchResult.files.length,
     };
   }));
 
@@ -623,19 +628,33 @@ export const getEntity = createServerFn()
 const streamingSearchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),
+  namespace: z.string().default("default"),
 });
 
 export const streamingSearch = createServerFn()
   .inputValidator((data: unknown) => streamingSearchSchema.parse(data))
   .handler(async function* ({ data }) {
     const result = await analyticsContext.run({ source: "web" }, () =>
-      ops.search(data.query, undefined, data.limit),
+      hybridSearch(data.query, data.namespace, data.limit),
     );
 
     yield {
       type: "intent" as const,
       data: { intent: result.intent },
     };
+
+    for (const file of result.files) {
+      yield {
+        type: "file" as const,
+        data: {
+          id: file.id,
+          name: file.name,
+          indexed: file.indexed,
+          tags: file.tags,
+          matchContext: file.matchContext,
+        },
+      };
+    }
 
     for (const memory of result.memories) {
       yield {

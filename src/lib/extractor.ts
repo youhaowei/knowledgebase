@@ -226,7 +226,7 @@ async function singleOllamaExtraction(text: string, existingEntities?: EntityCat
       body: JSON.stringify({
         model: EXTRACTION_MODEL,
         prompt: extractionPrompt(text, existingEntities) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.",
-        format: "json",  // Grammar-constrained: model can only emit valid JSON tokens
+        format: extractionSchema,  // Schema-constrained: model output must match this structure
         stream: false,
         think: false,
         options: { temperature: 0.2, num_predict: 2048 },
