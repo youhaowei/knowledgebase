@@ -8,7 +8,9 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { join } from "path";
+import { ensureServerIndexerStarted } from "@/server/indexer.js";
+
+ensureServerIndexerStarted();
 
 async function handleTriggerIndex(request: Request): Promise<Response> {
   let body: { id: string; namespace: string };
@@ -24,34 +26,19 @@ async function handleTriggerIndex(request: Request): Promise<Response> {
   }
 
   try {
-    // Dynamic imports to avoid loading graph provider at module level
-    const { getNamespacePath, readMemoryFile } = await import("@/lib/fs-memory.js");
-    const { getQueue } = await import("@/lib/operations.js");
+    const { assertValidMemoryId } = await import("@/lib/fs-memory.js");
+    assertValidMemoryId(id);
+    const { queueMemoryForIndexing } = await import("@/lib/operations.js");
 
-    // Reconstruct path server-side — never trust client-supplied paths
-    const path = join(getNamespacePath(namespace), `${id}.md`);
-    const { frontmatter, text } = await readMemoryFile(path);
-
-    const memory = {
-      id: frontmatter.id,
-      name: frontmatter.name,
-      text,
-      abstract: "",
-      summary: "",
-      namespace: frontmatter.namespace,
-      status: "pending" as const,
-      schemaVersion: "0.0.0",
-      createdAt: new Date(frontmatter.createdAt),
-    };
-
-    // Use shared queue singleton — don't create a new Queue per request
-    const q = await getQueue();
-    q.add(memory).catch((err: unknown) => {
+    queueMemoryForIndexing(id, namespace).catch((err: unknown) => {
       console.error(`[api/trigger-index] Queue processing failed for ${id}:`, err);
     });
 
-    return Response.json({ status: "queued", id: frontmatter.id });
+    return Response.json({ status: "queued", id });
   } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid memory id")) {
+      return Response.json({ error: err.message }, { status: 400 });
+    }
     console.error(`[api/trigger-index] Failed to read or queue ${id}:`, err);
     return Response.json({ error: String(err) }, { status: 500 });
   }

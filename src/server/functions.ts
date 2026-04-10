@@ -11,7 +11,10 @@ import * as ops from "../lib/operations.js";
 import { hybridSearch } from "../lib/hybrid-search.js";
 import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
+import { ensureServerIndexerStarted } from "./indexer.js";
 import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity } from "../types.js";
+
+ensureServerIndexerStarted();
 
 // ============================================================================
 // Queries (GET by default)
@@ -438,6 +441,9 @@ const askLLMSchema = z.object({
 export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
+    // Uses ops.search (graph-only) instead of hybridSearch — acceptable since
+    // askLLM only runs in the web UI where the graph DB is always available.
+    // TODO(phase2): switch to hybridSearch to include unindexed file results.
     const searchResult = await ops.search(data.question, undefined, 5);
     const context = buildSearchContext(searchResult);
 
