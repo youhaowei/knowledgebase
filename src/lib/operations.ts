@@ -10,7 +10,7 @@
  * - stats: Namespace statistics
  */
 
-import { createGraphProvider, type GraphProvider } from "./graph-provider.js";
+import { createGraphProvider as defaultCreateGraphProvider, type GraphProvider } from "./graph-provider.js";
 import { Queue } from "./queue.js";
 import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
@@ -26,9 +26,16 @@ import {
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
 let providerPromise: Promise<GraphProvider> | null = null;
-let queue: Queue;
+let queue: Queue | null = null;
 const inFlightIndexing = new Set<string>();
 const addLocks = new Map<string, Promise<void>>();
+const defaultOperationDependencies = {
+  createGraphProvider: defaultCreateGraphProvider,
+  createQueue: (provider: GraphProvider) => new Queue(provider),
+};
+const operationDependencies = {
+  ...defaultOperationDependencies,
+};
 
 function buildPendingMemory(frontmatter: MemoryFrontmatter, text: string): Memory {
   return {
@@ -69,13 +76,23 @@ async function persistProcessedMemory(
 
     const nextFrontmatter: MemoryFrontmatter = {
       ...currentFrontmatter,
-      name: memory.name,
+      // Preserve the current on-disk name so user edits made during async
+      // extraction are not clobbered by the queue-time snapshot.
+      name: currentFrontmatter.name,
       indexedAt: new Date().toISOString(),
-      abstract: memory.abstract || undefined,
-      summary: memory.summary || undefined,
-      category: memory.category,
-      schemaVersion: memory.schemaVersion || "0.0.0",
-      versionedAt: memory.versionedAt,
+      schemaVersion: memory.schemaVersion || currentFrontmatter.schemaVersion || "0.0.0",
+      ...(memory.abstract || currentFrontmatter.abstract
+        ? { abstract: memory.abstract || currentFrontmatter.abstract }
+        : {}),
+      ...(memory.summary || currentFrontmatter.summary
+        ? { summary: memory.summary || currentFrontmatter.summary }
+        : {}),
+      ...(memory.category || currentFrontmatter.category
+        ? { category: memory.category || currentFrontmatter.category }
+        : {}),
+      ...(memory.versionedAt || currentFrontmatter.versionedAt
+        ? { versionedAt: memory.versionedAt || currentFrontmatter.versionedAt }
+        : {}),
     };
 
     writeMemoryFile(memory.id, currentText, nextFrontmatter);
@@ -160,8 +177,8 @@ async function addMemoryLocked(
 /** Shared provider singleton. Exported for modules that need direct provider access. */
 export async function getProvider() {
   if (!providerPromise) {
-    providerPromise = createGraphProvider().then((p) => {
-      queue = new Queue(p);
+    providerPromise = operationDependencies.createGraphProvider().then((p) => {
+      queue = operationDependencies.createQueue(p);
       return p;
     });
   }
@@ -170,6 +187,9 @@ export async function getProvider() {
 
 export async function getQueue() {
   await getProvider();
+  if (!queue) {
+    throw new Error("Queue was not initialized");
+  }
   return queue;
 }
 
@@ -186,25 +206,32 @@ export async function queueMemoryForIndexing(id: string, namespace: string): Pro
   }
 
   inFlightIndexing.add(key);
-  const path = join(resolveNamespacePath(namespace), `${id}.md`);
+  let releaseKey = true;
 
-  const { frontmatter, text } = readMemoryFile(path);
-  if (frontmatter.indexedAt) {
-    inFlightIndexing.delete(key);
-    return false;
+  try {
+    const path = join(resolveNamespacePath(namespace), `${id}.md`);
+    const { frontmatter, text } = readMemoryFile(path);
+    if (frontmatter.indexedAt) {
+      return false;
+    }
+
+    const memory = buildPendingMemory(frontmatter, text);
+    const q = await getQueue();
+
+    // Fire-and-forget: enqueue and let the Queue drain in the background.
+    // Heavy work (extraction + embedding) happens asynchronously.
+    releaseKey = false;
+    q.add(memory)
+      .then(() => persistProcessedMemory(frontmatter, memory))
+      .catch((err) => console.error(`[kb] Indexing failed for ${id}:`, err))
+      .finally(() => inFlightIndexing.delete(key));
+
+    return true;
+  } finally {
+    if (releaseKey) {
+      inFlightIndexing.delete(key);
+    }
   }
-
-  const memory = buildPendingMemory(frontmatter, text);
-  const q = await getQueue();
-
-  // Fire-and-forget: enqueue and let the Queue drain in the background.
-  // Heavy work (extraction + embedding) happens asynchronously.
-  q.add(memory)
-    .then(() => persistProcessedMemory(frontmatter, memory))
-    .catch((err) => console.error(`[kb] Indexing failed for ${id}:`, err))
-    .finally(() => inFlightIndexing.delete(key));
-
-  return true;
 }
 
 export async function processUnindexedMemories(namespace?: string): Promise<number> {
@@ -337,10 +364,9 @@ export async function forget(
   namespace: string,
 ): Promise<{ deleted: boolean; reason?: string }> {
   return tracked("forget", { namespace }, async () => {
-    const gp = await getProvider();
-    const result = await gp.forget(name, namespace);
-
-    // Also delete the filesystem file (source of truth)
+    // Delete from the filesystem first because it is the source of truth.
+    // Graph cleanup happens second so a filesystem failure cannot orphan a
+    // phantom file that still appears on disk.
     const fsResult = await withNamespaceLock(namespace, async () => {
       const deleted = deleteMemoryFile(name, namespace);
       if (deleted) {
@@ -348,6 +374,9 @@ export async function forget(
       }
       return deleted;
     });
+
+    const gp = await getProvider();
+    const result = await gp.forget(name, namespace);
 
     if (!result.deletedMemory && !result.deletedEntity && !fsResult) {
       return { deleted: false, reason: "Not found" };
@@ -421,4 +450,20 @@ export async function close() {
   // LadybugDB close() triggers a Bun segfault (native addon issue).
   // Process exit handles cleanup, so explicit close is skipped.
   // if (provider) await provider.close();
+}
+
+export function resetOperationStateForTests(): void {
+  operationDependencies.createGraphProvider = defaultOperationDependencies.createGraphProvider;
+  operationDependencies.createQueue = defaultOperationDependencies.createQueue;
+  providerPromise = null;
+  queue = null;
+  inFlightIndexing.clear();
+  addLocks.clear();
+}
+
+export function configureOperationDependenciesForTests(overrides: Partial<typeof defaultOperationDependencies>): void {
+  operationDependencies.createGraphProvider = overrides.createGraphProvider
+    ?? defaultOperationDependencies.createGraphProvider;
+  operationDependencies.createQueue = overrides.createQueue
+    ?? defaultOperationDependencies.createQueue;
 }

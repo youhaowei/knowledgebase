@@ -257,6 +257,101 @@ export const resetReextract = createServerFn({ method: "POST" }).handler(async (
   return { reset: true };
 });
 
+type ReextractDependencies = {
+  getProvider: typeof ops.getProvider;
+  importExtract: () => Promise<typeof import("../lib/extractor.js")>;
+  importEmbed: () => Promise<typeof import("../lib/embedder.js")>;
+};
+
+const defaultReextractDependencies: ReextractDependencies = {
+  getProvider: ops.getProvider,
+  importExtract: () => import("../lib/extractor.js"),
+  importEmbed: () => import("../lib/embedder.js"),
+};
+
+export async function startReextractAll(
+  deps: ReextractDependencies = defaultReextractDependencies,
+): Promise<{ started: boolean; reason?: string; total?: number }> {
+  if (reextractState.running) return { started: false, reason: "already running" };
+
+  reextractState.running = true;
+  reextractState.current = 0;
+  reextractState.total = 0;
+  reextractState.success = 0;
+  reextractState.failed = 0;
+  reextractState.errors = [];
+  reextractState.currentName = "";
+  reextractState.phase = "";
+  reextractState.edgeCurrent = 0;
+  reextractState.edgeTotal = 0;
+
+  // Start async — don't await, return immediately
+  void (async () => {
+    try {
+      const [{ extract }, { embedDual }, gp] = await Promise.all([
+        deps.importExtract(),
+        deps.importEmbed(),
+        deps.getProvider(),
+      ]);
+      const memories = await gp.findMemories({});
+
+      reextractState.total = memories.length;
+
+      for (let i = 0; i < memories.length; i++) {
+        const memory = memories[i]!;
+        reextractState.current = i + 1;
+        reextractState.currentName = memory.name || memory.id;
+        reextractState.phase = "extracting";
+        reextractState.edgeCurrent = 0;
+        reextractState.edgeTotal = 0;
+        try {
+          const extraction = await extract(memory.text);
+          reextractState.lastEntities = extraction.entities.length;
+          reextractState.lastEdges = extraction.edges.length;
+          reextractState.edgeTotal = extraction.edges.length;
+
+          reextractState.phase = "embedding-memory";
+          const memEmb = await embedDual(memory.text);
+
+          reextractState.phase = "embedding-edges";
+          const edgeEmbeddings = [];
+          for (let j = 0; j < extraction.edges.length; j++) {
+            reextractState.edgeCurrent = j + 1;
+            edgeEmbeddings.push(await embedDual(extraction.edges[j]!.fact));
+          }
+
+          reextractState.phase = "storing";
+          await gp.store(
+            { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
+            extraction.entities,
+            extraction.edges,
+            memEmb,
+            edgeEmbeddings,
+          );
+          reextractState.success++;
+        } catch (err) {
+          reextractState.failed++;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          reextractState.errors.push(`${memory.name}: ${errMsg}`);
+          console.error(`[reextract] Failed ${memory.name}:`, errMsg);
+        }
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      reextractState.errors.push(`startup: ${errMsg}`);
+      console.error("[reextract] Failed to start:", errMsg);
+    } finally {
+      reextractState.running = false;
+      reextractState.currentName = "";
+      reextractState.phase = "";
+      reextractState.edgeCurrent = 0;
+      reextractState.edgeTotal = 0;
+    }
+  })();
+
+  return { started: true, total: reextractState.total };
+}
+
 /** Find duplicate entity groups using fuzzy name matching */
 export const findDuplicateCandidates = createServerFn().handler(async () => {
   const gp = await ops.getProvider();
@@ -334,66 +429,7 @@ export const deduplicateEntities = createServerFn({ method: "POST" }).handler(as
 });
 
 export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
-  if (reextractState.running) return { started: false, reason: "already running" };
-
-  // Start async — don't await, return immediately
-  (async () => {
-    const { extract } = await import("../lib/extractor.js");
-    const { embedDual } = await import("../lib/embedder.js");
-    const gp = await ops.getProvider();
-    const memories = await gp.findMemories({});
-
-    reextractState.running = true;
-    reextractState.current = 0;
-    reextractState.total = memories.length;
-    reextractState.success = 0;
-    reextractState.failed = 0;
-    reextractState.errors = [];
-
-    for (let i = 0; i < memories.length; i++) {
-      const memory = memories[i]!;
-      reextractState.current = i + 1;
-      reextractState.currentName = memory.name || memory.id;
-      reextractState.phase = "extracting";
-      reextractState.edgeCurrent = 0;
-      reextractState.edgeTotal = 0;
-      try {
-        const extraction = await extract(memory.text);
-        reextractState.lastEntities = extraction.entities.length;
-        reextractState.lastEdges = extraction.edges.length;
-        reextractState.edgeTotal = extraction.edges.length;
-
-        reextractState.phase = "embedding-memory";
-        const memEmb = await embedDual(memory.text);
-
-        reextractState.phase = "embedding-edges";
-        const edgeEmbeddings = [];
-        for (let j = 0; j < extraction.edges.length; j++) {
-          reextractState.edgeCurrent = j + 1;
-          edgeEmbeddings.push(await embedDual(extraction.edges[j]!.fact));
-        }
-
-        reextractState.phase = "storing";
-        await gp.store(
-          { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
-          extraction.entities,
-          extraction.edges,
-          memEmb,
-          edgeEmbeddings,
-        );
-        reextractState.success++;
-      } catch (err) {
-        reextractState.failed++;
-        const errMsg = err instanceof Error ? err.message : String(err);
-        reextractState.errors.push(`${memory.name}: ${errMsg}`);
-        console.error(`[reextract] Failed ${memory.name}:`, errMsg);
-      }
-    }
-    reextractState.running = false;
-    reextractState.currentName = "";
-  })();
-
-  return { started: true, total: reextractState.total };
+  return startReextractAll();
 });
 
 // ============================================================================
