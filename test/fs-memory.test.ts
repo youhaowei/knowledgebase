@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -451,8 +451,7 @@ describe("listMemoryFiles — malformed files", () => {
     writeMemoryFile(validId, "valid body", makeFrontmatter({ id: validId, namespace: ns, name: "Valid" }));
 
     // Write a malformed file directly (bad YAML)
-    const { writeFileSync: wfs } = require("fs");
-    wfs(join(nsPath, `${randomUUID()}.md`), "---\nid: not-a-uuid\n---\nbad");
+    writeFileSync(join(nsPath, `${randomUUID()}.md`), "---\nid: not-a-uuid\n---\nbad");
 
     const entries = listMemoryFiles(ns);
     expect(entries.length).toBe(1);

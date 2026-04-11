@@ -7,7 +7,7 @@
  * Subsequent runs load from cache — fast.
  */
 
-import { AutoProcessor, AutoModelForCausalLM, TextStreamer } from "@huggingface/transformers";
+import { AutoProcessor, AutoModelForCausalLM } from "@huggingface/transformers";
 
 const MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
 

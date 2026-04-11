@@ -30,93 +30,103 @@ export function extractSkeleton(filename: string, content: string): string {
     );
   }
 
-  function visitNode(node: ts.Node) {
-    // Imports
-    if (ts.isImportDeclaration(node)) {
-      const spec = node.moduleSpecifier.getText(sf).replace(/['"]/g, "");
-      imports.push(spec);
-      return;
-    }
+  function handleImport(node: ts.Node): boolean {
+    if (!ts.isImportDeclaration(node)) return false;
+    const spec = node.moduleSpecifier.getText(sf).replace(/['"]/g, "");
+    imports.push(spec);
+    return true;
+  }
 
-    // Export declarations (re-exports)
-    if (ts.isExportDeclaration(node)) {
-      const spec = node.moduleSpecifier?.getText(sf).replace(/['"]/g, "");
-      if (spec) exports.push(`re-export from ${spec}`);
-      return;
-    }
+  function handleExportDeclaration(node: ts.Node): boolean {
+    if (!ts.isExportDeclaration(node)) return false;
+    const spec = node.moduleSpecifier?.getText(sf).replace(/['"]/g, "");
+    if (spec) exports.push(`re-export from ${spec}`);
+    return true;
+  }
 
-    // Function declarations
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      const sig = cleanSig(getSignature(node));
-      const target = isExported(node) ? exports : internals;
-      target.push(sig);
-      return;
-    }
+  function handleFunctionDeclaration(node: ts.Node): boolean {
+    if (!ts.isFunctionDeclaration(node) || !node.name) return false;
+    const sig = cleanSig(getSignature(node));
+    const target = isExported(node) ? exports : internals;
+    target.push(sig);
+    return true;
+  }
 
-    // Variable statements (const with arrow functions, or plain consts)
-    if (ts.isVariableStatement(node)) {
-      const exported = isExported(node);
-      for (const decl of node.declarationList.declarations) {
-        const name = decl.name.getText(sf);
-        const init = decl.initializer;
-        const target = exported ? exports : internals;
+  function handleVariableStatement(node: ts.Node): boolean {
+    if (!ts.isVariableStatement(node)) return false;
+    const exported = isExported(node);
+    for (const decl of node.declarationList.declarations) {
+      const name = decl.name.getText(sf);
+      const init = decl.initializer;
+      const target = exported ? exports : internals;
 
-        if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) {
-          const params = init.parameters.map((p) => p.getText(sf)).join(", ");
-          const ret = init.type ? `: ${init.type.getText(sf)}` : "";
-          target.push(`const ${name} = (${params})${ret}`);
-        } else if (exported) {
-          const typeText = decl.type ? `: ${decl.type.getText(sf)}` : "";
-          exports.push(`const ${name}${typeText}`);
-        }
+      if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) {
+        const params = init.parameters.map((p) => p.getText(sf)).join(", ");
+        const ret = init.type ? `: ${init.type.getText(sf)}` : "";
+        target.push(`const ${name} = (${params})${ret}`);
+      } else if (exported) {
+        const typeText = decl.type ? `: ${decl.type.getText(sf)}` : "";
+        exports.push(`const ${name}${typeText}`);
       }
-      return;
     }
+    return true;
+  }
 
-    // Interfaces
-    if (ts.isInterfaceDeclaration(node)) {
-      const name = node.name.getText(sf);
-      const members = node.members.map((m) => {
-        const memberText = m.getText(sf);
-        return memberText.length > 120 ? memberText.slice(0, 120) + "..." : memberText;
-      });
-      const target = isExported(node) ? types : internals;
-      target.push(`interface ${name} { ${members.join("; ")} }`);
-      return;
-    }
+  function handleInterface(node: ts.Node): boolean {
+    if (!ts.isInterfaceDeclaration(node)) return false;
+    const name = node.name.getText(sf);
+    const members = node.members.map((m) => {
+      const memberText = m.getText(sf);
+      return memberText.length > 120 ? memberText.slice(0, 120) + "..." : memberText;
+    });
+    const target = isExported(node) ? types : internals;
+    target.push(`interface ${name} { ${members.join("; ")} }`);
+    return true;
+  }
 
-    // Type aliases
-    if (ts.isTypeAliasDeclaration(node)) {
-      const text = node.getText(sf);
-      const truncated = text.length > 200 ? text.slice(0, 200) + "..." : text;
-      const target = isExported(node) ? types : internals;
-      target.push(truncated);
-      return;
-    }
+  function handleTypeAlias(node: ts.Node): boolean {
+    if (!ts.isTypeAliasDeclaration(node)) return false;
+    const text = node.getText(sf);
+    const truncated = text.length > 200 ? text.slice(0, 200) + "..." : text;
+    const target = isExported(node) ? types : internals;
+    target.push(truncated);
+    return true;
+  }
 
-    // Classes
-    if (ts.isClassDeclaration(node) && node.name) {
-      const name = node.name.getText(sf);
-      const methods: string[] = [];
-      node.members.forEach((m) => {
-        if (ts.isMethodDeclaration(m) && m.name) {
-          const sig = getSignature(m);
-          methods.push(sig);
-        }
-      });
-      const target = isExported(node) ? exports : internals;
-      target.push(`class ${name} { ${methods.join("; ")} }`);
-      return;
-    }
+  function handleClass(node: ts.Node): boolean {
+    if (!ts.isClassDeclaration(node) || !node.name) return false;
+    const name = node.name.getText(sf);
+    const methods: string[] = [];
+    node.members.forEach((member) => {
+      if (ts.isMethodDeclaration(member) && member.name) {
+        methods.push(getSignature(member));
+      }
+    });
+    const target = isExported(node) ? exports : internals;
+    target.push(`class ${name} { ${methods.join("; ")} }`);
+    return true;
+  }
 
-    // Enum declarations
-    if (ts.isEnumDeclaration(node)) {
-      const name = node.name.getText(sf);
-      const members = node.members.map((m) => m.name.getText(sf)).join(", ");
-      const target = isExported(node) ? types : internals;
-      target.push(`enum ${name} { ${members} }`);
-      return;
-    }
+  function handleEnum(node: ts.Node): boolean {
+    if (!ts.isEnumDeclaration(node)) return false;
+    const name = node.name.getText(sf);
+    const members = node.members.map((m) => m.name.getText(sf)).join(", ");
+    const target = isExported(node) ? types : internals;
+    target.push(`enum ${name} { ${members} }`);
+    return true;
+  }
+
+  function visitNode(node: ts.Node) {
+    if (
+      handleImport(node) ||
+      handleExportDeclaration(node) ||
+      handleFunctionDeclaration(node) ||
+      handleVariableStatement(node) ||
+      handleInterface(node) ||
+      handleTypeAlias(node) ||
+      handleClass(node) ||
+      handleEnum(node)
+    ) return;
 
     ts.forEachChild(node, visitNode);
   }
@@ -125,10 +135,12 @@ export function extractSkeleton(filename: string, content: string): string {
 
   const sections: string[] = [];
   if (imports.length) sections.push(`**Imports:** ${imports.join(", ")}`);
-  if (exports.length) sections.push(`**Exports:**\n${exports.map((e) => `- ${e}`).join("\n")}`);
-  if (types.length) sections.push(`**Types:**\n${types.map((t) => `- ${t}`).join("\n")}`);
-  if (internals.length)
-    sections.push(`**Internal:**\n${internals.map((i) => `- ${i}`).join("\n")}`);
+  if (exports.length) sections.push(["**Exports:**", exports.map((entry) => `- ${entry}`).join("\n")].join("\n"));
+  if (types.length) sections.push(["**Types:**", types.map((entry) => `- ${entry}`).join("\n")].join("\n"));
+  if (internals.length) {
+    const internalList = internals.map((entry) => `- ${entry}`).join("\n");
+    sections.push(["**Internal:**", internalList].join("\n"));
+  }
 
   return sections.join("\n\n") || "(empty file)";
 }

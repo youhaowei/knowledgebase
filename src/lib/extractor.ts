@@ -108,6 +108,16 @@ interface EntityCatalogEntry {
   type: string;
 }
 
+type MutableRecord = Record<string, unknown>;
+
+const VALID_ENTITY_TYPES = new Set([
+  "person",
+  "organization",
+  "project",
+  "technology",
+  "concept",
+]);
+
 function formatEntityCatalog(entities: EntityCatalogEntry[]): string {
   if (entities.length === 0) return "";
   const grouped = new Map<string, string[]>();
@@ -313,75 +323,106 @@ function coerceIndex(value: unknown): number | undefined {
   return undefined;
 }
 
-// Walk the extraction payload and repair type mismatches in-place.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function coerceExtractionShape(data: any): void {
-  if (typeof data !== "object" || data === null) return;
+function isRecord(value: unknown): value is MutableRecord {
+  return typeof value === "object" && value !== null;
+}
 
-  // Entities: coerce or default the type field
-  const validTypes = new Set(["person", "organization", "project", "technology", "concept"]);
-  if (Array.isArray(data.entities)) {
-    for (const entity of data.entities) {
-      if (!entity || typeof entity !== "object") continue;
-      if (!entity.type || !validTypes.has(entity.type)) entity.type = "concept";
-      if (typeof entity.name !== "string") entity.name = String(entity.name ?? "");
-    }
+function coerceEntity(entity: MutableRecord): void {
+  if (!entity.type || !VALID_ENTITY_TYPES.has(String(entity.type))) {
+    entity.type = "concept";
   }
-
-  // Edges: coerce numeric fields, default missing values.
-  // Drop edges whose sourceIndex/targetIndex can't be coerced to a number —
-  // these represent extraction failures the model itself couldn't resolve.
-  if (Array.isArray(data.edges)) {
-    data.edges = data.edges.filter((edge: unknown) => {
-      if (!edge || typeof edge !== "object") return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const e = edge as any;
-      const src = coerceIndex(e.sourceIndex);
-      const tgt = coerceIndex(e.targetIndex);
-      if (src === undefined || tgt === undefined) return false;
-      e.sourceIndex = src;
-      e.targetIndex = tgt;
-      return true;
-    });
-    for (const edge of data.edges) {
-
-      // sentiment must be number in [-1, 1], default 0
-      const sentiment = coerceSentiment(edge.sentiment);
-      edge.sentiment = sentiment ?? 0;
-
-      // confidence must be number in [0, 1], default 1
-      const confidence = coerceConfidence(edge.confidence);
-      edge.confidence = confidence ?? 1;
-
-      // relationType must be string
-      if (typeof edge.relationType !== "string") {
-        edge.relationType = String(edge.relationType ?? "relatesTo");
-      }
-
-      // fact must be string
-      if (typeof edge.fact !== "string") {
-        edge.fact = String(edge.fact ?? "");
-      }
-
-      // confidenceReason must be string if present
-      if (edge.confidenceReason !== undefined && typeof edge.confidenceReason !== "string") {
-        edge.confidenceReason = String(edge.confidenceReason);
-      }
-    }
+  if (typeof entity.name !== "string") {
+    entity.name = String(entity.name ?? "");
   }
 }
 
-function parseJsonFromText(text: string): unknown | null {
-  // Try direct parse
-  try { return JSON.parse(text); } catch {}
-  // Try extracting from markdown code block
-  const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenced) try { return JSON.parse(fenced[1]!); } catch {}
-  // Try finding first { to last }
+function coerceEdge(edge: MutableRecord): boolean {
+  const src = coerceIndex(edge.sourceIndex);
+  const tgt = coerceIndex(edge.targetIndex);
+  if (src === undefined || tgt === undefined) return false;
+
+  edge.sourceIndex = src;
+  edge.targetIndex = tgt;
+  edge.sentiment = coerceSentiment(edge.sentiment) ?? 0;
+  edge.confidence = coerceConfidence(edge.confidence) ?? 1;
+
+  if (typeof edge.relationType !== "string") {
+    edge.relationType = String(edge.relationType ?? "relatesTo");
+  }
+  if (typeof edge.fact !== "string") {
+    edge.fact = String(edge.fact ?? "");
+  }
+  if (edge.confidenceReason !== undefined && typeof edge.confidenceReason !== "string") {
+    edge.confidenceReason = String(edge.confidenceReason);
+  }
+
+  return true;
+}
+
+function coerceEntities(data: MutableRecord): void {
+  if (!Array.isArray(data.entities)) return;
+  for (const entity of data.entities) {
+    if (isRecord(entity)) coerceEntity(entity);
+  }
+}
+
+function coerceEdges(data: MutableRecord): void {
+  if (!Array.isArray(data.edges)) return;
+  data.edges = data.edges.filter((edge) => isRecord(edge) && coerceEdge(edge));
+}
+
+// Walk the extraction payload and repair type mismatches in-place.
+function coerceExtractionShape(data: unknown): void {
+  if (!isRecord(data)) return;
+  coerceEntities(data);
+  coerceEdges(data);
+}
+
+function tryParseJson(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonFence(text: string): string | null {
+  let fenceStart = text.indexOf("```");
+  while (fenceStart !== -1) {
+    const headerEnd = text.indexOf("\n", fenceStart);
+    if (headerEnd === -1) return null;
+
+    const header = text.slice(fenceStart + 3, headerEnd).trim().toLowerCase();
+    const fenceClose = text.indexOf("```", headerEnd + 1);
+    if (fenceClose === -1) return null;
+
+    if (header === "" || header === "json") {
+      return text.slice(headerEnd + 1, fenceClose).trim();
+    }
+    fenceStart = text.indexOf("```", fenceClose + 3);
+  }
+  return null;
+}
+
+function extractJsonObjectSlice(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) try { return JSON.parse(text.slice(start, end + 1)); } catch {}
-  return null;
+  if (start < 0 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+function parseJsonFromText(text: string): unknown | null {
+  return (
+    tryParseJson(text) ??
+    (() => {
+      const fenced = extractJsonFence(text);
+      return fenced ? tryParseJson(fenced) : null;
+    })() ??
+    (() => {
+      const objectSlice = extractJsonObjectSlice(text);
+      return objectSlice ? tryParseJson(objectSlice) : null;
+    })()
+  );
 }
 
 /**

@@ -8,7 +8,9 @@
     "strictNullChecks": true,
     "strict": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@stdui/react": ["./src/types/stdui-react"],
+      "@stdui/react/theme": ["./src/types/stdui-react-theme"]
     }
   },
   "include": ["src/**/*", "vite.config.ts"],

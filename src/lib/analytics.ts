@@ -11,6 +11,7 @@
  */
 
 import { AsyncLocalStorage } from "async_hooks";
+import { createRequire } from "module";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -39,11 +40,12 @@ const IDX_OP = "CREATE INDEX IF NOT EXISTS idx_events_op ON events(operation)";
 // (Vite's Node.js-based SSR can't resolve bun: protocol at module scan time)
 let Database: typeof import("bun:sqlite").Database | null = null;
 let db: import("bun:sqlite").Database | null = null;
+const requireModule = createRequire(import.meta.url);
 
 function loadSqlite() {
   if (Database) return Database;
   try {
-    Database = require("bun:sqlite").Database;
+    Database = requireModule("bun:sqlite").Database;
     return Database;
   } catch {
     return null;

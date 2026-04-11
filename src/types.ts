@@ -21,7 +21,9 @@ export const Entity = z.object({
 
 // Stored entity includes namespace and summary
 export const StoredEntity = Entity.extend({
+  uuid: z.string().optional(),
   namespace: z.string().default("default"),
+  scope: z.enum(["project", "global"]).default("project"),
   summary: z.string().optional(), // LLM-generated summary of what we know about this entity
 });
 

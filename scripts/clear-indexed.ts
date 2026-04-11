@@ -25,8 +25,9 @@ for (const ns of listNamespaceDirs()) {
       continue;
     }
 
-    const { indexedAt: _, ...rest } = frontmatter;
-    writeMemoryFile(file.id, text, { ...rest, indexedAt: undefined } as typeof frontmatter);
+    const updatedFrontmatter = { ...frontmatter };
+    delete updatedFrontmatter.indexedAt;
+    writeMemoryFile(file.id, text, updatedFrontmatter);
     console.error(`[reindex] cleared indexedAt: ${file.name} (${ns})`);
     cleared++;
   }

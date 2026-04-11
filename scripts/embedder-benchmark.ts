@@ -163,123 +163,135 @@ interface QueryResult {
   fallbackTop3: string[];
 }
 
-// ============================================================================
-// Main
-// ============================================================================
+interface AggregateMetrics {
+  r1: number;
+  r5: number;
+  mrr: number;
+}
 
-async function main() {
-  console.log(`Corpus: ${CORPUS.length} docs`);
-  console.log(`Queries: ${QUERIES.length} labeled\n`);
+interface CorpusEmbeddingResult {
+  embeddings: Map<string, number[]>;
+  elapsedMs: number;
+}
 
-  // ------- Embed corpus with both -------
-  console.log("Embedding corpus with Ollama (qwen3-embedding:4b, 2560-dim)...");
-  const ollamaEmbs = new Map<string, number[]>();
-  const ollamaCorpusStart = performance.now();
-  for (const d of CORPUS) {
-    const emb = await embed(d.text);
-    if (emb.length === 0) {
-      console.error(`  FAILED: ${d.id}`);
+function aggregate(ranks: number[]): AggregateMetrics {
+  const r1 = ranks.filter((rank) => rank === 1).length / ranks.length;
+  const r5 = ranks.filter((rank) => rank <= 5).length / ranks.length;
+  const mrr = ranks.reduce((sum, rank) => sum + (rank === Infinity ? 0 : 1 / rank), 0) / ranks.length;
+  return { r1, r5, mrr };
+}
+
+function formatRank(rank: number): string {
+  return rank === Infinity ? "MISS" : `#${rank}`;
+}
+
+function pickWinner(ollamaRank: number, fallbackRank: number): string {
+  if (ollamaRank < fallbackRank) return "Ollama";
+  if (fallbackRank < ollamaRank) return "Fallback";
+  return "tie";
+}
+
+async function embedCorpusWith(
+  label: string,
+  embedFn: (text: string) => Promise<number[]>,
+): Promise<CorpusEmbeddingResult> {
+  console.log(label);
+  const embeddings = new Map<string, number[]>();
+  const startedAt = performance.now();
+
+  for (const doc of CORPUS) {
+    const embedding = await embedFn(doc.text);
+    if (embedding.length === 0) {
+      console.error(`  FAILED: ${doc.id}`);
       continue;
     }
-    ollamaEmbs.set(d.id, emb);
+    embeddings.set(doc.id, embedding);
   }
-  const ollamaCorpusMs = performance.now() - ollamaCorpusStart;
-  console.log(`  ${ollamaEmbs.size}/${CORPUS.length} embedded in ${ollamaCorpusMs.toFixed(0)}ms\n`);
 
-  console.log("Embedding corpus with Fallback (snowflake-arctic-xs, 384-dim)...");
-  const fallbackEmbs = new Map<string, number[]>();
-  const fallbackCorpusStart = performance.now();
-  for (const d of CORPUS) {
-    const emb = await embedFallback(d.text);
-    if (emb.length === 0) {
-      console.error(`  FAILED: ${d.id}`);
-      continue;
-    }
-    fallbackEmbs.set(d.id, emb);
-  }
-  const fallbackCorpusMs = performance.now() - fallbackCorpusStart;
-  console.log(`  ${fallbackEmbs.size}/${CORPUS.length} embedded in ${fallbackCorpusMs.toFixed(0)}ms\n`);
+  return {
+    embeddings,
+    elapsedMs: performance.now() - startedAt,
+  };
+}
 
-  // ------- Run labeled queries -------
+async function evaluateQueries(
+  ollamaEmbs: Map<string, number[]>,
+  fallbackEmbs: Map<string, number[]>,
+): Promise<{ results: QueryResult[]; ollamaQueryTotal: number; fallbackQueryTotal: number }> {
   const results: QueryResult[] = [];
   let ollamaQueryTotal = 0;
   let fallbackQueryTotal = 0;
 
-  for (const lq of QUERIES) {
-    const oStart = performance.now();
-    const oEmb = await embed(lq.query);
-    ollamaQueryTotal += performance.now() - oStart;
+  for (const query of QUERIES) {
+    const ollamaStartedAt = performance.now();
+    const ollamaEmbedding = await embed(query.query);
+    ollamaQueryTotal += performance.now() - ollamaStartedAt;
 
-    const fStart = performance.now();
-    const fEmb = await embedFallback(lq.query);
-    fallbackQueryTotal += performance.now() - fStart;
+    const fallbackStartedAt = performance.now();
+    const fallbackEmbedding = await embedFallback(query.query);
+    fallbackQueryTotal += performance.now() - fallbackStartedAt;
 
-    const oRanked = rankDocs(oEmb, ollamaEmbs);
-    const fRanked = rankDocs(fEmb, fallbackEmbs);
-
-    const targets = [lq.expected, ...(lq.alsoAcceptable ?? [])];
-    const oRank = findRank(oRanked, targets);
-    const fRank = findRank(fRanked, targets);
+    const ollamaRanked = rankDocs(ollamaEmbedding, ollamaEmbs);
+    const fallbackRanked = rankDocs(fallbackEmbedding, fallbackEmbs);
+    const targets = [query.expected, ...(query.alsoAcceptable ?? [])];
 
     results.push({
-      query: lq.query,
-      tests: lq.tests,
-      ollamaRank: oRank,
-      fallbackRank: fRank,
-      ollamaTop3: oRanked.slice(0, 3).map((r) => r.id),
-      fallbackTop3: fRanked.slice(0, 3).map((r) => r.id),
+      query: query.query,
+      tests: query.tests,
+      ollamaRank: findRank(ollamaRanked, targets),
+      fallbackRank: findRank(fallbackRanked, targets),
+      ollamaTop3: ollamaRanked.slice(0, 3).map((result) => result.id),
+      fallbackTop3: fallbackRanked.slice(0, 3).map((result) => result.id),
     });
   }
 
-  // ------- Compute aggregate metrics -------
-  function aggregate(ranks: number[]) {
-    const r1 = ranks.filter((r) => r === 1).length / ranks.length;
-    const r5 = ranks.filter((r) => r <= 5).length / ranks.length;
-    const mrr = ranks.reduce((sum, r) => sum + (r === Infinity ? 0 : 1 / r), 0) / ranks.length;
-    return { r1, r5, mrr };
-  }
+  return { results, ollamaQueryTotal, fallbackQueryTotal };
+}
 
-  const ollamaRanks = results.map((r) => r.ollamaRank);
-  const fallbackRanks = results.map((r) => r.fallbackRank);
-  const oMetrics = aggregate(ollamaRanks);
-  const fMetrics = aggregate(fallbackRanks);
-
-  // ------- Per-query breakdown -------
+function logPerQueryResults(results: QueryResult[]): void {
   console.log("=".repeat(100));
   console.log("Per-query results (rank of expected doc — lower is better)");
   console.log("=".repeat(100));
   console.log();
   console.log("Query".padEnd(55) + "Ollama".padEnd(10) + "Fallback".padEnd(10) + "Winner");
   console.log("-".repeat(100));
-  for (const r of results) {
-    const q = r.query.length > 52 ? r.query.slice(0, 49) + "..." : r.query;
-    const oStr = r.ollamaRank === Infinity ? "MISS" : `#${r.ollamaRank}`;
-    const fStr = r.fallbackRank === Infinity ? "MISS" : `#${r.fallbackRank}`;
-    const winner =
-      r.ollamaRank < r.fallbackRank
-        ? "Ollama"
-        : r.fallbackRank < r.ollamaRank
-          ? "Fallback"
-          : "tie";
-    console.log(q.padEnd(55) + oStr.padEnd(10) + fStr.padEnd(10) + winner);
+
+  for (const result of results) {
+    const queryLabel = result.query.length > 52 ? result.query.slice(0, 49) + "..." : result.query;
+    const ollamaRank = formatRank(result.ollamaRank);
+    const fallbackRank = formatRank(result.fallbackRank);
+    const winner = pickWinner(result.ollamaRank, result.fallbackRank);
+    console.log(queryLabel.padEnd(55) + ollamaRank.padEnd(10) + fallbackRank.padEnd(10) + winner);
   }
   console.log();
+}
 
-  // ------- Failure cases (disagreements) -------
-  const disagreements = results.filter((r) => r.ollamaRank !== r.fallbackRank);
-  if (disagreements.length > 0) {
-    console.log("=".repeat(100));
-    console.log(`Disagreements (${disagreements.length}/${results.length}):`);
-    console.log("=".repeat(100));
-    for (const r of disagreements) {
-      console.log(`\nQuery: "${r.query}"`);
-      console.log(`  Tests: ${r.tests}`);
-      console.log(`  Ollama   rank: ${r.ollamaRank === Infinity ? "MISS" : `#${r.ollamaRank}`}, top-3: ${r.ollamaTop3.join(", ")}`);
-      console.log(`  Fallback rank: ${r.fallbackRank === Infinity ? "MISS" : `#${r.fallbackRank}`}, top-3: ${r.fallbackTop3.join(", ")}`);
-    }
+function logDisagreements(results: QueryResult[]): void {
+  const disagreements = results.filter((result) => result.ollamaRank !== result.fallbackRank);
+  if (disagreements.length === 0) return;
+
+  console.log("=".repeat(100));
+  console.log(`Disagreements (${disagreements.length}/${results.length}):`);
+  console.log("=".repeat(100));
+
+  for (const result of disagreements) {
+    const ollamaRank = formatRank(result.ollamaRank);
+    const fallbackRank = formatRank(result.fallbackRank);
+    console.log(`\nQuery: "${result.query}"`);
+    console.log(`  Tests: ${result.tests}`);
+    console.log(`  Ollama   rank: ${ollamaRank}, top-3: ${result.ollamaTop3.join(", ")}`);
+    console.log(`  Fallback rank: ${fallbackRank}, top-3: ${result.fallbackTop3.join(", ")}`);
   }
+}
 
-  // ------- Summary -------
+function logSummary(
+  oMetrics: AggregateMetrics,
+  fMetrics: AggregateMetrics,
+  ollamaQueryTotal: number,
+  fallbackQueryTotal: number,
+  ollamaCorpusMs: number,
+  fallbackCorpusMs: number,
+): void {
   console.log("\n" + "=".repeat(100));
   console.log("Summary");
   console.log("=".repeat(100));
@@ -302,15 +314,57 @@ async function main() {
   console.log(`  Speedup:  ${(ollamaCorpusMs / fallbackCorpusMs).toFixed(0)}x`);
   console.log();
 
-  // ------- Verdict -------
-  const winner =
-    oMetrics.mrr > fMetrics.mrr + 0.05
-      ? "Ollama"
-      : fMetrics.mrr > oMetrics.mrr + 0.05
-        ? "Fallback"
-        : "tie (within 5% MRR)";
-  console.log(`Quality winner: ${winner}`);
+  let qualityWinner = "tie (within 5% MRR)";
+  if (oMetrics.mrr > fMetrics.mrr + 0.05) qualityWinner = "Ollama";
+  if (fMetrics.mrr > oMetrics.mrr + 0.05) qualityWinner = "Fallback";
+  console.log(`Quality winner: ${qualityWinner}`);
   console.log(`Latency winner: Fallback (${(ollamaQueryTotal / fallbackQueryTotal).toFixed(0)}x faster queries)`);
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+async function main() {
+  console.log(`Corpus: ${CORPUS.length} docs`);
+  console.log(`Queries: ${QUERIES.length} labeled\n`);
+
+  // ------- Embed corpus with both -------
+  const ollamaCorpus = await embedCorpusWith(
+    "Embedding corpus with Ollama (qwen3-embedding:4b, 2560-dim)...",
+    embed,
+  );
+  const ollamaEmbs = ollamaCorpus.embeddings;
+  const ollamaCorpusMs = ollamaCorpus.elapsedMs;
+  console.log(`  ${ollamaEmbs.size}/${CORPUS.length} embedded in ${ollamaCorpusMs.toFixed(0)}ms\n`);
+
+  const fallbackCorpus = await embedCorpusWith(
+    "Embedding corpus with Fallback (snowflake-arctic-xs, 384-dim)...",
+    embedFallback,
+  );
+  const fallbackEmbs = fallbackCorpus.embeddings;
+  const fallbackCorpusMs = fallbackCorpus.elapsedMs;
+  console.log(`  ${fallbackEmbs.size}/${CORPUS.length} embedded in ${fallbackCorpusMs.toFixed(0)}ms\n`);
+
+  // ------- Run labeled queries -------
+  const { results, ollamaQueryTotal, fallbackQueryTotal } = await evaluateQueries(ollamaEmbs, fallbackEmbs);
+
+  // ------- Compute aggregate metrics -------
+  const ollamaRanks = results.map((r) => r.ollamaRank);
+  const fallbackRanks = results.map((r) => r.fallbackRank);
+  const oMetrics = aggregate(ollamaRanks);
+  const fMetrics = aggregate(fallbackRanks);
+
+  logPerQueryResults(results);
+  logDisagreements(results);
+  logSummary(
+    oMetrics,
+    fMetrics,
+    ollamaQueryTotal,
+    fallbackQueryTotal,
+    ollamaCorpusMs,
+    fallbackCorpusMs,
+  );
 }
 
 main().catch((err) => {

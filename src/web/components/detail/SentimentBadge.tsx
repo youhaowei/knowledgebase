@@ -5,10 +5,37 @@ interface SentimentBadgeProps {
   sentiment: number;
 }
 
+function getSentimentDisplay(sentiment: number) {
+  if (sentiment > 0.3) {
+    return {
+      color: "success" as const,
+      Icon: TrendingUp,
+      label: "positive",
+    };
+  }
+  if (sentiment < -0.3) {
+    return {
+      color: "danger" as const,
+      Icon: TrendingDown,
+      label: "negative",
+    };
+  }
+  return {
+    color: "secondary" as const,
+    Icon: Minus,
+    label: "neutral",
+  };
+}
+
+function getConfidenceColor(confidence: number) {
+  const pct = Math.round(confidence * 100);
+  if (pct >= 70) return "primary" as const;
+  if (pct >= 40) return "warning" as const;
+  return "secondary" as const;
+}
+
 export function SentimentBadge({ sentiment }: SentimentBadgeProps) {
-  const color = sentiment > 0.3 ? "success" as const : sentiment < -0.3 ? "danger" as const : "secondary" as const;
-  const Icon = sentiment > 0.3 ? TrendingUp : sentiment < -0.3 ? TrendingDown : Minus;
-  const label = sentiment > 0.3 ? "positive" : sentiment < -0.3 ? "negative" : "neutral";
+  const { color, Icon, label } = getSentimentDisplay(sentiment);
 
   return (
     <Badge variant="soft" color={color} className="text-[10px] gap-0.5">
@@ -24,7 +51,7 @@ interface ConfidenceBadgeProps {
 
 export function ConfidenceBadge({ confidence }: ConfidenceBadgeProps) {
   const pct = Math.round(confidence * 100);
-  const color = pct >= 70 ? "primary" as const : pct >= 40 ? "warning" as const : "secondary" as const;
+  const color = getConfidenceColor(confidence);
 
   return (
     <Badge variant="soft" color={color} className="text-[10px]">

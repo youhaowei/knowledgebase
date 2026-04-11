@@ -7,6 +7,8 @@
  * Interactive: bun run kb (no args or -i)
  */
 
+export {};
+
 // --- Arg parsing (before any imports that trigger Graph init) ---
 
 interface ParsedArgs {

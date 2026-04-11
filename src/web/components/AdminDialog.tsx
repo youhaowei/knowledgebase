@@ -3,13 +3,6 @@ import { RefreshCw, Merge, Activity, Check, X } from "lucide-react";
 import { reextractAll, getReextractStatus, findDuplicateCandidates, mergeDuplicateGroup } from "@/server/functions";
 import type { Stats } from "./types";
 
-interface DuplicateCandidate {
-  keep: { uuid: string; name: string };
-  duplicates: Array<{ uuid: string; name: string }>;
-  normalizedName: string;
-  totalEdges: number;
-}
-
 /** All members of a group with a selectable merge target */
 interface MergeGroup {
   members: Array<{ uuid: string; name: string }>;
@@ -124,6 +117,7 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
     if (!mergeGroups) return;
     setMergeProgress("Merging...");
     let merged = 0;
+    let failed = 0;
     for (const group of mergeGroups) {
       try {
         await mergeDuplicateGroup({
@@ -133,10 +127,14 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
           },
         });
         merged++;
-      } catch { /* continue with next */ }
+      } catch {
+        failed++;
+      }
     }
     setMergeGroups(null);
-    setMergeProgress(`Merged ${merged} groups`);
+    setMergeProgress(
+      failed > 0 ? `Merged ${merged} groups, ${failed} failed` : `Merged ${merged} groups`,
+    );
     onRefresh();
   }, [mergeGroups, onRefresh]);
 

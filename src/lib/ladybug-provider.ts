@@ -28,6 +28,13 @@ import { rrfFuse } from "./search-utils.js";
 import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
 import { normalizeEntityName } from "./entity-matcher.js";
 
+type MutableEntity = Entity & {
+  uuid?: string;
+  namespace?: string;
+  scope?: "project" | "global";
+  summary?: string;
+};
+
 export class LadybugProvider implements GraphProvider {
   private db: Database;
   private conn!: Connection;
@@ -44,7 +51,7 @@ export class LadybugProvider implements GraphProvider {
     } catch (err) {
       if (String(err).includes("wal_record") || String(err).includes("KU_UNREACHABLE")) {
         console.error(`[kb] Corrupted WAL detected, removing ${walPath} and retrying...`);
-        try { unlinkSync(walPath); } catch {}
+        this.removeWalFile(walPath);
         this.db = new Database(this.dataPath);
       } else {
         throw err;
@@ -89,6 +96,16 @@ export class LadybugProvider implements GraphProvider {
 
   private zeroEmbeddingStr(dim: number): string {
     return `[${new Array(dim).fill(0).join(",")}]`;
+  }
+
+  private removeWalFile(walPath: string): void {
+    try {
+      unlinkSync(walPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
   }
 
   /** Get dimension info from registry, throw if unknown */
@@ -403,8 +420,8 @@ export class LadybugProvider implements GraphProvider {
   private async storeEdge(
     edge: ExtractedEdge,
     embeddings: EmbeddingMap,
-    sourceEntity: Entity,
-    targetEntity: Entity,
+    sourceEntity: MutableEntity,
+    targetEntity: MutableEntity,
     memoryId: string,
     memoryNamespace: string,
   ): Promise<void> {
@@ -412,14 +429,10 @@ export class LadybugProvider implements GraphProvider {
     const targetUuid = targetEntity.uuid!;
     const edgeId = randomUUID();
     const now = new Date().toISOString();
-    const sourceEntityWithScope = sourceEntity as Entity & {
-      namespace?: string;
-      scope?: string;
-    };
     const sourceNamespace =
-      sourceEntityWithScope.scope === "global"
+      sourceEntity.scope === "global"
         ? ""
-        : (sourceEntityWithScope.namespace ?? memoryNamespace);
+        : (sourceEntity.namespace ?? memoryNamespace);
 
     const existingEdge = await this.executeQuery(
       `MATCH (source:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(target:Entity {uuid: $targetUuid})
@@ -606,7 +619,7 @@ export class LadybugProvider implements GraphProvider {
       scope: (r.scope as "project" | "global") ?? "project",
       description: (r.description as string) || undefined,
       summary: (r.summary as string) || undefined,
-      namespace: (r.namespace as string) || undefined,
+      namespace: (r.namespace as string) ?? "",
     }));
 
     return { memories, edges, entities };
@@ -779,7 +792,7 @@ export class LadybugProvider implements GraphProvider {
             scope: (entityRows[0].scope as "project" | "global") ?? "project",
             description: (entityRows[0].description as string) || undefined,
             summary: (entityRows[0].summary as string) || undefined,
-            namespace: (entityRows[0].namespace as string) || undefined,
+            namespace: (entityRows[0].namespace as string) ?? "",
           }
         : undefined;
 
@@ -1073,8 +1086,8 @@ export class LadybugProvider implements GraphProvider {
 
     const effectiveLimit = pagination?.limit ?? limit;
     const offset = pagination?.offset ?? 0;
-    const sortCol = pagination?.sortBy === "name" ? "e.name" : "e.name";
-    const sortDir = pagination?.sortDir === "asc" ? "ASC" : "ASC";
+    const sortCol = "e.name";
+    const sortDir = "ASC";
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.conn.query(
@@ -1089,7 +1102,7 @@ export class LadybugProvider implements GraphProvider {
         name: e.name as string,
         type: e.type as StoredEntity["type"],
         description: (e.description as string) || undefined,
-        namespace: (e.namespace as string) || undefined,
+        namespace: (e.namespace as string) ?? "",
         scope: (e.scope as "project" | "global") ?? "project",
         summary: (e.summary as string) || undefined,
       };
@@ -1532,6 +1545,112 @@ export class LadybugProvider implements GraphProvider {
     return (await result.getAll()).map((r) => ({ name: r.name as string, type: r.type as string }));
   }
 
+  private factEmbeddingString(value: unknown): string {
+    return Array.isArray(value)
+      ? `[${(value as number[]).join(",")}]`
+      : this.zeroEmbeddingStr(2560);
+  }
+
+  private mergedRelationParams(row: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: row.id as string,
+      relationType: row.relationType as string,
+      fact: row.fact as string,
+      sentiment: row.sentiment ?? 0,
+      confidence: row.confidence ?? 1,
+      confidenceReason: (row.confidenceReason as string) ?? "",
+      episodes: (row.episodes as string[]) ?? [],
+      validAt: (row.validAt as string) ?? "",
+      invalidAt: (row.invalidAt as string) ?? "",
+      namespace: (row.namespace as string) ?? "",
+      createdAt: (row.createdAt as string) ?? "",
+    };
+  }
+
+  private async copyOutgoingMergeEdges(keepUuid: string, dupeUuid: string): Promise<void> {
+    const outResult = await this.executeQuery(
+      `MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->(t:Entity)
+       RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+              r.sentiment as sentiment, r.confidence as confidence,
+              r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
+              r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
+              r.namespace as namespace, r.createdAt as createdAt,
+              t.uuid as targetUuid`,
+      { dupeUuid },
+    );
+
+    for (const row of await outResult.getAll()) {
+      const targetUuid = row.targetUuid as string;
+      const relationType = row.relationType as string;
+      const exists = await this.executeQuery(
+        `MATCH (s:Entity {uuid: $keepUuid})-[r:RELATES_TO]->(t:Entity {uuid: $targetUuid})
+         WHERE r.relationType = $relationType RETURN r.id`,
+        { keepUuid, targetUuid, relationType },
+      );
+      if ((await exists.getAll()).length > 0) continue;
+
+      const embStr = this.factEmbeddingString(row.factEmbedding);
+      await this.executeQuery(
+        `MATCH (s:Entity {uuid: $keepUuid})
+         MATCH (t:Entity {uuid: $targetUuid})
+         CREATE (s)-[:RELATES_TO {
+           id: $id, relationType: $relationType, fact: $fact,
+           sentiment: $sentiment, confidence: $confidence,
+           confidenceReason: $confidenceReason, factEmbedding: ${embStr},
+           episodes: $episodes, validAt: $validAt,
+           invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
+         }]->(t)`,
+        {
+          keepUuid,
+          targetUuid,
+          ...this.mergedRelationParams(row),
+        },
+      );
+    }
+  }
+
+  private async copyIncomingMergeEdges(keepUuid: string, dupeUuid: string): Promise<void> {
+    const inResult = await this.executeQuery(
+      `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: $dupeUuid})
+       RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+              r.sentiment as sentiment, r.confidence as confidence,
+              r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
+              r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
+              r.namespace as namespace, r.createdAt as createdAt,
+              s.uuid as sourceUuid`,
+      { dupeUuid },
+    );
+
+    for (const row of await inResult.getAll()) {
+      const sourceUuid = row.sourceUuid as string;
+      const relationType = row.relationType as string;
+      const exists = await this.executeQuery(
+        `MATCH (s:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(t:Entity {uuid: $keepUuid})
+         WHERE r.relationType = $relationType RETURN r.id`,
+        { sourceUuid, keepUuid, relationType },
+      );
+      if ((await exists.getAll()).length > 0) continue;
+
+      const embStr = this.factEmbeddingString(row.factEmbedding);
+      await this.executeQuery(
+        `MATCH (s:Entity {uuid: $sourceUuid})
+         MATCH (t:Entity {uuid: $keepUuid})
+         CREATE (s)-[:RELATES_TO {
+           id: $id, relationType: $relationType, fact: $fact,
+           sentiment: $sentiment, confidence: $confidence,
+           confidenceReason: $confidenceReason, factEmbedding: ${embStr},
+           episodes: $episodes, validAt: $validAt,
+           invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
+         }]->(t)`,
+        {
+          sourceUuid,
+          keepUuid,
+          ...this.mergedRelationParams(row),
+        },
+      );
+    }
+  }
+
   async mergeEntities(keepUuid: string, dupeUuids: string[]): Promise<{ removed: number }> {
     let removed = 0;
 
@@ -1546,89 +1665,8 @@ export class LadybugProvider implements GraphProvider {
         { dupeUuid, keepUuid },
       );
 
-      // Re-point outgoing RELATES_TO edges
-      const outResult = await this.executeQuery(
-        `MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->(t:Entity)
-         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
-                r.sentiment as sentiment, r.confidence as confidence,
-                r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
-                r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
-                r.namespace as namespace, r.createdAt as createdAt,
-                t.uuid as targetUuid`,
-        { dupeUuid },
-      );
-      for (const row of await outResult.getAll()) {
-        const exists = await this.executeQuery(
-          `MATCH (s:Entity {uuid: $keepUuid})-[r:RELATES_TO]->(t:Entity {uuid: $targetUuid})
-           WHERE r.relationType = $relationType RETURN r.id`,
-          { keepUuid, targetUuid: row.targetUuid as string, relationType: row.relationType as string },
-        );
-        if ((await exists.getAll()).length === 0) {
-          const embStr = Array.isArray(row.factEmbedding) ? `[${(row.factEmbedding as number[]).join(",")}]` : this.zeroEmbeddingStr(2560);
-          await this.executeQuery(
-            `MATCH (s:Entity {uuid: $keepUuid})
-             MATCH (t:Entity {uuid: $targetUuid})
-             CREATE (s)-[:RELATES_TO {
-               id: $id, relationType: $relationType, fact: $fact,
-               sentiment: $sentiment, confidence: $confidence,
-               confidenceReason: $confidenceReason, factEmbedding: ${embStr},
-               episodes: $episodes, validAt: $validAt,
-               invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
-             }]->(t)`,
-            {
-              keepUuid, targetUuid: row.targetUuid as string,
-              id: row.id as string, relationType: row.relationType as string,
-              fact: row.fact as string, sentiment: row.sentiment ?? 0,
-              confidence: row.confidence ?? 1, confidenceReason: (row.confidenceReason as string) ?? "",
-              episodes: (row.episodes as string[]) ?? [],
-              validAt: (row.validAt as string) ?? "", invalidAt: (row.invalidAt as string) ?? "",
-              namespace: (row.namespace as string) ?? "", createdAt: (row.createdAt as string) ?? "",
-            },
-          );
-        }
-      }
-
-      // Re-point incoming RELATES_TO edges
-      const inResult = await this.executeQuery(
-        `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: $dupeUuid})
-         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
-                r.sentiment as sentiment, r.confidence as confidence,
-                r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
-                r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
-                r.namespace as namespace, r.createdAt as createdAt,
-                s.uuid as sourceUuid`,
-        { dupeUuid },
-      );
-      for (const row of await inResult.getAll()) {
-        const exists = await this.executeQuery(
-          `MATCH (s:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(t:Entity {uuid: $keepUuid})
-           WHERE r.relationType = $relationType RETURN r.id`,
-          { sourceUuid: row.sourceUuid as string, keepUuid, relationType: row.relationType as string },
-        );
-        if ((await exists.getAll()).length === 0) {
-          const embStr = Array.isArray(row.factEmbedding) ? `[${(row.factEmbedding as number[]).join(",")}]` : this.zeroEmbeddingStr(2560);
-          await this.executeQuery(
-            `MATCH (s:Entity {uuid: $sourceUuid})
-             MATCH (t:Entity {uuid: $keepUuid})
-             CREATE (s)-[:RELATES_TO {
-               id: $id, relationType: $relationType, fact: $fact,
-               sentiment: $sentiment, confidence: $confidence,
-               confidenceReason: $confidenceReason, factEmbedding: ${embStr},
-               episodes: $episodes, validAt: $validAt,
-               invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
-             }]->(t)`,
-            {
-              sourceUuid: row.sourceUuid as string, keepUuid,
-              id: row.id as string, relationType: row.relationType as string,
-              fact: row.fact as string, sentiment: row.sentiment ?? 0,
-              confidence: row.confidence ?? 1, confidenceReason: (row.confidenceReason as string) ?? "",
-              episodes: (row.episodes as string[]) ?? [],
-              validAt: (row.validAt as string) ?? "", invalidAt: (row.invalidAt as string) ?? "",
-              namespace: (row.namespace as string) ?? "", createdAt: (row.createdAt as string) ?? "",
-            },
-          );
-        }
-      }
+      await this.copyOutgoingMergeEdges(keepUuid, dupeUuid);
+      await this.copyIncomingMergeEdges(keepUuid, dupeUuid);
 
       // Delete old edges and soft-delete duplicate
       await this.executeQuery(`MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->() DELETE r`, { dupeUuid });

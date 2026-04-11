@@ -6,7 +6,7 @@
  */
 
 import { AutoProcessor, AutoModelForCausalLM, type Tensor } from "@huggingface/transformers";
-import { extractionPrompt } from "../src/lib/extractor.ts";
+import { extractionPrompt, parseJsonFromText } from "../src/lib/extractor.ts";
 
 const MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
 
@@ -14,6 +14,15 @@ const MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
 const TEST_TEXT = `[workflow-friction/major] Eager execution: acting before confirming user intent
 
 Multiple sessions show Claude starting implementation when the user only wanted planning, discussion, or Notion task creation. Examples: 154513dd (started spike when user wanted Notion tasks), 6d1da3ef (started implementing migration when user wanted it saved as task), c81da441 (plan diverged from user's approach). CLAUDE.md already says 'Ask first' but the pattern persists specifically around concrete-sounding requests.`;
+
+function logParsedEdges(parsed: { entities?: unknown[]; edges?: unknown[] }): void {
+  console.log(`[test] parsed: ${parsed.entities?.length ?? 0} entities, ${parsed.edges?.length ?? 0} edges`);
+  if (!parsed.edges || !Array.isArray(parsed.edges)) return;
+
+  for (const edge of parsed.edges as Array<{ fact?: string }>) {
+    console.log(`  - ${edge.fact}`);
+  }
+}
 
 async function main() {
   console.error(`[test] loading ${MODEL_ID}...`);
@@ -53,37 +62,14 @@ async function main() {
   console.log(responseText);
   console.log("=== End ===\n");
 
-  // Try to parse as JSON
-  let parsed: { entities?: unknown[]; edges?: unknown[] } | null = null;
-  try {
-    parsed = JSON.parse(responseText);
-  } catch {
-    // Try fenced
-    const fenced = responseText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (fenced) {
-      try { parsed = JSON.parse(fenced[1]!); } catch {}
-    }
-    // Try braces
-    if (!parsed) {
-      const start = responseText.indexOf("{");
-      const end = responseText.lastIndexOf("}");
-      if (start >= 0 && end > start) {
-        try { parsed = JSON.parse(responseText.slice(start, end + 1)); } catch {}
-      }
-    }
-  }
+  const parsed = parseJsonFromText(responseText) as { entities?: unknown[]; edges?: unknown[] } | null;
 
   if (!parsed) {
     console.error("[test] FAILED to parse JSON");
     process.exit(1);
   }
 
-  console.log(`[test] parsed: ${parsed.entities?.length ?? 0} entities, ${parsed.edges?.length ?? 0} edges`);
-  if (parsed.edges && Array.isArray(parsed.edges)) {
-    for (const e of parsed.edges as Array<{ fact?: string }>) {
-      console.log(`  - ${e.fact}`);
-    }
-  }
+  logParsedEdges(parsed);
 }
 
 main().catch((err) => {

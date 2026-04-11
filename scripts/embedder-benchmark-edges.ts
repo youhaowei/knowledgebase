@@ -47,6 +47,22 @@ interface LabeledQuery {
   tests: string;
 }
 
+interface QueryOutcome {
+  query: string;
+  tests: string;
+  oRank: number;
+  fRank: number;
+  oHit?: { findingId: number; fact: string };
+  fHit?: { findingId: number; fact: string };
+}
+
+interface AggregateMetrics {
+  r1: number;
+  r5: number;
+  r10: number;
+  mrr: number;
+}
+
 // ============================================================================
 // Phase 1: load + extract
 // ============================================================================
@@ -130,6 +146,170 @@ async function extractEdgesFromCorpus(
   await Bun.write(cacheFile, JSON.stringify(edges, null, 2));
   console.error(`[edges] cached to ${cacheFile}`);
   return edges;
+}
+
+function formatRank(rank: number): string {
+  return rank === Infinity ? "MISS" : `#${rank}`;
+}
+
+function pickWinner(ollamaRank: number, fallbackRank: number): string {
+  if (ollamaRank < fallbackRank) return "Ollama";
+  if (fallbackRank < ollamaRank) return "Built-in";
+  return "tie";
+}
+
+function aggregate(ranks: number[]): AggregateMetrics {
+  const r1 = ranks.filter((rank) => rank === 1).length / ranks.length;
+  const r5 = ranks.filter((rank) => rank <= 5).length / ranks.length;
+  const r10 = ranks.filter((rank) => rank <= 10).length / ranks.length;
+  const mrr = ranks.reduce((sum, rank) => sum + (rank === Infinity ? 0 : 1 / rank), 0) / ranks.length;
+  return { r1, r5, r10, mrr };
+}
+
+function logMissingQueries(sample: RetroFinding[]): void {
+  const sampleIds = new Set(sample.map((finding) => finding.id));
+  const missingQueries = QUERIES.filter((query) => query.expectedFindingId > 0 && !sampleIds.has(query.expectedFindingId));
+  if (missingQueries.length === 0) return;
+
+  console.error(`WARN: ${missingQueries.length}/${QUERIES.length} queries reference findings not in sample:`);
+  for (const query of missingQueries) {
+    console.error(`  "${query.query}" expects #${query.expectedFindingId}`);
+  }
+  console.error("");
+}
+
+function logSampleEdges(edges: ExtractedEdge[]): void {
+  console.error(`\n[edges] sample fact lengths: ${edges.slice(0, 5).map((edge) => edge.fact.length).join(", ")}... (chars)`);
+  console.error("[edges] sample facts:");
+  for (const edge of edges.slice(0, 3)) {
+    console.error(`  ${edge.edgeId} [${edge.relationType}] ${edge.fact}`);
+  }
+}
+
+async function embedEdgeFacts(
+  label: string,
+  edges: ExtractedEdge[],
+  embedFn: (text: string) => Promise<number[]>,
+): Promise<{ embeddings: Map<string, number[]>; elapsedMs: number }> {
+  console.error(label);
+  const embeddings = new Map<string, number[]>();
+  const startedAt = performance.now();
+  for (const edge of edges) {
+    const embedding = await embedFn(edge.fact);
+    if (embedding.length > 0) embeddings.set(edge.edgeId, embedding);
+  }
+  return {
+    embeddings,
+    elapsedMs: performance.now() - startedAt,
+  };
+}
+
+async function evaluateQueries(
+  edges: ExtractedEdge[],
+  ollamaEmbs: Map<string, number[]>,
+  fallbackEmbs: Map<string, number[]>,
+): Promise<{ results: QueryOutcome[]; oQueryTotal: number; fQueryTotal: number }> {
+  let oQueryTotal = 0;
+  let fQueryTotal = 0;
+  const results: QueryOutcome[] = [];
+
+  for (const query of QUERIES) {
+    const ollamaStartedAt = performance.now();
+    const ollamaEmbedding = await embed(query.query);
+    oQueryTotal += performance.now() - ollamaStartedAt;
+
+    const fallbackStartedAt = performance.now();
+    const fallbackEmbedding = await embedFallback(query.query);
+    fQueryTotal += performance.now() - fallbackStartedAt;
+
+    const ollamaRanked = rankEdges(ollamaEmbedding, ollamaEmbs, edges);
+    const fallbackRanked = rankEdges(fallbackEmbedding, fallbackEmbs, edges);
+    const ollamaHit = isHit(ollamaRanked, query, 50);
+    const fallbackHit = isHit(fallbackRanked, query, 50);
+
+    results.push({
+      query: query.query,
+      tests: query.tests,
+      oRank: ollamaHit.hitRank,
+      fRank: fallbackHit.hitRank,
+      oHit: ollamaHit.hitEdge,
+      fHit: fallbackHit.hitEdge,
+    });
+  }
+
+  return { results, oQueryTotal, fQueryTotal };
+}
+
+function logPerQueryResults(results: QueryOutcome[]): void {
+  console.log("\n" + "=".repeat(110));
+  console.log("Per-query results (rank of first matching edge — lower is better)");
+  console.log("=".repeat(110));
+  console.log("\nQuery".padEnd(60) + "Built-in".padEnd(11) + "Ollama".padEnd(11) + "Winner");
+  console.log("-".repeat(110));
+  for (const result of results) {
+    const queryLabel = result.query.length > 56 ? result.query.slice(0, 53) + "..." : result.query;
+    const ollamaRank = formatRank(result.oRank);
+    const fallbackRank = formatRank(result.fRank);
+    const winner = pickWinner(result.oRank, result.fRank);
+    console.log(queryLabel.padEnd(60) + fallbackRank.padEnd(11) + ollamaRank.padEnd(11) + winner);
+  }
+}
+
+function logDisagreements(results: QueryOutcome[]): void {
+  const disagreements = results.filter((result) => result.oRank !== result.fRank);
+  if (disagreements.length === 0) return;
+
+  console.log("\n" + "=".repeat(110));
+  console.log(`Disagreements (${disagreements.length}/${results.length}):`);
+  console.log("=".repeat(110));
+  for (const result of disagreements) {
+    const builtInFact = result.fHit ? ` [${result.fHit.fact.slice(0, 70)}]` : "";
+    const ollamaFact = result.oHit ? ` [${result.oHit.fact.slice(0, 70)}]` : "";
+    console.log(`\nQuery: "${result.query}"`);
+    console.log(`  Tests: ${result.tests}`);
+    console.log(`  Built-in rank: ${formatRank(result.fRank)}${builtInFact}`);
+    console.log(`  Ollama   rank: ${formatRank(result.oRank)}${ollamaFact}`);
+  }
+}
+
+function logSummary(
+  edges: ExtractedEdge[],
+  sample: RetroFinding[],
+  results: QueryOutcome[],
+  fMetrics: AggregateMetrics,
+  oMetrics: AggregateMetrics,
+  fQueryTotal: number,
+  oQueryTotal: number,
+  fCorpusMs: number,
+  oCorpusMs: number,
+): void {
+  console.log("\n" + "=".repeat(110));
+  console.log("Summary — Edge-Fact Retrieval Benchmark");
+  console.log("=".repeat(110));
+  console.log(`\nCorpus:  ${edges.length} extracted edge facts from ${sample.length} retro findings`);
+  console.log(`Queries: ${QUERIES.length} labeled\n`);
+  console.log("Metric        Built-in   Ollama     Delta");
+  console.log("-".repeat(50));
+  console.log(`Recall@1      ${(fMetrics.r1 * 100).toFixed(0).padStart(3)}%       ${(oMetrics.r1 * 100).toFixed(0).padStart(3)}%       ${((oMetrics.r1 - fMetrics.r1) * 100).toFixed(0)}pp`);
+  console.log(`Recall@5      ${(fMetrics.r5 * 100).toFixed(0).padStart(3)}%       ${(oMetrics.r5 * 100).toFixed(0).padStart(3)}%       ${((oMetrics.r5 - fMetrics.r5) * 100).toFixed(0)}pp`);
+  console.log(`Recall@10     ${(fMetrics.r10 * 100).toFixed(0).padStart(3)}%       ${(oMetrics.r10 * 100).toFixed(0).padStart(3)}%       ${((oMetrics.r10 - fMetrics.r10) * 100).toFixed(0)}pp`);
+  console.log(`MRR           ${fMetrics.mrr.toFixed(3)}     ${oMetrics.mrr.toFixed(3)}     ${(oMetrics.mrr - fMetrics.mrr).toFixed(3)}`);
+  console.log();
+  console.log("Latency per query:");
+  console.log(`  Built-in: ${(fQueryTotal / QUERIES.length).toFixed(1)}ms avg`);
+  console.log(`  Ollama:   ${(oQueryTotal / QUERIES.length).toFixed(0)}ms avg`);
+  console.log(`  Speedup:  ${(oQueryTotal / fQueryTotal).toFixed(0)}x`);
+  console.log();
+  console.log("Corpus embed time:");
+  console.log(`  Built-in: ${fCorpusMs.toFixed(0)}ms (${edges.length} edges, avg ${(fCorpusMs / edges.length).toFixed(1)}ms)`);
+  console.log(`  Ollama:   ${oCorpusMs.toFixed(0)}ms (${edges.length} edges, avg ${(oCorpusMs / edges.length).toFixed(0)}ms)`);
+  console.log(`  Speedup:  ${(oCorpusMs / fCorpusMs).toFixed(0)}x`);
+  console.log();
+
+  let verdict = "Built-in is good enough — complementary Ollama not justified for edge facts";
+  if (oMetrics.mrr - fMetrics.mrr > 0.05) verdict = "Ollama is meaningfully better — complementary embedder earns its keep";
+  if (fMetrics.mrr - oMetrics.mrr > 0.05) verdict = "Built-in is meaningfully better — complementary not needed";
+  console.log(`Verdict: ${verdict}`);
 }
 
 // ============================================================================
@@ -234,15 +414,7 @@ async function main() {
   console.error(`Sampled ${sample.length} of ${all.length} findings (most recent by id)\n`);
 
   // Verify queries point to findings in the sample
-  const sampleIds = new Set(sample.map((f) => f.id));
-  const missingQueries = QUERIES.filter((q) => q.expectedFindingId > 0 && !sampleIds.has(q.expectedFindingId));
-  if (missingQueries.length > 0) {
-    console.error(`WARN: ${missingQueries.length}/${QUERIES.length} queries reference findings not in sample:`);
-    for (const q of missingQueries) {
-      console.error(`  "${q.query}" expects #${q.expectedFindingId}`);
-    }
-    console.error("");
-  }
+  logMissingQueries(sample);
 
   // ------- Extract edges -------
   const edges = await extractEdgesFromCorpus(sample, CACHE_FILE);
@@ -250,135 +422,35 @@ async function main() {
     console.error("No edges extracted, aborting");
     process.exit(1);
   }
-  console.error(`\n[edges] sample fact lengths: ${edges.slice(0, 5).map((e) => e.fact.length).join(", ")}... (chars)`);
-  console.error(`[edges] sample facts:`);
-  for (const e of edges.slice(0, 3)) {
-    console.error(`  ${e.edgeId} [${e.relationType}] ${e.fact}`);
-  }
+  logSampleEdges(edges);
 
   // ------- Embed all edges with both -------
-  console.error(`\nEmbedding ${edges.length} edges with Ollama (qwen3-embedding:4b, 2560-dim)...`);
-  const ollamaEmbs = new Map<string, number[]>();
-  const oStart = performance.now();
-  for (const e of edges) {
-    const emb = await embed(e.fact);
-    if (emb.length > 0) ollamaEmbs.set(e.edgeId, emb);
-  }
-  const oCorpusMs = performance.now() - oStart;
+  const ollamaCorpus = await embedEdgeFacts(
+    `\nEmbedding ${edges.length} edges with Ollama (qwen3-embedding:4b, 2560-dim)...`,
+    edges,
+    embed,
+  );
+  const ollamaEmbs = ollamaCorpus.embeddings;
+  const oCorpusMs = ollamaCorpus.elapsedMs;
   console.error(`  ${ollamaEmbs.size}/${edges.length} embedded in ${oCorpusMs.toFixed(0)}ms (avg ${(oCorpusMs / edges.length).toFixed(0)}ms)`);
 
-  console.error(`Embedding ${edges.length} edges with Fallback (snowflake-arctic-xs, 384-dim)...`);
-  const fallbackEmbs = new Map<string, number[]>();
-  const fStart = performance.now();
-  for (const e of edges) {
-    const emb = await embedFallback(e.fact);
-    if (emb.length > 0) fallbackEmbs.set(e.edgeId, emb);
-  }
-  const fCorpusMs = performance.now() - fStart;
+  const fallbackCorpus = await embedEdgeFacts(
+    `Embedding ${edges.length} edges with Fallback (snowflake-arctic-xs, 384-dim)...`,
+    edges,
+    embedFallback,
+  );
+  const fallbackEmbs = fallbackCorpus.embeddings;
+  const fCorpusMs = fallbackCorpus.elapsedMs;
   console.error(`  ${fallbackEmbs.size}/${edges.length} embedded in ${fCorpusMs.toFixed(0)}ms (avg ${(fCorpusMs / edges.length).toFixed(1)}ms)`);
 
   // ------- Run queries -------
-  let oQueryTotal = 0, fQueryTotal = 0;
-  const results: Array<{
-    query: string; tests: string;
-    oRank: number; fRank: number;
-    oHit?: { findingId: number; fact: string };
-    fHit?: { findingId: number; fact: string };
-  }> = [];
+  const { results, oQueryTotal, fQueryTotal } = await evaluateQueries(edges, ollamaEmbs, fallbackEmbs);
+  const oM = aggregate(results.map((result) => result.oRank));
+  const fM = aggregate(results.map((result) => result.fRank));
 
-  for (const q of QUERIES) {
-    const oqs = performance.now();
-    const oQEmb = await embed(q.query);
-    oQueryTotal += performance.now() - oqs;
-    const fqs = performance.now();
-    const fQEmb = await embedFallback(q.query);
-    fQueryTotal += performance.now() - fqs;
-
-    const oRanked = rankEdges(oQEmb, ollamaEmbs, edges);
-    const fRanked = rankEdges(fQEmb, fallbackEmbs, edges);
-    // Check at top-50 since multi-edge findings give multiple chances
-    const oHit = isHit(oRanked, q, 50);
-    const fHit = isHit(fRanked, q, 50);
-    results.push({
-      query: q.query, tests: q.tests,
-      oRank: oHit.hitRank, fRank: fHit.hitRank,
-      oHit: oHit.hitEdge, fHit: fHit.hitEdge,
-    });
-  }
-
-  // ------- Aggregate -------
-  function agg(ranks: number[]) {
-    const r1 = ranks.filter((r) => r === 1).length / ranks.length;
-    const r5 = ranks.filter((r) => r <= 5).length / ranks.length;
-    const r10 = ranks.filter((r) => r <= 10).length / ranks.length;
-    const mrr = ranks.reduce((s, r) => s + (r === Infinity ? 0 : 1 / r), 0) / ranks.length;
-    return { r1, r5, r10, mrr };
-  }
-  const oM = agg(results.map((r) => r.oRank));
-  const fM = agg(results.map((r) => r.fRank));
-
-  // ------- Per-query report -------
-  console.log("\n" + "=".repeat(110));
-  console.log("Per-query results (rank of first matching edge — lower is better)");
-  console.log("=".repeat(110));
-  console.log("\nQuery".padEnd(60) + "Built-in".padEnd(11) + "Ollama".padEnd(11) + "Winner");
-  console.log("-".repeat(110));
-  for (const r of results) {
-    const q = r.query.length > 56 ? r.query.slice(0, 53) + "..." : r.query;
-    const oStr = r.oRank === Infinity ? "MISS" : `#${r.oRank}`;
-    const fStr = r.fRank === Infinity ? "MISS" : `#${r.fRank}`;
-    const winner =
-      r.oRank < r.fRank ? "Ollama"
-      : r.fRank < r.oRank ? "Built-in"
-      : "tie";
-    console.log(q.padEnd(60) + fStr.padEnd(11) + oStr.padEnd(11) + winner);
-  }
-
-  // ------- Disagreements -------
-  const disagreements = results.filter((r) => r.oRank !== r.fRank);
-  if (disagreements.length > 0) {
-    console.log("\n" + "=".repeat(110));
-    console.log(`Disagreements (${disagreements.length}/${results.length}):`);
-    console.log("=".repeat(110));
-    for (const r of disagreements) {
-      console.log(`\nQuery: "${r.query}"`);
-      console.log(`  Tests: ${r.tests}`);
-      const oFact = r.oHit ? ` [${r.oHit.fact.slice(0, 70)}]` : "";
-      const fFact = r.fHit ? ` [${r.fHit.fact.slice(0, 70)}]` : "";
-      console.log(`  Built-in rank: ${r.fRank === Infinity ? "MISS" : `#${r.fRank}`}${fFact}`);
-      console.log(`  Ollama   rank: ${r.oRank === Infinity ? "MISS" : `#${r.oRank}`}${oFact}`);
-    }
-  }
-
-  // ------- Summary -------
-  console.log("\n" + "=".repeat(110));
-  console.log("Summary — Edge-Fact Retrieval Benchmark");
-  console.log("=".repeat(110));
-  console.log(`\nCorpus:  ${edges.length} extracted edge facts from ${sample.length} retro findings`);
-  console.log(`Queries: ${QUERIES.length} labeled\n`);
-  console.log("Metric        Built-in   Ollama     Delta");
-  console.log("-".repeat(50));
-  console.log(`Recall@1      ${(fM.r1 * 100).toFixed(0).padStart(3)}%       ${(oM.r1 * 100).toFixed(0).padStart(3)}%       ${((oM.r1 - fM.r1) * 100).toFixed(0)}pp`);
-  console.log(`Recall@5      ${(fM.r5 * 100).toFixed(0).padStart(3)}%       ${(oM.r5 * 100).toFixed(0).padStart(3)}%       ${((oM.r5 - fM.r5) * 100).toFixed(0)}pp`);
-  console.log(`Recall@10     ${(fM.r10 * 100).toFixed(0).padStart(3)}%       ${(oM.r10 * 100).toFixed(0).padStart(3)}%       ${((oM.r10 - fM.r10) * 100).toFixed(0)}pp`);
-  console.log(`MRR           ${fM.mrr.toFixed(3)}     ${oM.mrr.toFixed(3)}     ${(oM.mrr - fM.mrr).toFixed(3)}`);
-  console.log();
-  console.log("Latency per query:");
-  console.log(`  Built-in: ${(fQueryTotal / QUERIES.length).toFixed(1)}ms avg`);
-  console.log(`  Ollama:   ${(oQueryTotal / QUERIES.length).toFixed(0)}ms avg`);
-  console.log(`  Speedup:  ${(oQueryTotal / fQueryTotal).toFixed(0)}x`);
-  console.log();
-  console.log("Corpus embed time:");
-  console.log(`  Built-in: ${fCorpusMs.toFixed(0)}ms (${edges.length} edges, avg ${(fCorpusMs / edges.length).toFixed(1)}ms)`);
-  console.log(`  Ollama:   ${oCorpusMs.toFixed(0)}ms (${edges.length} edges, avg ${(oCorpusMs / edges.length).toFixed(0)}ms)`);
-  console.log(`  Speedup:  ${(oCorpusMs / fCorpusMs).toFixed(0)}x`);
-  console.log();
-
-  const verdict =
-    oM.mrr - fM.mrr > 0.05 ? "Ollama is meaningfully better — complementary embedder earns its keep"
-    : fM.mrr - oM.mrr > 0.05 ? "Built-in is meaningfully better — complementary not needed"
-    : "Built-in is good enough — complementary Ollama not justified for edge facts";
-  console.log(`Verdict: ${verdict}`);
+  logPerQueryResults(results);
+  logDisagreements(results);
+  logSummary(edges, sample, results, fM, oM, fQueryTotal, oQueryTotal, fCorpusMs, oCorpusMs);
 }
 
 main().catch((err) => {

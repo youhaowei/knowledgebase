@@ -35,10 +35,6 @@ function createTestProvider(): GraphProvider {
   return new LadybugProvider("./.test-ladybug");
 }
 
-function isLadybugMode(): boolean {
-  return !process.env.NEO4J_URI;
-}
-
 describe("GraphProvider", () => {
   let provider: GraphProvider;
   let testNamespace: string;

@@ -103,12 +103,12 @@ function SentimentBadge({ sentiment }: { sentiment: number }) {
 
 function ConfidenceBadge({ confidence }: { confidence: number }) {
   const pct = Math.round(confidence * 100);
-  const color =
-    confidence > 0.7
-      ? "text-glow-cyan bg-glow-cyan-dim"
-      : confidence > 0.4
-        ? "text-glow-amber bg-glow-amber/20"
-        : "text-text-tertiary bg-surface";
+  let color = "text-text-tertiary bg-surface";
+  if (confidence > 0.7) {
+    color = "text-glow-cyan bg-glow-cyan-dim";
+  } else if (confidence > 0.4) {
+    color = "text-glow-amber bg-glow-amber/20";
+  }
 
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${color}`}>

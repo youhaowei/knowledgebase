@@ -14,7 +14,7 @@
 
 import { spawn } from "bun";
 import { AutoProcessor, AutoModelForCausalLM, type Tensor } from "@huggingface/transformers";
-import { extractionPrompt } from "../src/lib/extractor.ts";
+import { extractionPrompt, parseJsonFromText } from "../src/lib/extractor.ts";
 import { Extraction } from "../src/types.ts";
 
 const MODEL_ID = "onnx-community/gemma-4-E4B-it-ONNX";
@@ -75,32 +75,26 @@ function lowercaseKeys(value: unknown): unknown {
   return value;
 }
 
-function parseJsonFromText(text: string): Record<string, unknown> | null {
-  const tryParse = (s: string): Record<string, unknown> | null => {
-    try {
-      const parsed = JSON.parse(s);
-      const lowered = lowercaseKeys(parsed);
-      if (typeof lowered === "object" && lowered !== null) return lowered as Record<string, unknown>;
-    } catch {}
+function parseLowercaseJsonFromText(text: string): Record<string, unknown> | null {
+  const parsed = parseJsonFromText(text);
+  const lowered = lowercaseKeys(parsed);
+  return typeof lowered === "object" && lowered !== null
+    ? lowered as Record<string, unknown>
+    : null;
+}
+
+async function loadCachedEdges(): Promise<ExtractedEdge[] | null> {
+  const file = Bun.file(CACHE_FILE);
+  if (!(await file.exists())) return null;
+
+  try {
+    const cached = await file.json();
+    return Array.isArray(cached) ? (cached as ExtractedEdge[]) : null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[tjs] ignoring unreadable cache ${CACHE_FILE}: ${message}`);
     return null;
-  };
-
-  let result = tryParse(text);
-  if (result) return result;
-
-  const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenced) {
-    result = tryParse(fenced[1]!);
-    if (result) return result;
   }
-
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    result = tryParse(text.slice(start, end + 1));
-    if (result) return result;
-  }
-  return null;
 }
 
 interface LoadedModel {
@@ -142,7 +136,7 @@ async function extractOne(
   const decoded = loaded.processor.batch_decode(newTokenSlice, { skip_special_tokens: true });
   const responseText = decoded[0] as string;
 
-  const parsed = parseJsonFromText(responseText);
+  const parsed = parseLowercaseJsonFromText(responseText);
   if (!parsed) {
     throw new Error(`Could not parse JSON from response: ${responseText.slice(0, 200)}`);
   }
@@ -168,14 +162,11 @@ async function extractOne(
 }
 
 async function main() {
-  // Cache hit?
-  try {
-    const cached = await Bun.file(CACHE_FILE).json();
-    if (Array.isArray(cached) && cached.length > 0) {
-      console.error(`[tjs] cache hit: ${cached.length} edges in ${CACHE_FILE}, skipping`);
-      process.exit(0);
-    }
-  } catch {}
+  const cached = await loadCachedEdges();
+  if (cached && cached.length > 0) {
+    console.error(`[tjs] cache hit: ${cached.length} edges in ${CACHE_FILE}, skipping`);
+    process.exit(0);
+  }
 
   const loaded = await loadModel();
   const all = await loadCorpus();

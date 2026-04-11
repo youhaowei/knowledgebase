@@ -8,40 +8,56 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react";
+import type { ThemeMode } from "@stdui/react/theme";
 
 interface ThemeProviderProps {
   children: ReactNode;
 }
 
+interface WrappedProviderProps {
+  children?: ReactNode;
+}
+
+interface ThemeProviderComponentProps extends WrappedProviderProps {
+  defaultMode?: ThemeMode;
+  storageKey?: string;
+}
+
+function createWrappedProvider(
+  StduiProvider: React.ComponentType<ThemeProviderComponentProps>,
+  ThemeInit: React.ComponentType,
+) {
+  return function WrappedProvider({ children }: WrappedProviderProps) {
+    return (
+      <StduiProvider defaultMode="dark" storageKey="kb">
+        <ThemeInit />
+        {children}
+      </StduiProvider>
+    );
+  };
+}
+
 export function ThemeProvider({ children }: ThemeProviderProps) {
-  const [Provider, setProvider] = useState<React.ComponentType<{
-    defaultMode: string;
-    storageKey: string;
-    children: ReactNode;
-  }> | null>(null);
+  const [providerState, setProviderState] = useState<{
+    Provider: React.ComponentType<ThemeProviderComponentProps>;
+  } | null>(null);
 
   useEffect(() => {
     Promise.all([
       import("@stdui/react/theme"),
       import("./ThemeInit"),
     ]).then(([{ StduiProvider }, { ThemeInit }]) => {
-      // Wrap children with both provider and theme init
-      setProvider(() => {
-        return function WrappedProvider({ children: c }: { children: ReactNode }) {
-          return (
-            <StduiProvider defaultMode="dark" storageKey="kb">
-              <ThemeInit />
-              {c}
-            </StduiProvider>
-          );
-        };
+      setProviderState({
+        Provider: createWrappedProvider(StduiProvider, ThemeInit),
       });
     });
   }, []);
 
   // During SSR and before hydration, render children without theme provider
   // stdui components still work — they just use default tokens until the provider loads
-  if (!Provider) return <>{children}</>;
+  if (!providerState) return <>{children}</>;
+
+  const { Provider } = providerState;
 
   return (
     <Provider defaultMode="dark" storageKey="kb">

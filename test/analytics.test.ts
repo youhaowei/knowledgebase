@@ -20,12 +20,22 @@ beforeEach(() => {
   setAnalyticsPath(testDbPath);
 });
 
+function safeUnlink(path: string) {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
 afterEach(() => {
   closeAnalytics();
   resetAnalyticsPath();
   // Clean up temp DB + WAL/SHM siblings
   for (const suffix of ["", "-wal", "-shm"]) {
-    try { unlinkSync(testDbPath + suffix); } catch {}
+    safeUnlink(testDbPath + suffix);
   }
 });
 

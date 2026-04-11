@@ -5,7 +5,7 @@
  */
 
 import { spawn } from "bun";
-import { extract, extractionPrompt } from "../src/lib/extractor.ts";
+import { extract, extractionPrompt, parseJsonFromText } from "../src/lib/extractor.ts";
 import { Extraction } from "../src/types.ts";
 
 const MODEL = process.env.EXTRACTION_MODEL ?? "gemma4:e4b";
@@ -20,24 +20,38 @@ interface RetroFinding {
   proposed_fix: string | null;
 }
 
+type ParsedExtraction = {
+  entities?: Array<{ name?: string; type?: string }>;
+};
+
+const VALID_ENTITY_TYPES = new Set([
+  "person",
+  "organization",
+  "project",
+  "technology",
+  "concept",
+]);
+
 function findingText(f: RetroFinding): string {
   const parts = [`[${f.category}/${f.severity}] ${f.title}`, f.description];
   if (f.proposed_fix) parts.push(`Fix: ${f.proposed_fix}`);
   return parts.join("\n\n");
 }
 
-async function main() {
-  console.error(`[debug] model=${MODEL} finding=#${FINDING_ID}`);
+async function loadFinding(): Promise<RetroFinding> {
   const proc = spawn({ cmd: ["retro", "list"], stdout: "pipe", stderr: "pipe" });
   const all: RetroFinding[] = JSON.parse(await new Response(proc.stdout).text());
   await proc.exited;
-  const finding = all.find((f) => f.id === FINDING_ID);
+
+  const finding = all.find((entry) => entry.id === FINDING_ID);
   if (!finding) {
     console.error(`Finding #${FINDING_ID} not found`);
     process.exit(1);
   }
-  console.error(`Title: ${finding.title}`);
+  return finding;
+}
 
+async function fetchRawResponse(finding: RetroFinding): Promise<string> {
   const prompt = extractionPrompt(findingText(finding)) +
     "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.";
 
@@ -59,23 +73,72 @@ async function main() {
   }
 
   const result = (await resp.json()) as { response: string };
+  return result.response;
+}
+
+function logEntityTypes(data: ParsedExtraction): void {
+  if (!Array.isArray(data.entities)) return;
+
+  console.log("=== ENTITY TYPES (before coercion) ===");
+  for (const entity of data.entities) {
+    console.log(`  ${entity.name} → ${entity.type}`);
+  }
+}
+
+function coerceEntityTypes(data: ParsedExtraction): void {
+  if (!Array.isArray(data.entities)) return;
+
+  for (const entity of data.entities) {
+    if (entity.type && VALID_ENTITY_TYPES.has(entity.type)) continue;
+
+    console.log(`  COERCE: ${entity.name} "${entity.type ?? "missing"}" → "concept"`);
+    entity.type = "concept";
+  }
+}
+
+function logManualValidation(data: unknown): void {
+  console.log("\n=== ZOD VALIDATION (manual path) ===");
+  try {
+    const validated = Extraction.parse(data);
+    console.log(`OK: ${validated.entities.length} entities, ${validated.edges.length} edges`);
+  } catch (err) {
+    if (err instanceof Error) {
+      console.log("FAILED:");
+      console.log(err.message);
+      return;
+    }
+    console.log("FAILED (unknown):", err);
+  }
+}
+
+async function logProductionValidation(finding: RetroFinding): Promise<void> {
+  console.log("\n=== PRODUCTION EXTRACTOR PATH ===");
+  try {
+    const result = await extract(findingText(finding));
+    console.log(`OK: ${result.entities.length} entities, ${result.edges.length} edges`);
+    for (const edge of result.edges) {
+      console.log(`  [${edge.relationType}] ${edge.fact}`);
+    }
+  } catch (err) {
+    if (err instanceof Error) {
+      console.log("FAILED:", err.message.slice(0, 300));
+      return;
+    }
+    console.log("FAILED (unknown):", err);
+  }
+}
+
+async function main() {
+  console.error(`[debug] model=${MODEL} finding=#${FINDING_ID}`);
+  const finding = await loadFinding();
+  console.error(`Title: ${finding.title}`);
+
+  const responseText = await fetchRawResponse(finding);
   console.log("=== RAW OLLAMA RESPONSE ===");
-  console.log(result.response);
+  console.log(responseText);
   console.log("=== END RAW ===\n");
 
-  // Try to parse
-  let data: unknown = null;
-  try { data = JSON.parse(result.response); } catch {}
-  if (!data) {
-    const fenced = result.response.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (fenced) try { data = JSON.parse(fenced[1]!); } catch {}
-  }
-  if (!data) {
-    const start = result.response.indexOf("{");
-    const end = result.response.lastIndexOf("}");
-    if (start >= 0 && end > start) try { data = JSON.parse(result.response.slice(start, end + 1)); } catch {}
-  }
-
+  const data = parseJsonFromText(responseText) as ParsedExtraction | null;
   if (!data) {
     console.error("[debug] JSON parse failed");
     process.exit(1);
@@ -85,47 +148,10 @@ async function main() {
   console.log(Object.keys(data as object));
   console.log();
 
-  // Apply the existing extractor's coercion
-  const validTypes = new Set(["person", "organization", "project", "technology", "concept"]);
-  if (typeof data === "object" && data && "entities" in data && Array.isArray((data as { entities: unknown[] }).entities)) {
-    const entities = (data as { entities: Array<{ name?: string; type?: string }> }).entities;
-    console.log("=== ENTITY TYPES (before coercion) ===");
-    for (const e of entities) console.log(`  ${e.name} → ${e.type}`);
-    for (const entity of entities) {
-      if (!entity.type || !validTypes.has(entity.type)) {
-        console.log(`  COERCE: ${entity.name} "${entity.type ?? "missing"}" → "concept"`);
-        entity.type = "concept";
-      }
-    }
-  }
-
-  console.log("\n=== ZOD VALIDATION (manual path) ===");
-  try {
-    const validated = Extraction.parse(data);
-    console.log(`OK: ${validated.entities.length} entities, ${validated.edges.length} edges`);
-  } catch (err) {
-    if (err instanceof Error) {
-      console.log("FAILED:");
-      console.log(err.message);
-    } else {
-      console.log("FAILED (unknown):", err);
-    }
-  }
-
-  console.log("\n=== PRODUCTION EXTRACTOR PATH ===");
-  try {
-    const result = await extract(findingText(finding));
-    console.log(`OK: ${result.entities.length} entities, ${result.edges.length} edges`);
-    for (const e of result.edges) {
-      console.log(`  [${e.relationType}] ${e.fact}`);
-    }
-  } catch (err) {
-    if (err instanceof Error) {
-      console.log("FAILED:", err.message.slice(0, 300));
-    } else {
-      console.log("FAILED (unknown):", err);
-    }
-  }
+  logEntityTypes(data);
+  coerceEntityTypes(data);
+  logManualValidation(data);
+  await logProductionValidation(finding);
 }
 
 main().catch((err) => {

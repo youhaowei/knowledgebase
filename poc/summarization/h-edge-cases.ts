@@ -79,7 +79,8 @@ for (const { path: relPath, label, truncateAt } of EDGE_CASES) {
   if (filename.endsWith(".tsx")) notes.push("JSX file — AST misses template structure");
 
   if (notes.length) {
-    sections.push(`### Notes\n${notes.map((n) => `- ${n}`).join("\n")}\n`);
+    const noteList = notes.map((note) => `- ${note}`).join("\n");
+    sections.push(`### Notes\n${noteList}\n`);
   }
 }
 

@@ -48,6 +48,20 @@ function findingText(f: RetroFinding): string {
   return parts.join("\n\n");
 }
 
+async function loadCachedEdges(): Promise<ExtractedEdge[] | null> {
+  const file = Bun.file(CACHE_FILE);
+  if (!(await file.exists())) return null;
+
+  try {
+    const cached = await file.json();
+    return Array.isArray(cached) ? (cached as ExtractedEdge[]) : null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Ignoring unreadable cache file ${CACHE_FILE}: ${message}`);
+    return null;
+  }
+}
+
 async function loadCorpus(): Promise<RetroFinding[]> {
   const proc = spawn({ cmd: ["retro", "list"], stdout: "pipe", stderr: "pipe" });
   const output = await new Response(proc.stdout).text();
@@ -61,14 +75,11 @@ async function main() {
   console.error(`Sample size: ${SAMPLE_SIZE}`);
   console.error(`Cache file: ${CACHE_FILE}\n`);
 
-  // Try cache
-  try {
-    const cached = await Bun.file(CACHE_FILE).json();
-    if (Array.isArray(cached) && cached.length > 0) {
-      console.error(`Cache hit: ${cached.length} edges already extracted, skipping`);
-      process.exit(0);
-    }
-  } catch {}
+  const cached = await loadCachedEdges();
+  if (cached && cached.length > 0) {
+    console.error(`Cache hit: ${cached.length} edges already extracted, skipping`);
+    process.exit(0);
+  }
 
   const all = await loadCorpus();
   const sample = [...all].sort((a, b) => b.id - a.id).slice(0, SAMPLE_SIZE);

@@ -25,6 +25,13 @@ import { rrfFuse } from "./search-utils.js";
 import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
 import { normalizeEntityName } from "./entity-matcher.js";
 
+type MutableEntity = Entity & {
+  uuid?: string;
+  namespace?: string;
+  scope?: "project" | "global";
+  summary?: string;
+};
+
 export class Neo4jProvider implements GraphProvider {
   private driver: Driver;
 
@@ -324,7 +331,7 @@ export class Neo4jProvider implements GraphProvider {
     tx: ManagedTransaction,
     edge: ExtractedEdge,
     edgeEmbMap: EmbeddingMap,
-    entities: Entity[],
+    entities: MutableEntity[],
     memory: Memory,
   ) {
     const sourceEntity = entities[edge.sourceIndex];
@@ -760,7 +767,7 @@ export class Neo4jProvider implements GraphProvider {
             scope: entityRecord.get("scope") ?? "project",
             description: entityRecord.get("description") ?? undefined,
             summary: entityRecord.get("summary") ?? undefined,
-            namespace: entityRecord.get("namespace"),
+            namespace: entityRecord.get("namespace") ?? "",
           }
         : undefined;
 
@@ -1150,8 +1157,8 @@ export class Neo4jProvider implements GraphProvider {
         params.type = filter.type;
       }
 
-      const sortProp = pagination?.sortBy === "name" ? "e.name" : "e.name";
-      const sortDir = pagination?.sortDir === "asc" ? "ASC" : "ASC";
+      const sortProp = "e.name";
+      const sortDir = "ASC";
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1504,7 +1511,7 @@ export class Neo4jProvider implements GraphProvider {
             name: e.properties.name as string,
             type: e.properties.type as StoredEntity["type"],
             description: e.properties.description ?? undefined,
-            namespace: e.properties.namespace ?? undefined,
+            namespace: e.properties.namespace ?? "",
             scope: (e.properties.scope ?? "project") as "project" | "global",
             summary: e.properties.summary ?? undefined,
           });
