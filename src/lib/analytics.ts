@@ -12,8 +12,9 @@
 
 import { AsyncLocalStorage } from "async_hooks";
 import { createRequire } from "module";
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
+import { mkdirSync } from "fs";
 
 export type AnalyticsSource = "mcp" | "cli" | "web";
 type QueryParam = string | number | null;
@@ -63,6 +64,7 @@ function getDb() {
   const Db = loadSqlite();
   if (!Db) return null;
   try {
+    mkdirSync(dirname(getDbPath()), { recursive: true });
     const instance = new Db(getDbPath(), { create: true });
     instance.run("PRAGMA journal_mode=WAL");
     instance.run(TABLE_DDL);
