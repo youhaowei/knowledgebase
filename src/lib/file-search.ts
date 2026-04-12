@@ -46,7 +46,9 @@ function indexScanFromEntries(
   entries: MemoryFileEntry[],
   tagFilter?: string[],
 ): FileSearchResult[] {
-  const q = query.toLowerCase();
+  // Empty queries are intentional: callers use fileSearch("", ns, { tags })
+  // as a tag-only browse path, so an empty name query acts as a wildcard.
+  const q = query.trim().toLowerCase();
 
   return entries
     .filter((entry) => {
@@ -77,7 +79,7 @@ async function rgSearch(
   let proc: ReturnType<typeof Bun.spawn> | undefined;
   try {
     proc = Bun.spawn(
-      ["rg", "--json", "-F", "-i", "--no-heading", query, namespacePath],
+      ["rg", "--json", "-F", "-i", "--no-heading", "--", query, namespacePath],
       {
         stdout: "pipe",
         stderr: "ignore",

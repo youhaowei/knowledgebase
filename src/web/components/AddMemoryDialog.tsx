@@ -13,6 +13,8 @@ export function AddMemoryDialog({ open, onClose, onAdded, namespace, namespaces 
   const [text, setText] = useState("");
   const [name, setName] = useState("");
   const [selectedNs, setSelectedNs] = useState(namespace ?? "default");
+  const [origin, setOrigin] = useState<"manual" | "retro" | "mcp" | "import">("manual");
+  const [tags, setTags] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -28,11 +30,18 @@ export function AddMemoryDialog({ open, onClose, onAdded, namespace, namespaces 
           text: text.trim(),
           name: name.trim() || undefined,
           namespace: selectedNs,
+          origin,
+          tags: tags
+            .split(",")
+            .map((tag) => tag.trim())
+            .filter(Boolean),
         },
       });
       setMessage({ type: "success", text: result.message });
       setText("");
       setName("");
+      setOrigin("manual");
+      setTags("");
       setTimeout(() => {
         onAdded();
         onClose();
@@ -103,6 +112,37 @@ export function AddMemoryDialog({ open, onClose, onAdded, namespace, namespaces 
               ))}
               <option value="default">default</option>
             </select>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-[11px] font-medium text-neutral-fg-subtle uppercase tracking-wider">
+                Origin
+              </label>
+              <select
+                value={origin}
+                onChange={(e) => setOrigin(e.target.value as typeof origin)}
+                className="mt-1 w-full h-8 rounded-md bg-neutral-bg-subtle border border-neutral-border px-2 text-xs text-neutral-fg focus:border-palette-primary focus:outline-none"
+              >
+                <option value="manual">manual</option>
+                <option value="mcp">mcp</option>
+                <option value="import">import</option>
+                <option value="retro">retro</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-medium text-neutral-fg-subtle uppercase tracking-wider">
+                Tags
+              </label>
+              <input
+                type="text"
+                value={tags}
+                onChange={(e) => setTags(e.target.value)}
+                placeholder="comma, separated, tags"
+                className="mt-1 w-full h-8 rounded-md bg-neutral-bg-subtle border border-neutral-border px-2.5 text-xs text-neutral-fg placeholder:text-neutral-fg-subtle/50 focus:border-palette-primary focus:outline-none"
+              />
+            </div>
           </div>
 
           {/* Message */}

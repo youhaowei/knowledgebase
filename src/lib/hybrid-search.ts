@@ -35,12 +35,19 @@ type GraphSearchPayload = {
 
 const GRAPH_TIMEOUT_MS = 3000;
 const GRAPH_FAILURE_COOLDOWN_MS = 30_000;
+const defaultHybridSearchDependencies = {
+  graphSearch: ops.graphSearch,
+};
+const hybridSearchDependencies = {
+  ...defaultHybridSearchDependencies,
+};
 
 // Exported for test reset
 export const _state = {
   graphFailureCooldownUntil: 0,
   reset() {
     this.graphFailureCooldownUntil = 0;
+    configureHybridSearchDependenciesForTests({});
   },
 };
 
@@ -56,7 +63,7 @@ async function graphSearchWithTimeout(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
-      ops.graphSearch(query, namespace, limit),
+      hybridSearchDependencies.graphSearch(query, namespace, limit),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error("Graph search timeout")),
@@ -149,3 +156,14 @@ export async function hybridSearch(
     files: dedupedFiles,
   };
 }
+
+export function configureHybridSearchDependenciesForTests(
+  overrides: Partial<typeof defaultHybridSearchDependencies>,
+): void {
+  hybridSearchDependencies.graphSearch = overrides.graphSearch
+    ?? defaultHybridSearchDependencies.graphSearch;
+}
+
+export const __testing__ = {
+  graphSearchWithTimeout,
+};

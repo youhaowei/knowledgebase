@@ -29,6 +29,7 @@ let providerPromise: Promise<GraphProvider> | null = null;
 let queue: Queue | null = null;
 const inFlightIndexing = new Set<string>();
 const addLocks = new Map<string, Promise<void>>();
+const DEFAULT_UNINDEXED_SWEEP_BATCH_LIMIT = 100;
 const defaultOperationDependencies = {
   createGraphProvider: defaultCreateGraphProvider,
   createQueue: (provider: GraphProvider) => new Queue(provider),
@@ -177,10 +178,16 @@ async function addMemoryLocked(
 /** Shared provider singleton. Exported for modules that need direct provider access. */
 export async function getProvider() {
   if (!providerPromise) {
-    providerPromise = operationDependencies.createGraphProvider().then((p) => {
-      queue = operationDependencies.createQueue(p);
-      return p;
-    });
+    providerPromise = operationDependencies.createGraphProvider()
+      .then((p) => {
+        queue = operationDependencies.createQueue(p);
+        return p;
+      })
+      .catch((error) => {
+        providerPromise = null;
+        queue = null;
+        throw error;
+      });
   }
   return providerPromise;
 }
@@ -219,10 +226,10 @@ export async function queueMemoryForIndexing(id: string, namespace: string): Pro
     const q = await getQueue();
 
     // Fire-and-forget: enqueue and let the Queue drain in the background.
-    // Heavy work (extraction + embedding) happens asynchronously.
+    // The queue does not resolve until graph storage and filesystem finalization
+    // both complete, which avoids a crash window between them.
     releaseKey = false;
-    q.add(memory)
-      .then(() => persistProcessedMemory(frontmatter, memory))
+    q.add(memory, async (processedMemory) => persistProcessedMemory(frontmatter, processedMemory))
       .catch((err) => console.error(`[kb] Indexing failed for ${id}:`, err))
       .finally(() => inFlightIndexing.delete(key));
 
@@ -234,23 +241,43 @@ export async function queueMemoryForIndexing(id: string, namespace: string): Pro
   }
 }
 
-export async function processUnindexedMemories(namespace?: string): Promise<number> {
+async function queueUnindexedFilesForNamespace(
+  namespace: string,
+  remaining: number,
+): Promise<number> {
+  let queued = 0;
+  const files = listMemoryFiles(namespace);
+
+  for (const file of files) {
+    if (queued >= remaining) {
+      break;
+    }
+    if (file.indexed) continue;
+    try {
+      if (await queueMemoryForIndexing(file.id, namespace)) {
+        queued += 1;
+      }
+    } catch (err) {
+      // File may have been deleted between list and read — skip and continue
+      console.error(`[kb] Skipping ${file.id} in ${namespace}:`, (err as Error).message);
+    }
+  }
+
+  return queued;
+}
+
+export async function processUnindexedMemories(
+  namespace?: string,
+  limit = DEFAULT_UNINDEXED_SWEEP_BATCH_LIMIT,
+): Promise<number> {
   const namespaces = namespace ? [namespace] : listNamespaceDirs();
   let queued = 0;
 
   for (const ns of namespaces) {
-    const files = listMemoryFiles(ns);
-    for (const file of files) {
-      if (file.indexed) continue;
-      try {
-        if (await queueMemoryForIndexing(file.id, ns)) {
-          queued += 1;
-        }
-      } catch (err) {
-        // File may have been deleted between list and read — skip and continue
-        console.error(`[kb] Skipping ${file.id} in ${ns}:`, (err as Error).message);
-      }
+    if (queued >= limit) {
+      break;
     }
+    queued += await queueUnindexedFilesForNamespace(ns, limit - queued);
   }
 
   return queued;

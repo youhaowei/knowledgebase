@@ -21,7 +21,7 @@ ensureServerIndexerStarted();
 // ============================================================================
 
 const namespaceFilterSchema = z.object({
-  namespace: z.string().default("default"),
+  namespace: z.string().optional(),
 });
 
 export const getGraphData = createServerFn()
@@ -166,12 +166,14 @@ const addMemorySchema = z.object({
   text: z.string().min(1, "Text is required"),
   name: z.string().optional(),
   namespace: z.string().default("default"),
+  origin: z.enum(["manual", "retro", "mcp", "import"]).default("manual"),
+  tags: z.array(z.string()).default([]),
 });
 
 export const addMemory = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => addMemorySchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.addMemory(data.text, data.name, data.namespace);
+    const result = await ops.addMemory(data.text, data.name, data.namespace, data.origin, data.tags);
     return {
       success: true,
       message: result.status === "existing"
@@ -548,7 +550,7 @@ export const listMemories = createServerFn()
       sortDir: data.sortDir,
     });
 
-    const total = await gp.stats(data.namespace || undefined);
+    const total = await ops.stats(data.namespace || undefined);
     return { items, total: total.memories };
   });
 

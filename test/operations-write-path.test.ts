@@ -31,9 +31,10 @@ const queueState: {
 let provider: ReturnType<typeof makeProvider> = makeProvider();
 
 class MockQueue {
-  add(memory: Memory): Promise<void> {
+  async add(memory: Memory, onStored?: (memory: Memory) => Promise<void>): Promise<void> {
     queueState.adds += 1;
-    return queueState.onAdd(memory);
+    await queueState.onAdd(memory);
+    await onStored?.(memory);
   }
 
   pending(): number {
@@ -213,6 +214,47 @@ describe("operations write-path regressions", () => {
     expect(updated.summary).toBe("Persisted summary");
     expect(updated.abstract).toBe("Persisted abstract");
     expect(updated.indexedAt).toBeDefined();
+  });
+
+  test("getProvider retries after an initialization failure instead of caching the rejection forever", async () => {
+    createTempEnvironment();
+
+    let attempts = 0;
+    const operations = await import("../src/lib/operations.js");
+    operations.resetOperationStateForTests();
+    operations.configureOperationDependenciesForTests({
+      createGraphProvider: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("Transient provider init failure");
+        }
+        return provider;
+      },
+      createQueue: createQueueFactory(),
+    });
+
+    await expect(operations.getProvider()).rejects.toThrow("Transient provider init failure");
+    await expect(operations.getProvider()).resolves.toBe(provider);
+    expect(attempts).toBe(2);
+  });
+
+  test("processUnindexedMemories stops once it reaches the sweep batch limit", async () => {
+    createTempEnvironment();
+
+    const ops = await loadOperations();
+    for (let i = 0; i < 3; i++) {
+      const id = randomUUID();
+      writeMemoryFile(id, `Body ${i}`, makeFrontmatter({
+        id,
+        name: `Memory ${i}`,
+        namespace: "default",
+      }));
+    }
+
+    const queued = await ops.processUnindexedMemories(undefined, 2);
+
+    expect(queued).toBe(2);
+    expect(queueState.adds).toBe(2);
   });
 
   test("forget deletes the filesystem source before touching the graph", async () => {

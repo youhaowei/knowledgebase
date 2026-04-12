@@ -1,5 +1,14 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { test, expect, describe, beforeAll, afterAll, afterEach } from "bun:test";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  utimesSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -23,6 +32,9 @@ import {
   ensureNamespacePath,
   resolveNamespacePath,
   deleteMemoryFile,
+  withNamespaceLock,
+  configureFsMemoryTimingForTests,
+  resetFsMemoryTimingForTests,
   type MemoryFrontmatter,
 } from "../src/lib/fs-memory";
 
@@ -37,6 +49,11 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true });
   delete process.env.KB_MEMORY_PATH;
+  resetFsMemoryTimingForTests();
+});
+
+afterEach(() => {
+  resetFsMemoryTimingForTests();
 });
 
 // ---------------------------------------------------------------------------
@@ -287,6 +304,33 @@ describe("listMemoryFiles", () => {
     // listMemoryFiles calls resolveNamespacePath (read-only) — returns empty array for missing dirs
     expect(entries).toEqual([]);
   });
+
+  test("uses _index.md as a metadata cache when it contains full IDs", async () => {
+    const ns = `index-cache-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const id = randomUUID();
+    writeMemoryFile(id, "Indexed body", makeFrontmatter({
+      id,
+      namespace: ns,
+      name: "Indexed Entry",
+      tags: ["cached"],
+      indexedAt: new Date().toISOString(),
+    }));
+    generateIndex(nsPath);
+
+    rmSync(join(nsPath, `${id}.md`));
+
+    const entries = listMemoryFiles(ns);
+    expect(entries).toEqual([
+      {
+        id,
+        name: "Indexed Entry",
+        path: join(nsPath, `${id}.md`),
+        indexed: true,
+        tags: ["cached"],
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -456,5 +500,65 @@ describe("listMemoryFiles — malformed files", () => {
     const entries = listMemoryFiles(ns);
     expect(entries.length).toBe(1);
     expect(entries[0]!.name).toBe("Valid");
+  });
+});
+
+describe("withNamespaceLock", () => {
+  test("retries until a lock is released", async () => {
+    configureFsMemoryTimingForTests({ timeoutMs: 100, retryMs: 5 });
+
+    const ns = `lock-retry-${randomUUID().slice(0, 8)}`;
+    const lockPath = join(tempDir, ".locks", `${encodeURIComponent(ns)}.lock`);
+    mkdirSync(lockPath, { recursive: true });
+    setTimeout(() => rmSync(lockPath, { recursive: true, force: true }), 20);
+
+    let ran = false;
+    await withNamespaceLock(ns, async () => {
+      ran = true;
+    });
+
+    expect(ran).toBe(true);
+  });
+
+  test("times out when a fresh lock never clears", async () => {
+    configureFsMemoryTimingForTests({ timeoutMs: 30, retryMs: 5, staleLockAgeMs: 10_000 });
+
+    const ns = `lock-timeout-${randomUUID().slice(0, 8)}`;
+    const lockPath = join(tempDir, ".locks", `${encodeURIComponent(ns)}.lock`);
+    mkdirSync(lockPath, { recursive: true });
+
+    await expect(withNamespaceLock(ns, async () => {})).rejects.toThrow(`Timed out waiting for namespace lock: "${ns}"`);
+
+    rmSync(lockPath, { recursive: true, force: true });
+  });
+
+  test("breaks one stale lock once and still serializes concurrent entrants", async () => {
+    configureFsMemoryTimingForTests({ timeoutMs: 200, retryMs: 5, staleLockAgeMs: 20 });
+
+    const ns = `lock-stale-${randomUUID().slice(0, 8)}`;
+    const lockPath = join(tempDir, ".locks", `${encodeURIComponent(ns)}.lock`);
+    mkdirSync(lockPath, { recursive: true });
+    const staleTime = new Date(Date.now() - 5_000);
+    utimesSync(lockPath, staleTime, staleTime);
+
+    let active = 0;
+    let maxActive = 0;
+
+    await Promise.all([
+      withNamespaceLock(ns, async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await Bun.sleep(15);
+        active -= 1;
+      }),
+      withNamespaceLock(ns, async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await Bun.sleep(15);
+        active -= 1;
+      }),
+    ]);
+
+    expect(maxActive).toBe(1);
   });
 });

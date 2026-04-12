@@ -4,7 +4,13 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 
-import { filterGraphResultsByTaggedFileIds, _state } from "../src/lib/hybrid-search";
+import {
+  __testing__,
+  configureHybridSearchDependenciesForTests,
+  filterGraphResultsByTaggedFileIds,
+  hybridSearch,
+  _state,
+} from "../src/lib/hybrid-search";
 
 // Set up isolated filesystem for tests that need real files
 const tempDir = mkdtempSync(join(tmpdir(), "kb-hybrid-test-"));
@@ -111,17 +117,21 @@ describe("filterGraphResultsByTaggedFileIds", () => {
 });
 
 describe("hybridSearch", () => {
-  // hybridSearch imports ops which imports graph provider — we need to mock
-  // the graph search to avoid needing a real DB. We do this by testing the
-  // timeout/cooldown behavior via _state.
+  test("cooldown skips graph search when within cooldown window", async () => {
+    let calls = 0;
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => {
+        calls += 1;
+        return { memories: [], edges: [], entities: [], intent: "general", guidance: "ok" };
+      },
+    });
 
-  test("cooldown skips graph search when within cooldown window", () => {
-    // Set cooldown to future
     _state.graphFailureCooldownUntil = Date.now() + 30_000;
 
-    // graphSearchWithTimeout should return null immediately when in cooldown
-    // We verify this indirectly: _state is exported for this purpose
-    expect(Date.now() < _state.graphFailureCooldownUntil).toBe(true);
+    const result = await __testing__.graphSearchWithTimeout("cooldown", "default", 5);
+
+    expect(result).toBeNull();
+    expect(calls).toBe(0);
   });
 
   test("reset clears cooldown", () => {
@@ -137,9 +147,6 @@ describe("hybridSearch file results", () => {
     const id = randomUUID();
     const fm = makeFrontmatter({ id, namespace: ns, name: "Hybrid Test Memory" });
     writeMemoryFile(id, "This memory has searchable content about TypeScript", fm);
-
-    // Import hybridSearch after files are written
-    const { hybridSearch } = await import("../src/lib/hybrid-search");
 
     // Force cooldown so graph search is skipped — file-only results
     _state.graphFailureCooldownUntil = Date.now() + 30_000;
@@ -159,22 +166,35 @@ describe("hybridSearch file results", () => {
   });
 
   test("deduplicates: graph memories exclude IDs already in file results", async () => {
-    // This tests the dedup logic: if a memory appears in both graph and file
-    // results, the file result is filtered out (graph wins)
     const ns = `hybrid-dedup-${randomUUID().slice(0, 8)}`;
     const id = randomUUID();
     const fm = makeFrontmatter({ id, namespace: ns, name: "Dedup Memory" });
     writeMemoryFile(id, "Dedup test content", fm);
 
-    const { hybridSearch } = await import("../src/lib/hybrid-search");
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [
+          {
+            id,
+            name: "Dedup Memory",
+            text: "Graph copy",
+            abstract: "",
+            summary: "From graph",
+            namespace: ns,
+            schemaVersion: "0.0.0",
+            createdAt: new Date("2026-04-08T00:00:00.000Z"),
+          },
+        ],
+        edges: [],
+        entities: [],
+        intent: "general",
+        guidance: "graph guidance",
+      }),
+    });
 
-    // With cooldown, only file results
-    _state.graphFailureCooldownUntil = Date.now() + 30_000;
-    const fileOnly = await hybridSearch("Dedup", ns, 10);
-    expect(fileOnly.files.some((f) => f.id === id)).toBe(true);
+    const result = await hybridSearch("Dedup", ns, 10);
 
-    // The dedup logic is: graphMemoryIds filters out file results with same ID.
-    // Since graph is empty here, all file results survive.
-    expect(fileOnly.files.filter((f) => f.id === id)).toHaveLength(1);
+    expect(result.memories.map((memory) => memory.id)).toEqual([id]);
+    expect(result.files.some((file) => file.id === id)).toBe(false);
   });
 });

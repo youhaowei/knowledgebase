@@ -178,6 +178,7 @@ describe("fileSearch — deduplication", () => {
 describe("fileSearch — tag filter", () => {
   test("returns only results with matching tag", async () => {
     const results = await fileSearch("", TEST_NS, { tags: ["important"] });
+    expect(results.length).toBeGreaterThan(0);
     // All results should have the "important" tag
     for (const r of results) {
       expect(r.tags).toContain("important");
@@ -228,7 +229,32 @@ describe("fileSearch — edge cases", () => {
         );
       }
       const results = await fileSearch("memory", ns, { limit: 3 });
-      expect(results.length).toBeLessThanOrEqual(3);
+      expect(results.length).toBe(3);
+    } finally {
+      rmSync(ensureNamespacePath(ns), { recursive: true, force: true });
+    }
+  });
+
+  test("treats queries starting with dashes as literals, not ripgrep flags", async () => {
+    const ns = `dash-query-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+
+    try {
+      writeMemoryFile(
+        id,
+        "Body contains --literal-query for ripgrep.",
+        {
+          id,
+          name: "dash query memory",
+          origin: "manual",
+          namespace: ns,
+          tags: [],
+          createdAt: new Date().toISOString(),
+        },
+      );
+
+      const results = await fileSearch("--literal-query", ns);
+      expect(results.find((result) => result.id === id)).toBeDefined();
     } finally {
       rmSync(ensureNamespacePath(ns), { recursive: true, force: true });
     }

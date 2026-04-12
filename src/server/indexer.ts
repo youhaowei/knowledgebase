@@ -5,6 +5,14 @@ const RECONCILIATION_INTERVAL_MS = 60_000;
 // Use globalThis to survive Vite HMR module re-execution
 const KEY = Symbol.for("kb:indexer");
 type IndexerState = { started: boolean; timer: ReturnType<typeof setInterval> | null; sweep: Promise<void> | null };
+const defaultIndexerDependencies = {
+  processUnindexedMemories,
+  setInterval: globalThis.setInterval,
+  clearInterval: globalThis.clearInterval,
+};
+const indexerDependencies = {
+  ...defaultIndexerDependencies,
+};
 
 function getState(): IndexerState {
   const g = globalThis as Record<symbol, IndexerState | undefined>;
@@ -22,7 +30,7 @@ async function runSweep(): Promise<void> {
 
   state.sweep = (async () => {
     try {
-      const queued = await processUnindexedMemories();
+      const queued = await indexerDependencies.processUnindexedMemories();
       if (queued > 0) {
         console.error(`[kb] Catch-up queued ${queued} unindexed memories`);
       }
@@ -45,15 +53,37 @@ export function ensureServerIndexerStarted(): void {
   if (state.started) return;
 
   // Clear any leftover timer from a previous HMR cycle
-  if (state.timer) clearInterval(state.timer);
+  if (state.timer) indexerDependencies.clearInterval(state.timer);
 
   state.started = true;
   void runSweep();
-  state.timer = setInterval(() => {
+  state.timer = indexerDependencies.setInterval(() => {
     void runSweep();
   }, RECONCILIATION_INTERVAL_MS);
 
   if (typeof state.timer.unref === "function") {
     state.timer.unref();
   }
+}
+
+export function configureIndexerDependenciesForTests(
+  overrides: Partial<typeof defaultIndexerDependencies>,
+): void {
+  indexerDependencies.processUnindexedMemories = overrides.processUnindexedMemories
+    ?? defaultIndexerDependencies.processUnindexedMemories;
+  indexerDependencies.setInterval = overrides.setInterval
+    ?? defaultIndexerDependencies.setInterval;
+  indexerDependencies.clearInterval = overrides.clearInterval
+    ?? defaultIndexerDependencies.clearInterval;
+}
+
+export function resetIndexerStateForTests(): void {
+  const state = getState();
+  if (state.timer) {
+    indexerDependencies.clearInterval(state.timer);
+  }
+  state.started = false;
+  state.timer = null;
+  state.sweep = null;
+  configureIndexerDependenciesForTests({});
 }

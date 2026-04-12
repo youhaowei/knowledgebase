@@ -10,7 +10,20 @@
 import { z } from "zod";
 import { homedir } from "os";
 import { join, resolve, sep, basename } from "path";
-import { mkdirSync, renameSync, readdirSync, existsSync, writeFileSync, readFileSync, rmSync, unlinkSync, statSync } from "fs";
+import {
+  mkdirSync,
+  renameSync,
+  readdirSync,
+  existsSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  statSync,
+  openSync,
+  closeSync,
+  utimesSync,
+} from "fs";
 import matter from "gray-matter";
 import { MemoryCategory } from "../types.js";
 
@@ -46,9 +59,12 @@ export interface MemoryFileEntry {
 }
 
 const MEMORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NAMESPACE_LOCK_TIMEOUT_MS = 10_000;
-const NAMESPACE_LOCK_RETRY_MS = 25;
-const STALE_LOCK_AGE_MS = 10_000;
+const defaultLockTimings = {
+  timeoutMs: 10_000,
+  retryMs: 25,
+  staleLockAgeMs: 10_000,
+};
+const lockTimings = { ...defaultLockTimings };
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -98,10 +114,29 @@ function getNamespaceLockPath(namespace: string): string {
   return join(lockRoot, `${encodeURIComponent(namespace)}.lock`);
 }
 
+function getLockHeartbeatPath(lockPath: string): string {
+  return join(lockPath, ".heartbeat");
+}
+
+function touchLockHeartbeat(lockPath: string): void {
+  const heartbeatPath = getLockHeartbeatPath(lockPath);
+  const now = new Date();
+  try {
+    utimesSync(heartbeatPath, now, now);
+  } catch {
+    writeFileSync(heartbeatPath, "");
+  }
+}
+
 function breakStaleLock(lockPath: string): boolean {
   try {
-    const age = Date.now() - statSync(lockPath).mtimeMs;
-    if (age > STALE_LOCK_AGE_MS) {
+    const heartbeatPath = getLockHeartbeatPath(lockPath);
+    const statPath = existsSync(heartbeatPath) ? heartbeatPath : lockPath;
+    const age = Date.now() - statSync(statPath).mtimeMs;
+    if (age > lockTimings.staleLockAgeMs) {
+      const claimPath = join(lockPath, ".reclaiming");
+      const claimFd = openSync(claimPath, "wx");
+      closeSync(claimFd);
       rmSync(lockPath, { recursive: true, force: true });
       console.error(`[fs-memory] Broke stale lock (${Math.round(age / 1000)}s old): ${lockPath}`);
       return true;
@@ -123,6 +158,7 @@ export async function withNamespaceLock<T>(
   while (true) {
     try {
       mkdirSync(lockPath);
+      touchLockHeartbeat(lockPath);
       break;
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") {
@@ -130,18 +166,40 @@ export async function withNamespaceLock<T>(
       }
       // Check for stale lock from a crashed process
       if (breakStaleLock(lockPath)) continue;
-      if (Date.now() - startedAt >= NAMESPACE_LOCK_TIMEOUT_MS) {
+      if (Date.now() - startedAt >= lockTimings.timeoutMs) {
         throw new Error(`Timed out waiting for namespace lock: "${namespace}"`);
       }
-      await Bun.sleep(NAMESPACE_LOCK_RETRY_MS);
+      await Bun.sleep(lockTimings.retryMs);
     }
   }
+
+  const heartbeatIntervalMs = Math.max(1, Math.min(lockTimings.retryMs, Math.floor(lockTimings.staleLockAgeMs / 2)));
+  const heartbeat = setInterval(() => {
+    try {
+      touchLockHeartbeat(lockPath);
+    } catch {
+      // Lock is gone or being cleaned up; the holder will exit naturally.
+    }
+  }, heartbeatIntervalMs);
 
   try {
     return await fn();
   } finally {
+    clearInterval(heartbeat);
     rmSync(lockPath, { recursive: true, force: true });
   }
+}
+
+export function configureFsMemoryTimingForTests(overrides: Partial<typeof defaultLockTimings>): void {
+  if (overrides.timeoutMs !== undefined) lockTimings.timeoutMs = overrides.timeoutMs;
+  if (overrides.retryMs !== undefined) lockTimings.retryMs = overrides.retryMs;
+  if (overrides.staleLockAgeMs !== undefined) lockTimings.staleLockAgeMs = overrides.staleLockAgeMs;
+}
+
+export function resetFsMemoryTimingForTests(): void {
+  lockTimings.timeoutMs = defaultLockTimings.timeoutMs;
+  lockTimings.retryMs = defaultLockTimings.retryMs;
+  lockTimings.staleLockAgeMs = defaultLockTimings.staleLockAgeMs;
 }
 
 /**
@@ -255,6 +313,48 @@ export function deleteMemoryFile(name: string, namespace: string): { id: string;
   return { id: match.id, path: match.path };
 }
 
+function parseIndexCell(cell: string): string {
+  return cell.trim().replace(/\\\|/g, "|");
+}
+
+function parseIndexEntries(namespacePath: string): MemoryFileEntry[] | null {
+  const indexPath = join(namespacePath, "_index.md");
+  if (!existsSync(indexPath)) return null;
+
+  try {
+    const lines = readFileSync(indexPath, "utf-8").split("\n");
+    if (!lines.includes("| ID | Name | Tags | Indexed |")) {
+      return null;
+    }
+    const rows = lines.filter(
+      (line) =>
+        line.startsWith("| ")
+        && line !== "| ID | Name | Tags | Indexed |"
+        && line !== "|----|------|------|---------|",
+    );
+
+    const entries: MemoryFileEntry[] = [];
+    for (const row of rows) {
+      const parts = row.split("|").slice(1, -1).map(parseIndexCell);
+      if (parts.length < 4) return null;
+      const [id, name, tags, indexed] = parts;
+      if (!id || !MEMORY_ID_RE.test(id)) {
+        return null;
+      }
+      entries.push({
+        id,
+        name: name ?? "",
+        path: join(namespacePath, `${id}.md`),
+        indexed: indexed === "✓",
+        tags: tags ? tags.split(",").map((tag) => tag.trim()).filter(Boolean) : [],
+      });
+    }
+    return entries;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Lists all memory files in a namespace directory.
  * Excludes _index.md. Returns parsed frontmatter metadata only (no body text).
@@ -262,6 +362,11 @@ export function deleteMemoryFile(name: string, namespace: string): { id: string;
 export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
   const nsPath = resolveNamespacePath(namespace);
   if (!existsSync(nsPath)) return [];
+
+  const indexedEntries = parseIndexEntries(nsPath);
+  if (indexedEntries) {
+    return indexedEntries;
+  }
 
   const files = readdirSync(nsPath).filter(
     (f) => f.endsWith(".md") && f !== "_index.md" && !f.startsWith("."),
@@ -334,11 +439,10 @@ export function generateIndex(namespacePath: string): void {
   ];
 
   for (const e of entries) {
-    const shortId = e.id.slice(0, 7);
     const tags = e.tags.join(", ").replace(/\|/g, "\\|");
     const escapedName = e.name.replace(/\|/g, "\\|");
     const indexed = e.indexedAt ? "✓" : "✗";
-    lines.push(`| ${shortId} | ${escapedName} | ${tags} | ${indexed} |`);
+    lines.push(`| ${e.id} | ${escapedName} | ${tags} | ${indexed} |`);
   }
 
   lines.push(""); // trailing newline
@@ -380,11 +484,10 @@ function readIndexCounts(lines: string[]): { total: number; unindexed: number } 
 export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): void {
   const indexPath = join(namespacePath, "_index.md");
   const namespace = basename(namespacePath);
-  const shortId = entry.id.slice(0, 7);
   const escapedName = entry.name.replace(/\|/g, "\\|");
   const tags = entry.tags.join(", ").replace(/\|/g, "\\|");
   const indexed = entry.indexedAt ? "✓" : "✗";
-  const row = `| ${shortId} | ${escapedName} | ${tags} | ${indexed} |`;
+  const row = `| ${entry.id} | ${escapedName} | ${tags} | ${indexed} |`;
 
   if (!existsSync(indexPath)) {
     const lines = [

@@ -46,10 +46,11 @@ export function TopBar({
 
       {/* Right: namespace filter + search + add */}
       <select
-        value={selectedNamespace ?? "default"}
-        onChange={(e) => onNamespaceChange(e.target.value)}
+        value={selectedNamespace ?? ""}
+        onChange={(e) => onNamespaceChange(e.target.value || undefined)}
         className="h-8 rounded-md bg-neutral-bg-subtle border border-neutral-border px-2 text-xs text-neutral-fg focus:border-palette-primary focus:outline-none"
       >
+        <option value="">All namespaces</option>
         {namespaces.map((ns) => (
           <option key={ns} value={ns}>{ns}</option>
         ))}

@@ -11,7 +11,7 @@
  */
 
 import { createGraphProvider } from "./graph-provider.js";
-import { writeMemoryFile } from "./fs-memory.js";
+import { ensureNamespacePath, generateIndex, writeMemoryFile } from "./fs-memory.js";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -59,6 +59,13 @@ function checkNameCollisions(summaries: MemorySummary[]): void {
 
 type MigrateMemory = { id: string; name: string; text?: string; createdAt: Date | string };
 type MigrateCounter = { written: number; skipped: number; failed: number };
+type MigrateDependencies = {
+  createGraphProvider: typeof createGraphProvider;
+};
+
+const defaultMigrateDependencies: MigrateDependencies = {
+  createGraphProvider,
+};
 
 /** Migrate a single memory: skip if exists, preview if dry-run, write otherwise. */
 async function migrateOne(
@@ -97,10 +104,13 @@ function filterActive<T extends { name: string }>(memories: T[]): T[] {
   return memories.filter((m) => m.name !== "__ns_rollup__");
 }
 
-export async function migrate(dryRun = false): Promise<void> {
+export async function migrate(
+  dryRun = false,
+  deps: MigrateDependencies = defaultMigrateDependencies,
+): Promise<void> {
   console.error(`[migrate] Starting migration${dryRun ? " (dry-run)" : ""}...`);
 
-  const gp = await createGraphProvider();
+  const gp = await deps.createGraphProvider();
   await gp.init();
 
   const namespaces = await gp.listNamespaces();
@@ -127,6 +137,9 @@ export async function migrate(dryRun = false): Promise<void> {
     console.error(`[migrate] Namespace "${ns}": ${active.length} memories`);
     for (const m of active) {
       await migrateOne(m, ns, dryRun, now, counters);
+    }
+    if (!dryRun) {
+      generateIndex(ensureNamespacePath(ns));
     }
   }
 

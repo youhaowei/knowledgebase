@@ -155,6 +155,7 @@ describe("CLI --tag and --origin flags", () => {
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
     // File results should only include tagged entries
+    expect((parsed.files ?? []).length).toBeGreaterThan(0);
     for (const f of parsed.files ?? []) {
       expect(f.tags).toContain("runtime");
     }

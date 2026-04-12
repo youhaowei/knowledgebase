@@ -87,10 +87,11 @@ export function StatsOverlay({
         {/* Namespace dropdown */}
         <div className="relative">
           <select
-            value={selectedNamespace ?? "default"}
-            onChange={(e) => onNamespaceChange(e.target.value)}
+            value={selectedNamespace ?? ""}
+            onChange={(e) => onNamespaceChange(e.target.value || undefined)}
             className="appearance-none w-full px-3 py-2 pr-8 bg-surface/60 backdrop-blur-xl border border-border rounded-xl text-xs font-medium text-text-secondary hover:border-border-glow transition-colors cursor-pointer focus:outline-none focus:border-glow-cyan"
           >
+            <option value="">All namespaces</option>
             {namespaces.map((ns) => (
               <option key={ns} value={ns}>
                 {ns}

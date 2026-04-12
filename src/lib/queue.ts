@@ -22,6 +22,7 @@ import {
 
 type QueueEntry = {
   memory: Memory;
+  onStored?: (memory: Memory) => Promise<void>;
   resolve: () => void;
   reject: (e: Error) => void;
 };
@@ -39,7 +40,7 @@ export class Queue {
    * Add a memory to the processing queue
    * Returns a promise that resolves when processing completes
    */
-  async add(memory: Memory): Promise<void> {
+  async add(memory: Memory, onStored?: (memory: Memory) => Promise<void>): Promise<void> {
     return new Promise((resolve, reject) => {
       const ns = memory.namespace;
 
@@ -47,7 +48,7 @@ export class Queue {
         this.entries.set(ns, []);
       }
 
-      this.entries.get(ns)!.push({ memory, resolve, reject });
+      this.entries.get(ns)!.push({ memory, onStored, resolve, reject });
 
       // Start processing if not already running for this namespace
       if (!this.processing.has(ns)) {
@@ -67,7 +68,7 @@ export class Queue {
       const entry = queue.shift();
       if (!entry) break;
 
-      const { memory, resolve, reject } = entry;
+      const { memory, onStored, resolve, reject } = entry;
 
       try {
         const ns = memory.namespace;
@@ -102,6 +103,7 @@ export class Queue {
         // 4. Store
         const storeStart = performance.now();
         await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
+        await onStored?.(memory);
         const storeMs = Math.round(performance.now() - storeStart);
 
         const totalMs = Math.round(performance.now() - start);
