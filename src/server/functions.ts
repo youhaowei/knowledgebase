@@ -14,7 +14,9 @@ import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 import { ensureServerIndexerStarted } from "./indexer.js";
 import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity } from "../types.js";
 
-ensureServerIndexerStarted();
+if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
+  ensureServerIndexerStarted();
+}
 
 // ============================================================================
 // Queries (GET by default)

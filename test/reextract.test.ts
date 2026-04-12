@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "crypto";
+
+const originalDisableIndexer = process.env.KB_DISABLE_SERVER_INDEXER;
 
 function createReextractResult() {
   return {
@@ -46,17 +48,15 @@ function createBlockedDependencies(): { deps: ReturnType<typeof createQuickDepen
 }
 
 async function loadFunctions() {
-  mock.restore();
-  mock.module("../src/server/indexer.js", () => ({
-    ensureServerIndexerStarted: () => {},
-  }));
+  process.env.KB_DISABLE_SERVER_INDEXER = "true";
 
   const moduleUrl = new URL(`../src/server/functions.js?test=${randomUUID()}`, import.meta.url).href;
   return import(moduleUrl);
 }
 
 afterEach(() => {
-  mock.restore();
+  if (originalDisableIndexer === undefined) delete process.env.KB_DISABLE_SERVER_INDEXER;
+  else process.env.KB_DISABLE_SERVER_INDEXER = originalDisableIndexer;
 });
 
 describe("startReextractAll", () => {

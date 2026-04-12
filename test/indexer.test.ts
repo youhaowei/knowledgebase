@@ -4,7 +4,7 @@ import {
   configureIndexerDependenciesForTests,
   ensureServerIndexerStarted,
   resetIndexerStateForTests,
-} from "../src/server/indexer";
+} from "../src/server/indexer.js";
 
 afterEach(() => {
   resetIndexerStateForTests();

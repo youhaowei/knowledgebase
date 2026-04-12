@@ -306,6 +306,7 @@ export function deleteMemoryFile(name: string, namespace: string): { id: string;
   if (!match) return null;
   try {
     unlinkSync(match.path);
+    generateIndex(resolveNamespacePath(namespace));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;

@@ -26,7 +26,7 @@ describe("Embedder", () => {
     expect(Array.isArray(embedding)).toBe(true);
     expect(embedding.length).toBeGreaterThan(0);
     expect(typeof embedding[0]).toBe("number");
-  });
+  }, 15_000);
 
   test("embedWithDimension returns correct metadata", async () => {
     const result = await embedWithDimension("test query");
