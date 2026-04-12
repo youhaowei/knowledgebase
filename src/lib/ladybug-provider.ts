@@ -593,22 +593,29 @@ export class LadybugProvider implements GraphProvider {
     embedding: number[],
     query: string,
     limit = 10,
+    namespace?: string,
   ): Promise<SearchResult> {
     const hasEmbedding = embedding.length > 0;
-    const memories = hasEmbedding ? await this.vectorSearch(embedding, limit) : [];
+    const filter = namespace ? { namespace } : undefined;
+    const memories = hasEmbedding ? await this.vectorSearch(embedding, limit, filter) : [];
     const [vectorEdges, ftsEdges] = await Promise.all([
-      hasEmbedding ? this.vectorSearchEdges(embedding, limit) : Promise.resolve([]),
-      this.fullTextSearchEdges(query, limit),
+      hasEmbedding ? this.vectorSearchEdges(embedding, limit, filter) : Promise.resolve([]),
+      this.fullTextSearchEdges(query, limit, filter),
     ]);
     const edges = rrfFuse(vectorEdges, ftsEdges, limit);
 
+    const entityWhere = namespace
+      ? "WHERE LOWER(e.name) CONTAINS LOWER($query) AND e.deletedAt = '' AND e.namespace = $namespace"
+      : "WHERE LOWER(e.name) CONTAINS LOWER($query) AND e.deletedAt = ''";
+    const entityParams: Record<string, unknown> = { query, limit };
+    if (namespace) entityParams.namespace = namespace;
     const entityResult = await this.executeQuery(
       `MATCH (e:Entity)
-       WHERE LOWER(e.name) CONTAINS LOWER($query) AND e.deletedAt = ''
+       ${entityWhere}
        RETURN e.uuid as uuid, e.name as name, e.type as type, e.scope as scope,
               e.description as description, e.summary as summary, e.namespace as namespace
        LIMIT $limit`,
-      { query, limit },
+      entityParams,
     );
 
     const entityRows = await entityResult.getAll();

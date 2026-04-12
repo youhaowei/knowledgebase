@@ -20,15 +20,28 @@ import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 import { tracked } from "./analytics.js";
 import {
-  writeMemoryFile, readMemoryFile, appendToIndex, deleteMemoryFile, generateIndex,
+  writeMemoryFile, readMemoryFile, appendToIndex, updateIndexEntry, deleteMemoryFile, generateIndex,
   assertValidMemoryId, ensureNamespacePath, resolveNamespacePath, listMemoryFiles, listNamespaceDirs, normalizeTags, withNamespaceLock,
 } from "./fs-memory.js";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
-let providerPromise: Promise<GraphProvider> | null = null;
-let queue: Queue | null = null;
-const inFlightIndexing = new Set<string>();
-const addLocks = new Map<string, Promise<void>>();
+type OperationsState = {
+  providerPromise: Promise<GraphProvider> | null;
+  queue: Queue | null;
+  inFlightIndexing: Set<string>;
+  addLocks: Map<string, Promise<void>>;
+};
+
+function createInitialState(): OperationsState {
+  return {
+    providerPromise: null,
+    queue: null,
+    inFlightIndexing: new Set(),
+    addLocks: new Map(),
+  };
+}
+
+let state: OperationsState = createInitialState();
 const DEFAULT_UNINDEXED_SWEEP_BATCH_LIMIT = 100;
 const defaultOperationDependencies = {
   createGraphProvider: defaultCreateGraphProvider,
@@ -75,6 +88,11 @@ async function persistProcessedMemory(
       return;
     }
 
+    // Use `??` (not `||`) for abstract/summary so extractor-returned empty
+    // strings are respected instead of silently falling back to stale values.
+    const nextAbstract = memory.abstract ?? currentFrontmatter.abstract;
+    const nextSummary = memory.summary ?? currentFrontmatter.summary;
+
     const nextFrontmatter: MemoryFrontmatter = {
       ...currentFrontmatter,
       // Preserve the current on-disk name so user edits made during async
@@ -82,12 +100,8 @@ async function persistProcessedMemory(
       name: currentFrontmatter.name,
       indexedAt: new Date().toISOString(),
       schemaVersion: memory.schemaVersion || currentFrontmatter.schemaVersion || "0.0.0",
-      ...(memory.abstract || currentFrontmatter.abstract
-        ? { abstract: memory.abstract || currentFrontmatter.abstract }
-        : {}),
-      ...(memory.summary || currentFrontmatter.summary
-        ? { summary: memory.summary || currentFrontmatter.summary }
-        : {}),
+      ...(nextAbstract !== undefined ? { abstract: nextAbstract } : {}),
+      ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
       ...(memory.category || currentFrontmatter.category
         ? { category: memory.category || currentFrontmatter.category }
         : {}),
@@ -97,7 +111,7 @@ async function persistProcessedMemory(
     };
 
     writeMemoryFile(memory.id, currentText, nextFrontmatter);
-    generateIndex(resolveNamespacePath(ns));
+    updateIndexEntry(resolveNamespacePath(ns), nextFrontmatter);
   });
 }
 
@@ -122,12 +136,12 @@ function resolveMemoryName(text: string, name?: string): string {
 }
 
 async function withAddLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const previous = addLocks.get(key);
+  const previous = state.addLocks.get(key);
   let release!: () => void;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  addLocks.set(key, current);
+  state.addLocks.set(key, current);
 
   if (previous) {
     await previous;
@@ -137,10 +151,28 @@ async function withAddLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     return await fn();
   } finally {
     release();
-    if (addLocks.get(key) === current) {
-      addLocks.delete(key);
+    if (state.addLocks.get(key) === current) {
+      state.addLocks.delete(key);
     }
   }
+}
+
+export type AddMemoryResult = {
+  id: string;
+  name: string;
+  path: string;
+  status: "written" | "existing";
+  /** @deprecated Use `status === "existing"` instead. Kept for backwards compatibility. */
+  readonly existing: boolean;
+};
+
+function makeResult(base: { id: string; name: string; path: string; status: "written" | "existing" }): AddMemoryResult {
+  return {
+    ...base,
+    get existing() {
+      return base.status === "existing";
+    },
+  };
 }
 
 async function addMemoryLocked(
@@ -149,12 +181,12 @@ async function addMemoryLocked(
   namespace: string,
   origin: Origin,
   tags: string[],
-): Promise<{ id: string; name: string; path: string; status: "written" | "existing" }> {
+): Promise<AddMemoryResult> {
   return withNamespaceLock(namespace, async () => {
     const files = listMemoryFiles(namespace);
     const existing = files.find((f) => f.name.trim().toLowerCase() === resolvedName.toLowerCase());
     if (existing) {
-      return { id: existing.id, name: existing.name, path: existing.path, status: "existing" as const };
+      return makeResult({ id: existing.id, name: existing.name, path: existing.path, status: "existing" });
     }
 
     const id = randomUUID();
@@ -171,33 +203,33 @@ async function addMemoryLocked(
     const filePath = writeMemoryFile(id, text, frontmatter);
     appendToIndex(nsPath, frontmatter);
 
-    return { id, name: resolvedName, path: filePath, status: "written" as const };
+    return makeResult({ id, name: resolvedName, path: filePath, status: "written" });
   });
 }
 
 /** Shared provider singleton. Exported for modules that need direct provider access. */
 export async function getProvider() {
-  if (!providerPromise) {
-    providerPromise = operationDependencies.createGraphProvider()
+  if (!state.providerPromise) {
+    state.providerPromise = operationDependencies.createGraphProvider()
       .then((p) => {
-        queue = operationDependencies.createQueue(p);
+        state.queue = operationDependencies.createQueue(p);
         return p;
       })
       .catch((error) => {
-        providerPromise = null;
-        queue = null;
+        state.providerPromise = null;
+        state.queue = null;
         throw error;
       });
   }
-  return providerPromise;
+  return state.providerPromise;
 }
 
 export async function getQueue() {
   await getProvider();
-  if (!queue) {
+  if (!state.queue) {
     throw new Error("Queue was not initialized");
   }
-  return queue;
+  return state.queue;
 }
 
 export async function getQueueStatus(namespace?: string): Promise<number> {
@@ -208,14 +240,20 @@ export async function getQueueStatus(namespace?: string): Promise<number> {
 export async function queueMemoryForIndexing(id: string, namespace: string): Promise<boolean> {
   assertValidMemoryId(id);
   const key = getIndexingKey(id, namespace);
-  if (inFlightIndexing.has(key)) {
+  // NOTE: inFlightIndexing is process-local — does not dedup across CLI + server.
+  // Accepted tradeoff: gp.store() is idempotent, so a rare duplicate extraction
+  // costs one LLM call but is not incorrect.
+  if (state.inFlightIndexing.has(key)) {
     return false;
   }
 
-  inFlightIndexing.add(key);
+  state.inFlightIndexing.add(key);
   let releaseKey = true;
 
   try {
+    // NOTE: TOCTOU — another process may set indexedAt between the `add` above
+    // and this read. The cost of the race is at most one duplicate extraction;
+    // the filesystem write via atomic rename stays consistent.
     const path = join(resolveNamespacePath(namespace), `${id}.md`);
     const { frontmatter, text } = readMemoryFile(path);
     if (frontmatter.indexedAt) {
@@ -231,12 +269,12 @@ export async function queueMemoryForIndexing(id: string, namespace: string): Pro
     releaseKey = false;
     q.add(memory, async (processedMemory) => persistProcessedMemory(frontmatter, processedMemory))
       .catch((err) => console.error(`[kb] Indexing failed for ${id}:`, err))
-      .finally(() => inFlightIndexing.delete(key));
+      .finally(() => state.inFlightIndexing.delete(key));
 
     return true;
   } finally {
     if (releaseKey) {
-      inFlightIndexing.delete(key);
+      state.inFlightIndexing.delete(key);
     }
   }
 }
@@ -289,7 +327,7 @@ export async function addMemory(
   namespace = "default",
   origin: Origin = "manual",
   tags: string[] = [],
-): Promise<{ id: string; name: string; path: string; status: "written" | "existing" }> {
+): Promise<AddMemoryResult> {
   return tracked("add", { namespace }, async () => {
     const resolvedName = resolveMemoryName(text, name);
     return withAddLock(
@@ -319,15 +357,17 @@ export async function graphSearch(
   return tracked("search", { namespace }, async () => {
     const gp = await getProvider();
     const { embedding } = await embedWithDimension(query);
-    // Fetch extra results — provider searches all namespaces, we post-filter
-    const fetchLimit = limit * 3;
-    const result = await gp.search(isZeroEmbedding(embedding) ? [] : embedding, query, fetchLimit);
+    const result = await gp.search(
+      isZeroEmbedding(embedding) ? [] : embedding,
+      query,
+      limit,
+      namespace,
+    );
     const intent = classifyIntent(query);
 
-    // Post-filter by namespace (provider doesn't support namespace-scoped search)
-    const memories = result.memories.filter((m) => m.namespace === namespace).slice(0, limit);
-    const edges = result.edges.filter((e) => e.namespace === namespace).slice(0, limit);
-    const entities = result.entities.filter((e) => e.namespace === namespace).slice(0, limit);
+    const memories = result.memories.slice(0, limit);
+    const edges = result.edges.slice(0, limit);
+    const entities = result.entities.slice(0, limit);
 
     return {
       memories,
@@ -482,10 +522,7 @@ export async function close() {
 export function resetOperationStateForTests(): void {
   operationDependencies.createGraphProvider = defaultOperationDependencies.createGraphProvider;
   operationDependencies.createQueue = defaultOperationDependencies.createQueue;
-  providerPromise = null;
-  queue = null;
-  inFlightIndexing.clear();
-  addLocks.clear();
+  state = createInitialState();
 }
 
 export function configureOperationDependenciesForTests(overrides: Partial<typeof defaultOperationDependencies>): void {

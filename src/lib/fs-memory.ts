@@ -38,7 +38,7 @@ export const MemoryFrontmatter = z.object({
   id: z.uuid(),
   name: z.string(),
   origin: Origin,
-  namespace: z.string().default("default"),
+  namespace: z.string().min(1, "namespace must be a non-empty string"),
   tags: z.array(z.string()).default([]),
   createdAt: z.string(),        // ISO 8601
   indexedAt: z.string().optional(), // set when server has processed this file
@@ -298,6 +298,7 @@ export function readMemoryFile(
 /**
  * Deletes a memory file by name within a namespace.
  * Returns the deleted file's id/path, or null if not found.
+ * Callers own the index regeneration — this function does NOT update `_index.md`.
  */
 export function deleteMemoryFile(name: string, namespace: string): { id: string; path: string } | null {
   const entries = listMemoryFiles(namespace);
@@ -306,7 +307,6 @@ export function deleteMemoryFile(name: string, namespace: string): { id: string;
   if (!match) return null;
   try {
     unlinkSync(match.path);
-    generateIndex(resolveNamespacePath(namespace));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
@@ -472,9 +472,11 @@ function readIndexCounts(lines: string[]): { total: number; unindexed: number } 
       && line !== "|----|------|------|---------|",
   );
 
+  // Count unindexed by inspecting the trailing "Indexed" cell rather than
+  // scanning for a literal ✗ anywhere in the line (names/tags may contain ✗).
   return {
     total: rows.length,
-    unindexed: rows.filter((line) => line.includes("✗")).length,
+    unindexed: rows.filter((line) => line.trimEnd().endsWith("✗ |")).length,
   };
 }
 
@@ -482,6 +484,49 @@ function readIndexCounts(lines: string[]): { total: number; unindexed: number } 
  * O(1) append: adds one table row to an existing _index.md without regenerating.
  * Creates _index.md with a minimal header if it doesn't exist yet.
  */
+/**
+ * Updates a single existing row in `_index.md` by memory id. Falls back to a
+ * full `generateIndex` regeneration if the row isn't found (e.g., on first
+ * write-back for a pre-existing file without an index yet).
+ */
+export function updateIndexEntry(namespacePath: string, entry: MemoryFrontmatter): void {
+  const indexPath = join(namespacePath, "_index.md");
+  if (!existsSync(indexPath)) {
+    generateIndex(namespacePath);
+    return;
+  }
+
+  const namespace = basename(namespacePath);
+  const existingContent = readFileSync(indexPath, "utf-8");
+  const lines = existingContent.endsWith("\n")
+    ? existingContent.slice(0, -1).split("\n")
+    : existingContent.split("\n");
+
+  const rowPrefix = `| ${entry.id} |`;
+  const rowIndex = lines.findIndex((line) => line.startsWith(rowPrefix));
+  if (rowIndex === -1) {
+    generateIndex(namespacePath);
+    return;
+  }
+
+  const escapedName = entry.name.replace(/\|/g, "\\|");
+  const tags = entry.tags.join(", ").replace(/\|/g, "\\|");
+  const indexed = entry.indexedAt ? "✓" : "✗";
+  const newRow = `| ${entry.id} | ${escapedName} | ${tags} | ${indexed} |`;
+
+  const { total, unindexed } = readIndexCounts(lines);
+  const oldRow = lines[rowIndex];
+  const wasIndexed = oldRow.endsWith(" ✓ |");
+  const nowIndexed = Boolean(entry.indexedAt);
+  const unindexedDelta = (wasIndexed ? 0 : 1) - (nowIndexed ? 0 : 1);
+
+  const nextLines = [...lines];
+  nextLines[rowIndex] = newRow;
+  nextLines[0] = formatIndexHeader(namespace, total, unindexed - unindexedDelta);
+
+  atomicWriteFile(indexPath, nextLines.join("\n"));
+}
+
 export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): void {
   const indexPath = join(namespacePath, "_index.md");
   const namespace = basename(namespacePath);

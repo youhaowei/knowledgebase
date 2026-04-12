@@ -8,7 +8,7 @@
 
 export {
   addMemory,
-  graphSearch as search,
+  graphSearch,
   getByName,
   forget,
   forgetEdge,

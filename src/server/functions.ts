@@ -552,8 +552,12 @@ export const listMemories = createServerFn()
       sortDir: data.sortDir,
     });
 
-    const total = await ops.stats(data.namespace || undefined);
-    return { items, total: total.memories };
+    const stats = await ops.stats(data.namespace || undefined);
+    return {
+      items,
+      indexed: stats.indexed,
+      total: stats.memories,
+    };
   });
 
 const listEntitiesSchema = z.object({

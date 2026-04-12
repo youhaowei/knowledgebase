@@ -1,10 +1,9 @@
 /**
  * Hybrid Search
  *
- * Runs file-based search (always fast, filesystem) and graph search (semantic,
- * requires DB + embedder) in parallel with a timeout. Graph results win on
- * dedup by memory ID. If graph search fails or times out, returns file-only
- * results gracefully.
+ * Runs file-based search (always available) and graph search (semantic) in
+ * parallel. Graph results win on dedup by memory ID. If graph search fails
+ * (e.g., embedder error, DB unavailable), returns file-only results gracefully.
  */
 
 import * as ops from "./operations.js";
@@ -33,8 +32,6 @@ type GraphSearchPayload = {
   guidance: string;
 };
 
-const GRAPH_TIMEOUT_MS = 3000;
-const GRAPH_FAILURE_COOLDOWN_MS = 30_000;
 const defaultHybridSearchDependencies = {
   graphSearch: ops.graphSearch,
 };
@@ -42,43 +39,16 @@ const hybridSearchDependencies = {
   ...defaultHybridSearchDependencies,
 };
 
-// Exported for test reset
-export const _state = {
-  graphFailureCooldownUntil: 0,
-  reset() {
-    this.graphFailureCooldownUntil = 0;
-    configureHybridSearchDependenciesForTests({});
-  },
-};
-
-async function graphSearchWithTimeout(
+async function runGraphSearch(
   query: string,
   namespace: string,
   limit: number,
 ): Promise<GraphSearchPayload | null> {
-  if (Date.now() < _state.graphFailureCooldownUntil) {
-    return null;
-  }
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await Promise.race([
-      hybridSearchDependencies.graphSearch(query, namespace, limit),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("Graph search timeout")),
-          GRAPH_TIMEOUT_MS,
-        );
-      }),
-    ]);
-    _state.graphFailureCooldownUntil = 0;
-    return result;
+    return await hybridSearchDependencies.graphSearch(query, namespace, limit);
   } catch (err) {
-    _state.graphFailureCooldownUntil = Date.now() + GRAPH_FAILURE_COOLDOWN_MS;
-    console.error(`[hybrid-search] Graph search failed/timed out: ${err instanceof Error ? err.message : err}`);
+    console.error(`[hybrid-search] Graph search failed: ${err instanceof Error ? err.message : err}`);
     return null;
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -118,9 +88,8 @@ export async function hybridSearch(
 ): Promise<HybridSearchResult> {
   const normalizedTags = tags && tags.length > 0 ? normalizeTags(tags) : undefined;
 
-  // Run both searches in parallel — graph has a timeout cap
   const [graphResult, fileResults] = await Promise.all([
-    graphSearchWithTimeout(query, namespace, limit),
+    runGraphSearch(query, namespace, limit),
     fileSearch(query, namespace, { limit, tags: normalizedTags }),
   ]);
 
@@ -164,6 +133,10 @@ export function configureHybridSearchDependenciesForTests(
     ?? defaultHybridSearchDependencies.graphSearch;
 }
 
+export function resetHybridSearchForTests(): void {
+  configureHybridSearchDependenciesForTests({});
+}
+
 export const __testing__ = {
-  graphSearchWithTimeout,
+  runGraphSearch,
 };

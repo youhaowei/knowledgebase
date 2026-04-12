@@ -74,6 +74,7 @@ export interface GraphProvider {
     embedding: number[],
     query: string,
     limit?: number,
+    namespace?: string,
   ): Promise<SearchResult>;
 
   vectorSearch(

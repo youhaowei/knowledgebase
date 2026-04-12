@@ -14,7 +14,7 @@ const RETRO_NAMESPACE = "retro";
 
 /**
  * Find existing retro findings similar to the given text.
- * Uses the shared operations.search() which combines vector + FTS via RRF.
+ * Uses graphSearch which combines vector + FTS via RRF.
  * Useful for dedup before inserting a new finding.
  */
 export async function findSimilarFindings(

@@ -405,61 +405,27 @@ export class Neo4jProvider implements GraphProvider {
     embedding: number[],
     query: string,
     limit = 10,
+    namespace?: string,
   ): Promise<SearchResult> {
     const session = this.driver.session();
     try {
-      let memories: Memory[] = [];
-      if (embedding.length > 0) {
-        const activeDim = getActiveDimension();
-        const memIndexName = activeDim ? this.getDimInfo(activeDim).memoryIndex : "memory_embedding";
-        const memoryResult = await session.run(
-        `
-        CALL db.index.vector.queryNodes('${memIndexName}', $limit, $embedding)
-        YIELD node, score
-        RETURN node.id as id,
-               node.name as name,
-               node.text as text,
-               node.summary as summary,
-               node.abstract as abstract,
-               node.schemaVersion as schemaVersion,
-               node.versionedAt as versionedAt,
-               node.category as category,
-               node.namespace as namespace,
-               node.status as status,
-               node.error as error,
-               node.createdAt as createdAt,
-               score
-        ORDER BY score DESC
-        `,
-        { embedding, limit: neo4j.int(limit) },
-      );
-
-      memories = memoryResult.records.map((r) => ({
-        id: r.get("id"),
-        name: r.get("name"),
-        text: r.get("text"),
-        summary: r.get("summary"),
-        abstract: r.get("abstract") || "",
-        schemaVersion: r.get("schemaVersion") || "0.0.0",
-        versionedAt: r.get("versionedAt") || undefined,
-        category: r.get("category") ?? undefined,
-        namespace: r.get("namespace"),
-        status: r.get("status") ?? "completed",
-        error: r.get("error") ?? undefined,
-        createdAt: new Date(r.get("createdAt")),
-      }));
-      }
+      const filter = namespace ? { namespace } : undefined;
+      const memories = embedding.length > 0 ? await this.vectorSearch(embedding, limit, filter) : [];
 
       const [vectorEdges, ftsEdges] = await Promise.all([
-        this.vectorSearchEdges(embedding, limit),
-        this.fullTextSearchEdges(query, limit),
+        this.vectorSearchEdges(embedding, limit, filter),
+        this.fullTextSearchEdges(query, limit, filter),
       ]);
       const edges = rrfFuse(vectorEdges, ftsEdges, limit);
 
+      const entityCypher = namespace
+        ? `MATCH (e:Entity) WHERE e.name =~ $pattern AND e.namespace = $namespace`
+        : `MATCH (e:Entity) WHERE e.name =~ $pattern`;
+      const entityParams: Record<string, unknown> = { pattern: `(?i).*${query}.*`, limit: neo4j.int(limit) };
+      if (namespace) entityParams.namespace = namespace;
       const entityResult = await session.run(
         `
-        MATCH (e:Entity)
-        WHERE e.name =~ $pattern
+        ${entityCypher}
         RETURN e.uuid as uuid,
                e.name as name,
                e.type as type,
@@ -469,7 +435,7 @@ export class Neo4jProvider implements GraphProvider {
                e.namespace as namespace
         LIMIT $limit
         `,
-        { pattern: `(?i).*${query}.*`, limit: neo4j.int(limit) },
+        entityParams,
       );
 
       const entities: StoredEntity[] = entityResult.records.map((r) => ({

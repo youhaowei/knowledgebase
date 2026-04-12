@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -9,10 +9,14 @@ process.env.__ANALYTICS_DB_PATH = join(tempDir, "analytics.db");
 process.env.LADYBUG_DATA_PATH = join(tempDir, "ladybug");
 
 const ops = await import("../src/lib/operations.js");
-const { listMemoryFiles, readMemoryFile, deleteMemoryFile } = await import("../src/lib/fs-memory");
+const { listMemoryFiles, readMemoryFile, deleteMemoryFile, generateIndex, resolveNamespacePath } = await import("../src/lib/fs-memory");
 
 beforeAll(() => {
   process.env.KB_MEMORY_PATH = tempDir;
+});
+
+afterEach(() => {
+  ops.resetOperationStateForTests();
 });
 
 afterAll(() => {
@@ -92,6 +96,8 @@ describe("deleteMemoryFile", () => {
     const deleted = deleteMemoryFile("delete-test", "ops-delete-test");
     expect(deleted).not.toBeNull();
     expect(deleted!.id).toBe(addResult.id);
+    // Update the index after deletion to reflect the removed file
+    generateIndex(resolveNamespacePath("ops-delete-test"));
     // Verify file is gone
     const remaining = listMemoryFiles("ops-delete-test");
     expect(remaining.find((f) => f.id === addResult.id)).toBeUndefined();

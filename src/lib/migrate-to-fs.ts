@@ -11,9 +11,8 @@
  */
 
 import { createGraphProvider } from "./graph-provider.js";
-import { ensureNamespacePath, generateIndex, writeMemoryFile } from "./fs-memory.js";
+import { ensureNamespacePath, generateIndex, resolveNamespacePath, writeMemoryFile } from "./fs-memory.js";
 import { existsSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
@@ -30,8 +29,7 @@ function originForNamespace(namespace: string): Origin {
 
 /** Pre-computed path for existence check without creating directories. */
 function expectedFilePath(namespace: string, id: string): string {
-  const root = process.env.KB_MEMORY_PATH ?? join(homedir(), ".kb", "memories");
-  return join(root, namespace, `${id}.md`);
+  return join(resolveNamespacePath(namespace), `${id}.md`);
 }
 
 /** Detect name collisions across namespaces. */

@@ -21,7 +21,7 @@ interface ListMemoriesParams {
   sortDir: "asc" | "desc";
 }
 
-type MemoryListResponse = { items: Memory[]; total: number };
+type MemoryListResponse = { items: Memory[]; total: number; indexed: number };
 
 const CATEGORY_COLORS: Record<string, "primary" | "info" | "warning" | "secondary"> = {
   preference: "primary",

@@ -67,6 +67,44 @@ function indexScanFromEntries(
 }
 
 /**
+ * Parse ripgrep JSON output and extract first match context per file.
+ */
+function parseRgOutput(output: string): Map<string, string> {
+  const result = new Map<string, string>();
+  const lines = output.trim().split("\n").filter(Boolean);
+
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === "match") {
+        const filePath = obj.data.path.text as string;
+        const context = (obj.data.lines.text as string).trim();
+        // Only store the first match context per file
+        if (!result.has(filePath)) {
+          result.set(filePath, context);
+        }
+      }
+    } catch {
+      // skip malformed JSON lines
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Handle ripgrep process errors gracefully.
+ */
+function handleRgError(err: unknown): void {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") {
+    console.error("[file-search] ripgrep (rg) not installed, skipping body search");
+  } else {
+    console.error(`[file-search] ripgrep failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/**
  * Full-text search via ripgrep. Returns Map of filePath → first match context snippet.
  * Gracefully returns empty Map if rg is not installed.
  */
@@ -75,11 +113,24 @@ async function rgSearch(
   namespacePath: string,
 ): Promise<Map<string, string>> {
   if (query.trim() === "") return new Map();
-  const result = new Map<string, string>();
+
   let proc: ReturnType<typeof Bun.spawn> | undefined;
   try {
     proc = Bun.spawn(
-      ["rg", "--json", "-F", "-i", "--no-heading", "--", query, namespacePath],
+      [
+        "rg",
+        "--json",
+        "-F",
+        "-i",
+        "--no-heading",
+        "--glob",
+        "!_index.md",
+        "--glob",
+        "!*.tmp",
+        "--",
+        query,
+        namespacePath,
+      ],
       {
         stdout: "pipe",
         stderr: "ignore",
@@ -87,27 +138,17 @@ async function rgSearch(
     );
     const output = await new Response(proc.stdout as ReadableStream).text();
     await proc.exited;
-    const lines = output.trim().split("\n").filter(Boolean);
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj.type === "match") {
-          const filePath = obj.data.path.text as string;
-          const context = (obj.data.lines.text as string).trim();
-          // Only store the first match context per file
-          if (!result.has(filePath)) {
-            result.set(filePath, context);
-          }
-        }
-      } catch {
-        // skip malformed JSON lines
-      }
+    return parseRgOutput(output);
+  } catch (err) {
+    handleRgError(err);
+    return new Map();
+  } finally {
+    try {
+      proc?.kill();
+    } catch {
+      // proc already exited — ignore
     }
-  } catch {
-    proc?.kill();
-    console.error("[file-search] ripgrep not found, skipping body search");
   }
-  return result;
 }
 
 /**

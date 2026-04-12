@@ -9,7 +9,7 @@ import {
   configureHybridSearchDependenciesForTests,
   filterGraphResultsByTaggedFileIds,
   hybridSearch,
-  _state,
+  resetHybridSearchForTests,
 } from "../src/lib/hybrid-search";
 
 // Set up isolated filesystem for tests that need real files
@@ -36,7 +36,7 @@ afterAll(() => {
 });
 
 afterEach(() => {
-  _state.reset();
+  resetHybridSearchForTests();
 });
 
 describe("filterGraphResultsByTaggedFileIds", () => {
@@ -93,9 +93,9 @@ describe("filterGraphResultsByTaggedFileIds", () => {
           },
         ],
         entities: [
-          { name: "Tagged Entity", type: "concept", namespace: "default" },
-          { name: "Shared Entity", type: "concept", namespace: "default" },
-          { name: "Leak Entity", type: "concept", namespace: "default" },
+          { name: "Tagged Entity", type: "concept", namespace: "default", scope: "project" },
+          { name: "Shared Entity", type: "concept", namespace: "default", scope: "project" },
+          { name: "Leak Entity", type: "concept", namespace: "default", scope: "project" },
         ],
         intent: "general",
         guidance: "guidance",
@@ -116,28 +116,34 @@ describe("filterGraphResultsByTaggedFileIds", () => {
   });
 });
 
-describe("hybridSearch", () => {
-  test("cooldown skips graph search when within cooldown window", async () => {
-    let calls = 0;
+describe("runGraphSearch", () => {
+  test("returns null and logs when graph search throws", async () => {
     configureHybridSearchDependenciesForTests({
       graphSearch: async () => {
-        calls += 1;
-        return { memories: [], edges: [], entities: [], intent: "general", guidance: "ok" };
+        throw new Error("graph unavailable");
       },
     });
 
-    _state.graphFailureCooldownUntil = Date.now() + 30_000;
-
-    const result = await __testing__.graphSearchWithTimeout("cooldown", "default", 5);
+    const result = await __testing__.runGraphSearch("fail", "default", 5);
 
     expect(result).toBeNull();
-    expect(calls).toBe(0);
   });
 
-  test("reset clears cooldown", () => {
-    _state.graphFailureCooldownUntil = Date.now() + 30_000;
-    _state.reset();
-    expect(_state.graphFailureCooldownUntil).toBe(0);
+  test("returns graph payload when search succeeds", async () => {
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [],
+        edges: [],
+        entities: [],
+        intent: "general",
+        guidance: "ok",
+      }),
+    });
+
+    const result = await __testing__.runGraphSearch("ok", "default", 5);
+
+    expect(result).not.toBeNull();
+    expect(result!.guidance).toBe("ok");
   });
 });
 
@@ -148,19 +154,21 @@ describe("hybridSearch file results", () => {
     const fm = makeFrontmatter({ id, namespace: ns, name: "Hybrid Test Memory" });
     writeMemoryFile(id, "This memory has searchable content about TypeScript", fm);
 
-    // Force cooldown so graph search is skipped — file-only results
-    _state.graphFailureCooldownUntil = Date.now() + 30_000;
+    // Simulate graph being unavailable — file-only results
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => {
+        throw new Error("graph unavailable");
+      },
+    });
 
     const result = await hybridSearch("TypeScript", ns, 10);
 
-    // Should get file results even when graph is down
     expect(result.files.length).toBeGreaterThanOrEqual(1);
     expect(result.files.some((f) => f.name === "Hybrid Test Memory")).toBe(true);
-    // Graph results should be empty (cooldown active)
+    // Graph results should be empty (graph threw)
     expect(result.memories).toEqual([]);
     expect(result.edges).toEqual([]);
     expect(result.entities).toEqual([]);
-    // Defaults when graph is unavailable
     expect(result.intent).toBe("general");
     expect(result.guidance).toContain("forgetEdge");
   });
