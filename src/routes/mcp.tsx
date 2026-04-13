@@ -22,6 +22,11 @@ type Session = {
   transport: WebStandardStreamableHTTPServerTransport;
   server: ReturnType<typeof createKnowledgebaseMcpServer>;
   lastActivityMs: number;
+  // Number of requests currently being handled by this transport. The idle
+  // pruner must skip sessions with in-flight work, otherwise a long-running
+  // tool call (extraction, embedding, multi-step search) gets its transport
+  // closed mid-response when an unrelated new-session request triggers prune.
+  inFlight: number;
 };
 
 const sessions = new Map<string, Session>();
@@ -37,6 +42,10 @@ const SESSION_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 function pruneIdleSessions(): void {
   const now = Date.now();
   for (const [id, session] of sessions) {
+    // A session with in-flight work is never idle by definition — skip it.
+    // The activity timestamp updates on completion, so the pruner will get
+    // its turn on the next cycle once the request finishes.
+    if (session.inFlight > 0) continue;
     if (now - session.lastActivityMs > SESSION_IDLE_TIMEOUT_MS) {
       try {
         session.transport.close?.();
@@ -52,6 +61,26 @@ function pruneIdleSessions(): void {
 function touchSession(id: string): void {
   const session = sessions.get(id);
   if (session) session.lastActivityMs = Date.now();
+}
+
+/**
+ * Wraps `transport.handleRequest` with in-flight accounting so the idle
+ * pruner can't evict a session whose tool call is still running. The activity
+ * timestamp is also refreshed on completion — a request that takes longer
+ * than the idle window starts its idle countdown from when it returns, not
+ * from when it began.
+ */
+async function handleWithFlightTracking(
+  session: Session,
+  request: Request,
+): Promise<Response> {
+  session.inFlight += 1;
+  try {
+    return await session.transport.handleRequest(request);
+  } finally {
+    session.inFlight -= 1;
+    session.lastActivityMs = Date.now();
+  }
 }
 
 function corsHeaders() {
@@ -76,9 +105,9 @@ async function handleMcpRequest(request: Request): Promise<Response> {
     if (!sessionId || !sessions.has(sessionId)) {
       return withCors(new Response("Session not found", { status: 404 }));
     }
-    const { transport } = sessions.get(sessionId)!;
+    const session = sessions.get(sessionId)!;
     touchSession(sessionId);
-    const response = await transport.handleRequest(request);
+    const response = await handleWithFlightTracking(session, request);
     if (request.method === "DELETE") {
       sessions.delete(sessionId);
     }
@@ -87,9 +116,9 @@ async function handleMcpRequest(request: Request): Promise<Response> {
 
   // POST — route to existing session or create new one
   if (sessionId && sessions.has(sessionId)) {
-    const { transport } = sessions.get(sessionId)!;
+    const session = sessions.get(sessionId)!;
     touchSession(sessionId);
-    return withCors(await transport.handleRequest(request));
+    return withCors(await handleWithFlightTracking(session, request));
   }
 
   // New session — register via callback since sessionId is set during handleRequest.
@@ -101,7 +130,7 @@ async function handleMcpRequest(request: Request): Promise<Response> {
     sessionIdGenerator: () => crypto.randomUUID(),
     enableJsonResponse: true,
     onsessioninitialized: (sessionId) => {
-      sessions.set(sessionId, { transport, server: mcpServer, lastActivityMs: Date.now() });
+      sessions.set(sessionId, { transport, server: mcpServer, lastActivityMs: Date.now(), inFlight: 0 });
     },
   });
 
