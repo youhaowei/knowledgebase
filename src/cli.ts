@@ -31,7 +31,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op" || arg === "--origin") {
       const key = arg === "--ns" ? "--namespace" : arg;
       flags[key] = argv[++i] ?? "";
-    } else if (arg === "--json" || arg === "-i" || arg === "--dry-run") {
+    } else if (arg === "--json" || arg === "-i" || arg === "--dry-run" || arg === "--help" || arg === "-h" || arg === "--version" || arg === "-v") {
       flags[arg] = "true";
     } else if (arg.startsWith("--")) {
       flags[arg] = argv[++i] ?? "";
@@ -454,6 +454,13 @@ async function repl() {
 const ctx = ctxFrom(initialArgs);
 
 try {
+  // --help / -h must short-circuit BEFORE the REPL fallback. Without this,
+  // `kb --help` (no positional command) would silently drop into interactive
+  // mode and confuse anyone discovering the CLI.
+  if (initialArgs.flags["--help"] === "true" || initialArgs.flags["-h"] === "true") {
+    showHelp();
+    process.exit(0);
+  }
   if (!ctx.positional[0] || initialArgs.flags["-i"] === "true") {
     await repl();
   } else {
