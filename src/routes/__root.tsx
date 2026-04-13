@@ -6,6 +6,15 @@ import {
 } from "@tanstack/react-router";
 import appCss from "../web/styles.css?url";
 import { NotFound } from "../web/components/NotFound";
+import { ensureServerIndexerStarted } from "@/server/indexer";
+
+// Boot the 60s reconciliation sweep eagerly on first SSR render, not just on
+// the first MCP/server-function request. ensureServerIndexerStarted() bails
+// on the client (`typeof window !== "undefined"`) so this is a no-op in the
+// browser bundle. Idempotent — safe to invoke from multiple boot sites.
+if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
+  ensureServerIndexerStarted();
+}
 
 export const Route = createRootRoute({
   notFoundComponent: NotFound,

@@ -56,6 +56,10 @@ export function ensureServerIndexerStarted(): void {
   if (state.timer) indexerDependencies.clearInterval(state.timer);
 
   state.started = true;
+  // Single observable boot message — without this, "is the indexer running?"
+  // is unanswerable from logs alone. The interval fires on import (which is
+  // bound to first MCP/web-fn/SSR request), not at process start.
+  console.error(`[kb] Indexer sweep started — first sweep now, then every ${RECONCILIATION_INTERVAL_MS / 1000}s`);
   void runSweep();
   state.timer = indexerDependencies.setInterval(() => {
     void runSweep();
