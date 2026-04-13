@@ -166,6 +166,29 @@ describe("fileSearch — staleness (Spec Decision #8)", () => {
     const now = new Date();
     utimesSync(path, now, now);
   });
+
+  test("Decision #8: mtime == indexedAt boundary — NOT stale (strict `>`)", async () => {
+    // Spec says `stale = mtime > indexedAt`. Equality is the boundary that
+    // distinguishes a correct `>` check from an off-by-one `>=`: right after
+    // persistProcessedMemory stamps indexedAt and aligns mtime with utimesSync,
+    // mtime === indexedAt. That file must read as NOT stale. An implementation
+    // using `>=` would pass every other staleness test but fail here.
+    const ns = ensureNamespacePath(TEST_NS);
+    const id = randomUUID();
+    const aligned = new Date(Date.now() - 1000); // past, to avoid setup-time jitter
+    writeMemoryFile(
+      id,
+      "boundary body",
+      makeFrontmatter({ id, name: "boundary notes", indexedAt: aligned.toISOString() }),
+    );
+    utimesSync(join(ns, `${id}.md`), aligned, aligned);
+
+    const results = await fileSearch("boundary", TEST_NS);
+    const found = results.find((r) => r.id === id);
+    expect(found).toBeDefined();
+    expect(found!.indexed).toBe(true);
+    expect(found!.stale).toBe(false);
+  });
 });
 
 describe("fileSearch — body text matching (ripgrep)", () => {

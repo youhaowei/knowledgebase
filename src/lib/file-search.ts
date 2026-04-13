@@ -77,34 +77,40 @@ function matchesTagFilter(entryTags: string[], tagFilter?: string[]): boolean {
 /**
  * Fast path: substring match on name from pre-loaded entries.
  * No file reads needed — name is in the MemoryFileEntry.
+ *
+ * `limit` caps the number of entries we run resolveIndexedAt / isStale on.
+ * Without this cap, an empty-query tag browse on a 500-entry namespace would
+ * trigger 500 `matter.read()` disk reads (one per candidate) even though
+ * fileSearch only returns `limit` of them. Filter → slice → enrich.
  */
 function indexScanFromEntries(
   query: string,
   entries: MemoryFileEntry[],
   tagFilter?: string[],
+  limit = entries.length,
 ): FileSearchResult[] {
   // Empty queries are intentional: callers use fileSearch("", ns, { tags })
   // as a tag-only browse path, so an empty name query acts as a wildcard.
   const q = query.trim().toLowerCase();
 
-  return entries
-    .filter((entry) => {
-      if (!entry.name.toLowerCase().includes(q)) return false;
-      return matchesTagFilter(entry.tags, tagFilter);
-    })
-    .map((entry) => {
-      const indexedAt = resolveIndexedAt(entry);
-      return {
-        id: entry.id,
-        name: entry.name,
-        path: entry.path,
-        source: "index" as const,
-        indexed: entry.indexed,
-        stale: isStale(entry.path, indexedAt),
-        indexedAt: indexedAt ?? null,
-        tags: entry.tags,
-      };
-    });
+  const matched = entries.filter((entry) => {
+    if (!entry.name.toLowerCase().includes(q)) return false;
+    return matchesTagFilter(entry.tags, tagFilter);
+  });
+
+  return matched.slice(0, limit).map((entry) => {
+    const indexedAt = resolveIndexedAt(entry);
+    return {
+      id: entry.id,
+      name: entry.name,
+      path: entry.path,
+      source: "index" as const,
+      indexed: entry.indexed,
+      stale: isStale(entry.path, indexedAt),
+      indexedAt: indexedAt ?? null,
+      tags: entry.tags,
+    };
+  });
 }
 
 /**
@@ -306,7 +312,10 @@ export async function fileSearch(
   const normalizedTags = normalizeTagFilter(options?.tags);
 
   const [indexResults, rgMatches] = await Promise.all([
-    Promise.resolve(indexScanFromEntries(query, allEntries, normalizedTags)),
+    // Cap the name-match scan at `limit` to avoid resolving indexedAt for
+    // entries that would never be returned. rgSearch adds body matches on
+    // top, but the resultById map keeps the total bounded.
+    Promise.resolve(indexScanFromEntries(query, allEntries, normalizedTags, limit)),
     rgSearch(query, namespacePath),
   ]);
 
