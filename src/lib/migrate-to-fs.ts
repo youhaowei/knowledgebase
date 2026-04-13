@@ -12,7 +12,7 @@
 
 import { createGraphProvider } from "./graph-provider.js";
 import { ensureNamespacePath, generateIndex, resolveNamespacePath, writeMemoryFile } from "./fs-memory.js";
-import { existsSync } from "fs";
+import { existsSync, utimesSync } from "fs";
 import { join } from "path";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
@@ -82,13 +82,24 @@ async function migrateOne(
   }
 
   const createdAt = m.createdAt instanceof Date ? m.createdAt.toISOString() : String(m.createdAt ?? now);
+  const stampedAt = new Date(now);
   const frontmatter: MemoryFrontmatter = {
     id: m.id, name: m.name || "", origin: originForNamespace(ns),
-    namespace: ns, tags: [], createdAt, indexedAt: now,
+    namespace: ns, tags: [], createdAt, indexedAt: stampedAt.toISOString(),
   };
 
   try {
-    writeMemoryFile(m.id, m.text ?? "", frontmatter);
+    const writtenPath = writeMemoryFile(m.id, m.text ?? "", frontmatter);
+    // Spec Decision #8: align mtime with the stamped indexedAt so the
+    // `stale = mtime > indexedAt` invariant doesn't fire on every freshly
+    // migrated file. Without this, the post-write mtime is later than `now`
+    // and every migrated memory looks stale on first read. Mirrors the
+    // pattern in operations.persistProcessedMemory.
+    try {
+      utimesSync(writtenPath, stampedAt, stampedAt);
+    } catch (err) {
+      console.error(`[migrate]   WARN failed to align mtime for ${m.id}: ${err}`);
+    }
     console.error(`[migrate]   wrote: ${m.id} (${label})`);
     counters.written++;
   } catch (err) {
