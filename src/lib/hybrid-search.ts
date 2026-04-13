@@ -8,7 +8,7 @@
 
 import * as ops from "./operations.js";
 import { fileSearch, type FileSearchResult } from "./file-search.js";
-import { normalizeTags } from "./fs-memory.js";
+import { listMemoryFiles, normalizeTags } from "./fs-memory.js";
 import type { Memory, StoredEdge, StoredEntity, Intent } from "../types.js";
 
 export type { FileSearchResult };
@@ -112,11 +112,17 @@ export async function hybridSearch(
   let edges = graphResult?.edges ?? [];
   let entities = graphResult?.entities ?? [];
 
-  // When filtering by tags, restrict graph results to tagged file IDs.
-  // fileSearch already returns tagged entries, so reuse its IDs instead of
-  // calling listMemoryFiles again.
+  // When filtering by tags, restrict graph results to the tagged allowlist.
+  // The allowlist must be built from ALL tagged files in the namespace, not
+  // the paginated fileSearch slice — a tagged memory outside the top-N file
+  // results would otherwise be incorrectly dropped from graph results even
+  // when graph ranks it highly (US-8 breaks at scale).
   if (normalizedTags && normalizedTags.length > 0) {
-    const taggedFileIds = new Set(fileResults.map((f) => f.id));
+    const taggedFileIds = new Set(
+      listMemoryFiles(namespace)
+        .filter((entry) => normalizedTags.every((tag) => entry.tags.includes(tag)))
+        .map((entry) => entry.id),
+    );
     ({ memories, edges, entities } = filterGraphResultsByTaggedFileIds(
       graphResult,
       taggedFileIds,

@@ -259,6 +259,50 @@ describe("hybridSearch file results", () => {
     expect(match!.indexedAt).toBeNull(); // unindexed: explicit null, not undefined
   });
 
+  test("US-8: tag filter allowlist covers ALL tagged files, not just the top-N file-search slice", async () => {
+    // Seed N+1 memories with the same tag so fileSearch({ limit: N }) pages
+    // them — the tagged-memory allowlist for graph results must still include
+    // the one that falls off the paginated file slice.
+    const ns = `hybrid-tagfilter-${randomUUID().slice(0, 8)}`;
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const id = randomUUID();
+      ids.push(id);
+      writeMemoryFile(
+        id,
+        `body ${i}`,
+        makeFrontmatter({
+          id,
+          namespace: ns,
+          name: `tagged-${i}`,
+          tags: ["shared"],
+        }),
+      );
+    }
+
+    // Graph ranks the 4th (last) tagged file highest — this is exactly the
+    // memory that fileSearch(limit: 2) would omit from its paginated slice.
+    const highestGraphRankId = ids[3];
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [{
+          id: highestGraphRankId, name: "tagged-3", text: "body 3",
+          abstract: "", summary: "", namespace: ns, schemaVersion: "0.0.0",
+          createdAt: new Date(),
+        }],
+        edges: [], entities: [],
+        intent: "general", guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("tagged", ns, 2, ["shared"]);
+
+    // The graph's best hit must survive even though fileSearch's paginated
+    // results don't include it. Before the H6 fix, the tag allowlist was
+    // built from fileSearch's top-N → the graph result was filtered out.
+    expect(result.memories.some((m) => m.id === highestGraphRankId)).toBe(true);
+  });
+
   test("Decision #8: signals.contradictionsDetected fires when edges carry opposing sentiment on the same pair", async () => {
     const ns = `hybrid-contradict-${randomUUID().slice(0, 8)}`;
 
