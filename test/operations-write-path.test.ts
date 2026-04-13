@@ -220,7 +220,12 @@ describe("operations write-path invariants", () => {
     expect(updated.indexedAt).toBeDefined();
   });
 
-  test("getProvider retries after init failure (doesn't cache the rejected promise) — degraded-mode recovery path", async () => {
+  test("getProvider enters cooldown after init failure, then recovers when cooldown clears — degraded-mode contract", async () => {
+    // Spec/codex: after a provider init failure, the cooldown short-circuits
+    // subsequent calls so degraded-mode requests don't churn through repeated
+    // init attempts (and re-emit the same error log on every search). Once
+    // the cooldown clears (production: wall-clock timeout; tests: explicit
+    // helper), the next call retries init and recovers.
     createTempEnvironment();
 
     let attempts = 0;
@@ -237,7 +242,15 @@ describe("operations write-path invariants", () => {
       createQueue: createQueueFactory(),
     });
 
+    // First call: real init fails.
     await expect(operations.getProvider()).rejects.toThrow("Transient provider init failure");
+
+    // Second call (within cooldown window): fails fast without re-entering init.
+    await expect(operations.getProvider()).rejects.toThrow("in failure cooldown");
+    expect(attempts).toBe(1);
+
+    // Clear cooldown and verify recovery on next call.
+    operations.clearProviderFailureCooldownForTests();
     await expect(operations.getProvider()).resolves.toBe(provider);
     expect(attempts).toBe(2);
   });

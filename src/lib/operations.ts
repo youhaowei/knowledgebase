@@ -32,7 +32,15 @@ type OperationsState = {
   queue: Queue | null;
   inFlightIndexing: Set<string>;
   addLocks: Map<string, Promise<void>>;
+  // Cooldown after a provider init failure. Without this, every degraded-mode
+  // call re-attempts native addon init / DB open and re-emits the same error,
+  // turning a single graph outage into a torrent of repeated failures (and
+  // logs). Callers that catch the throw and fall back to fs-only get the
+  // intended behaviour: try again later, not on the next request.
+  providerFailedUntilMs: number;
 };
+
+const PROVIDER_FAILURE_COOLDOWN_MS = 30_000;
 
 function createInitialState(): OperationsState {
   return {
@@ -40,6 +48,7 @@ function createInitialState(): OperationsState {
     queue: null,
     inFlightIndexing: new Set(),
     addLocks: new Map(),
+    providerFailedUntilMs: 0,
   };
 }
 
@@ -230,15 +239,24 @@ async function addMemoryLocked(
 
 /** Shared provider singleton. Exported for modules that need direct provider access. */
 export async function getProvider() {
+  // Inside the cooldown window, fail fast with the same shape the original
+  // init error would produce. Degraded-mode callers (search, stats, get, ...)
+  // already catch and fall back; this just keeps them from paying the init
+  // cost on every call when the provider is known to be down.
+  if (state.providerFailedUntilMs > Date.now()) {
+    throw new Error("Graph provider unavailable (in failure cooldown)");
+  }
   if (!state.providerPromise) {
     state.providerPromise = operationDependencies.createGraphProvider()
       .then((p) => {
         state.queue = operationDependencies.createQueue(p);
+        state.providerFailedUntilMs = 0;
         return p;
       })
       .catch((error) => {
         state.providerPromise = null;
         state.queue = null;
+        state.providerFailedUntilMs = Date.now() + PROVIDER_FAILURE_COOLDOWN_MS;
         throw error;
       });
   }
@@ -460,7 +478,7 @@ export async function forget(
   name: string,
   namespace: string,
   reason = "forget",
-): Promise<{ deleted: boolean; reason?: string }> {
+): Promise<{ deleted: boolean; reason?: string; tombstonePath?: string }> {
   return tracked("forget", { namespace }, async () => {
     // Spec Decision #11: tombstone via filesystem. The CLI never opens
     // LadybugDB. The server reconciler consumes `_tombstones.jsonl` on its
@@ -478,7 +496,9 @@ export async function forget(
       return { deleted: false, reason: "Not found" };
     }
 
-    return { deleted: true };
+    // Surface the .deleted path so callers can render a recovery hint —
+    // forget renames rather than unlinks for exactly this reason.
+    return { deleted: true, tombstonePath: tombstoned.tombstonePath };
   }, (result) => ({
     name,
     deleted: result.deleted,
@@ -582,4 +602,14 @@ export function configureOperationDependenciesForTests(overrides: Partial<typeof
     ?? defaultOperationDependencies.createGraphProvider;
   operationDependencies.createQueue = overrides.createQueue
     ?? defaultOperationDependencies.createQueue;
+}
+
+/**
+ * Test-only escape hatch: clear the post-failure cooldown so the next
+ * getProvider() call attempts init again. Production code paths just wait
+ * for the cooldown to expire — this exists so tests can exercise recovery
+ * without sleeping for the full 30s window.
+ */
+export function clearProviderFailureCooldownForTests(): void {
+  state.providerFailedUntilMs = 0;
 }
