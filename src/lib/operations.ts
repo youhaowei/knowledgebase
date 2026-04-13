@@ -15,6 +15,7 @@ import { Queue } from "./queue.js";
 import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import { join } from "path";
+import { utimesSync } from "fs";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
@@ -94,12 +95,19 @@ async function persistProcessedMemory(
     const nextAbstract = memory.abstract ?? currentFrontmatter.abstract;
     const nextSummary = memory.summary ?? currentFrontmatter.summary;
 
+    // Spec Decision #8 ordering: stamp indexedAt to match the file's final
+    // mtime so `stale = mtime > indexedAt` is NOT true immediately after a
+    // successful write. Stamping Date.now() before writeMemoryFile leaves
+    // indexedAt behind the actual mtime by however long the write takes,
+    // which read-back would misinterpret as the user having edited the
+    // file post-index.
+    const stampedAt = new Date();
     const nextFrontmatter: MemoryFrontmatter = {
       ...currentFrontmatter,
       // Preserve the current on-disk name so user edits made during async
       // extraction are not clobbered by the queue-time snapshot.
       name: currentFrontmatter.name,
-      indexedAt: new Date().toISOString(),
+      indexedAt: stampedAt.toISOString(),
       schemaVersion: memory.schemaVersion || currentFrontmatter.schemaVersion || "0.0.0",
       ...(nextAbstract !== undefined ? { abstract: nextAbstract } : {}),
       ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
@@ -111,7 +119,19 @@ async function persistProcessedMemory(
         : {}),
     };
 
-    writeMemoryFile(memory.id, currentText, nextFrontmatter);
+    const writtenPath = writeMemoryFile(memory.id, currentText, nextFrontmatter);
+    // Align the file's mtime with the stamped indexedAt so the staleness
+    // invariant is self-consistent at write time. Any subsequent real user
+    // edit will bump mtime past indexedAt and correctly flag the file as
+    // stale for the next indexer sweep.
+    try {
+      utimesSync(writtenPath, stampedAt, stampedAt);
+    } catch (err) {
+      // Non-fatal: if we can't set the mtime (e.g., readonly mount in
+      // tests), the file is still written correctly. The next sweep may
+      // briefly see stale=true but will re-extract against the same body.
+      console.error(`[kb] Failed to align mtime for ${memory.id}:`, err);
+    }
     updateIndexEntry(resolveNamespacePath(ns), nextFrontmatter);
   });
 }

@@ -619,12 +619,17 @@ export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
   }
 
   // Self-heal: reconcile _index.md with disk so the next call takes the fast path.
-  // Best-effort — drift detection triggered the slow path, but a failure here must
-  // not break the caller.
-  try {
-    generateIndex(nsPath);
-  } catch (err) {
-    console.error(`[fs-memory] Failed to regenerate _index.md after drift:`, err);
+  // listMemoryFiles is synchronous and lock-free by design, so we can't reach
+  // through `withNamespaceLock` here. Instead, yield to any in-progress writer:
+  // if the namespace lock directory exists, that writer will regenerate the
+  // index when it commits, and our self-heal would race its snapshot.
+  // When no writer is active, we do the regeneration directly — still best-effort.
+  if (!existsSync(getNamespaceLockPath(namespace))) {
+    try {
+      generateIndex(nsPath);
+    } catch (err) {
+      console.error(`[fs-memory] Failed to regenerate _index.md after drift:`, err);
+    }
   }
 
   return entries;
