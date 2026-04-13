@@ -321,6 +321,74 @@ export function deleteMemoryFile(name: string, namespace: string): { id: string;
   return { id: match.id, path: match.path };
 }
 
+/**
+ * Tombstones a memory per Spec Decision #11: renames the file to
+ * `{uuid}.md.deleted` (body preserved for recovery) and appends a record to
+ * `{namespace}/_tombstones.jsonl`. The CLI never opens LadybugDB — the server
+ * reconciler (Phase 2) consumes tombstones and applies graph cleanup.
+ * Returns the tombstoned file's id/path, or null if not found.
+ * Callers own index regeneration.
+ */
+export function tombstoneMemoryFile(
+  name: string,
+  namespace: string,
+  reason: string,
+): { id: string; path: string; tombstonePath: string } | null {
+  const entries = listMemoryFiles(namespace);
+  const nameLower = name.toLowerCase();
+  const match = entries.find((e) => e.name.toLowerCase() === nameLower);
+  if (!match) return null;
+
+  const tombstonePath = `${match.path}.deleted`;
+  try {
+    renameSync(match.path, tombstonePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+
+  const nsPath = resolveNamespacePath(namespace);
+  const jsonlPath = join(nsPath, "_tombstones.jsonl");
+  const record = JSON.stringify({
+    id: match.id,
+    name: match.name,
+    reason,
+    timestamp: new Date().toISOString(),
+  }) + "\n";
+  try {
+    const existing = existsSync(jsonlPath) ? readFileSync(jsonlPath, "utf-8") : "";
+    writeFileSync(jsonlPath, existing + record);
+  } catch (err) {
+    // Best-effort: if the log write fails after the rename, the file is still
+    // tombstoned (searches won't return it). Reconciler will catch up via directory scan.
+    console.error(`[fs-memory] Failed to append to _tombstones.jsonl:`, err);
+  }
+
+  return { id: match.id, path: match.path, tombstonePath };
+}
+
+/**
+ * Appends an edge-forget intent to `{namespace}/_forget_edges.jsonl` per Spec
+ * Decision #11. The CLI never opens LadybugDB; the server reconciler consumes
+ * the log and invalidates the edge with the recorded reason.
+ */
+export function recordForgetEdge(
+  edgeId: string,
+  reason: string,
+  namespace: string,
+): void {
+  const nsPath = resolveNamespacePath(namespace);
+  if (!existsSync(nsPath)) mkdirSync(nsPath, { recursive: true });
+  const jsonlPath = join(nsPath, "_forget_edges.jsonl");
+  const record = JSON.stringify({
+    edgeId,
+    reason,
+    timestamp: new Date().toISOString(),
+  }) + "\n";
+  const existing = existsSync(jsonlPath) ? readFileSync(jsonlPath, "utf-8") : "";
+  writeFileSync(jsonlPath, existing + record);
+}
+
 function parseIndexCell(cell: string): string {
   return cell.trim().replace(/\\\|/g, "|");
 }

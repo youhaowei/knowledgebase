@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -257,7 +257,7 @@ describe("operations write-path regressions", () => {
     expect(queueState.adds).toBe(2);
   });
 
-  test("forget deletes the filesystem source before touching the graph", async () => {
+  test("Decision #11: forget tombstones the file and never touches the graph", async () => {
     createTempEnvironment();
 
     const id = randomUUID();
@@ -268,11 +268,10 @@ describe("operations write-path regressions", () => {
       namespace,
     }));
 
-    let fileStillPresentWhenGraphRan = true;
+    let providerForgetCalled = false;
     provider = makeProvider({
       forget: async () => {
-        fileStillPresentWhenGraphRan = listMemoryFiles(namespace)
-          .some((entry) => entry.id === id);
+        providerForgetCalled = true;
         return { deletedMemory: true, deletedEntity: false };
       },
     });
@@ -281,6 +280,100 @@ describe("operations write-path regressions", () => {
     const result = await ops.forget("Delete Me", namespace);
 
     expect(result.deleted).toBe(true);
-    expect(fileStillPresentWhenGraphRan).toBe(false);
+    // Spec Decision #11: CLI path never opens LadybugDB. The provider's
+    // forget must not be called from operations.forget() — the server
+    // reconciler consumes _tombstones.jsonl on its sweep instead.
+    expect(providerForgetCalled).toBe(false);
+    // File is tombstoned, not removed. Body preserved for recovery.
+    expect(listMemoryFiles(namespace).some((e) => e.id === id)).toBe(false);
+  });
+
+  test("Decision #11: forget preserves the file body by renaming to {uuid}.md.deleted", async () => {
+    createTempEnvironment();
+
+    const id = randomUUID();
+    const namespace = "default";
+    const body = "content that must survive for recovery";
+    const originalPath = writeMemoryFile(id, body, makeFrontmatter({
+      id,
+      name: "Recoverable Memory",
+      namespace,
+    }));
+
+    const ops = await loadOperations();
+    const result = await ops.forget("Recoverable Memory", namespace);
+    expect(result.deleted).toBe(true);
+
+    // Original file is gone; tombstoned sibling preserves the body.
+    expect(existsSync(originalPath)).toBe(false);
+    const tombstonePath = `${originalPath}.deleted`;
+    expect(existsSync(tombstonePath)).toBe(true);
+    expect(readFileSync(tombstonePath, "utf-8")).toContain(body);
+  });
+
+  test("Decision #11: forget appends a record to _tombstones.jsonl with id/name/reason/timestamp", async () => {
+    createTempEnvironment();
+
+    const id = randomUUID();
+    const namespace = "default";
+    writeMemoryFile(id, "body", makeFrontmatter({
+      id,
+      name: "Logged Memory",
+      namespace,
+    }));
+
+    const ops = await loadOperations();
+    await ops.forget("Logged Memory", namespace, "manual purge");
+
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_tombstones.jsonl");
+    expect(existsSync(jsonlPath)).toBe(true);
+    const lines = readFileSync(jsonlPath, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(1);
+
+    const record = JSON.parse(lines[0]);
+    expect(record.id).toBe(id);
+    expect(record.name).toBe("Logged Memory");
+    expect(record.reason).toBe("manual purge");
+    expect(typeof record.timestamp).toBe("string");
+    // Reconciler (Phase 2) parses this record to apply graph cleanup.
+  });
+
+  test("Decision #11 + #9: forgetEdge appends to _forget_edges.jsonl and never touches memory files", async () => {
+    createTempEnvironment();
+
+    // Seed an unrelated memory so we can prove its file is untouched.
+    const unrelatedId = randomUUID();
+    const namespace = "default";
+    const unrelatedPath = writeMemoryFile(unrelatedId, "I am unrelated to any edge", makeFrontmatter({
+      id: unrelatedId,
+      name: "Unrelated",
+      namespace,
+    }));
+
+    let providerForgetEdgeCalled = false;
+    provider = makeProvider({
+      forgetEdge: async () => {
+        providerForgetEdgeCalled = true;
+        return { invalidated: true };
+      },
+    });
+
+    const ops = await loadOperations();
+    await ops.forgetEdge("edge-abc-123", "superseded by newer fact", namespace);
+
+    // Decision #11: CLI path does not open LadybugDB.
+    expect(providerForgetEdgeCalled).toBe(false);
+
+    // Decision #9: forgetEdge is graph-only; memory files are untouched.
+    expect(existsSync(unrelatedPath)).toBe(true);
+    expect(readFileSync(unrelatedPath, "utf-8")).toContain("I am unrelated to any edge");
+
+    // Intent is recorded for the reconciler.
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_forget_edges.jsonl");
+    expect(existsSync(jsonlPath)).toBe(true);
+    const record = JSON.parse(readFileSync(jsonlPath, "utf-8").trim());
+    expect(record.edgeId).toBe("edge-abc-123");
+    expect(record.reason).toBe("superseded by newer fact");
+    expect(typeof record.timestamp).toBe("string");
   });
 });

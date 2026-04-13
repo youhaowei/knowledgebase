@@ -214,24 +214,15 @@ const forgetEdgeSchema = z.object({
 export const forgetEdge = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => forgetEdgeSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const result = await ops.forgetEdge(data.edgeId, data.reason, data.namespace);
-
-    if (!result.invalidatedEdge) {
-      throw new Error(`Edge not found: "${data.edgeId}"`);
-    }
+    // Spec Decision #11: forgetEdge records intent to _forget_edges.jsonl.
+    // The server reconciler (Phase 2) picks it up and applies graph invalidation.
+    await ops.forgetEdge(data.edgeId, data.reason, data.namespace);
 
     return {
       success: true,
-      message: `Invalidated: "${result.invalidatedEdge.fact}"`,
-      invalidatedEdge: {
-        id: result.invalidatedEdge.id,
-        fact: result.invalidatedEdge.fact,
-        sourceEntity: result.invalidatedEdge.sourceEntityName,
-        targetEntity: result.invalidatedEdge.targetEntityName,
-        relationType: result.invalidatedEdge.relationType,
-        invalidAt: result.invalidatedEdge.invalidAt,
-      },
-      auditMemoryId: result.auditMemoryId,
+      message: `Queued for invalidation: edge "${data.edgeId}" in namespace "${data.namespace}". Graph cleanup happens on the next reconciler sweep.`,
+      edgeId: data.edgeId,
+      namespace: data.namespace,
     };
   }));
 

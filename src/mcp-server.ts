@@ -229,14 +229,9 @@ export function createKnowledgebaseMcpServer() {
     },
     withMcpSource(async ({ edgeId, reason, namespace }) => {
       try {
-        const result = await ops.forgetEdge(edgeId, reason, namespace);
-        if (!result.invalidatedEdge) {
-          return {
-            content: [
-              { type: "text" as const, text: `Edge not found: "${edgeId}"` },
-            ],
-          };
-        }
+        // Spec Decision #11: forgetEdge records intent to _forget_edges.jsonl.
+        // Graph invalidation happens on the next server reconciler sweep (Phase 2).
+        await ops.forgetEdge(edgeId, reason, namespace);
         return {
           content: [
             {
@@ -244,14 +239,9 @@ export function createKnowledgebaseMcpServer() {
               text: JSON.stringify(
                 {
                   success: true,
-                  message: `Invalidated: "${result.invalidatedEdge.fact}"`,
-                  invalidatedEdge: {
-                    id: result.invalidatedEdge.id,
-                    fact: result.invalidatedEdge.fact,
-                    sourceEntity: result.invalidatedEdge.sourceEntityName,
-                    targetEntity: result.invalidatedEdge.targetEntityName,
-                  },
-                  auditMemoryId: result.auditMemoryId,
+                  message: `Queued edge "${edgeId}" for invalidation in namespace "${namespace}". Graph cleanup happens on the next reconciler sweep.`,
+                  edgeId,
+                  namespace,
                 },
                 null,
                 2,

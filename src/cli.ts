@@ -50,6 +50,7 @@ const envName = initialArgs.flags["--env"];
 // Set env BEFORE importing modules that create Graph singletons
 if (envName) {
   process.env.LADYBUG_DATA_PATH = `./.ladybug-${envName}`;
+  process.env.KB_MEMORY_PATH = `./.kb-${envName}/memories`;
 }
 
 // --- Dynamic imports (after env is set) ---
@@ -204,7 +205,7 @@ async function handleForgetEdge(ctx: CmdContext) {
   const reason = ctx.positional[2];
   if (!edgeId || !reason) throw new UsageError('Usage: kb forget-edge <edgeId> "<reason>"');
   const result = await ops.forgetEdge(edgeId, reason, ctx.namespace);
-  const msg = result.invalidatedEdge ? `Invalidated edge ${edgeId}` : `Edge not found: ${edgeId}`;
+  const msg = `Queued edge ${edgeId} for invalidation in "${ctx.namespace}"`;
   out(ctx, ctx.json ? result : msg);
 }
 

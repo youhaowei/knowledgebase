@@ -20,8 +20,9 @@ import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 import { tracked } from "./analytics.js";
 import {
-  writeMemoryFile, readMemoryFile, appendToIndex, updateIndexEntry, deleteMemoryFile, generateIndex,
+  writeMemoryFile, readMemoryFile, appendToIndex, updateIndexEntry, generateIndex,
   assertValidMemoryId, ensureNamespacePath, resolveNamespacePath, listMemoryFiles, listNamespaceDirs, normalizeTags, withNamespaceLock,
+  tombstoneMemoryFile, recordForgetEdge,
 } from "./fs-memory.js";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
@@ -429,23 +430,22 @@ export async function getByName(
 export async function forget(
   name: string,
   namespace: string,
+  reason = "forget",
 ): Promise<{ deleted: boolean; reason?: string }> {
   return tracked("forget", { namespace }, async () => {
-    // Delete from the filesystem first because it is the source of truth.
-    // Graph cleanup happens second so a filesystem failure cannot orphan a
-    // phantom file that still appears on disk.
-    const fsResult = await withNamespaceLock(namespace, async () => {
-      const deleted = deleteMemoryFile(name, namespace);
-      if (deleted) {
+    // Spec Decision #11: tombstone via filesystem. The CLI never opens
+    // LadybugDB. The server reconciler consumes `_tombstones.jsonl` on its
+    // sweep (Phase 2) and applies graph cleanup. Graph state is stale until
+    // the reconciler runs — consistent with Degraded Mode contract.
+    const tombstoned = await withNamespaceLock(namespace, async () => {
+      const result = tombstoneMemoryFile(name, namespace, reason);
+      if (result) {
         generateIndex(resolveNamespacePath(namespace));
       }
-      return deleted;
+      return result;
     });
 
-    const gp = await getProvider();
-    const result = await gp.forget(name, namespace);
-
-    if (!result.deletedMemory && !result.deletedEntity && !fsResult) {
+    if (!tombstoned) {
       return { deleted: false, reason: "Not found" };
     }
 
@@ -458,8 +458,10 @@ export async function forget(
 
 export async function forgetEdge(edgeId: string, reason: string, namespace = "default") {
   return tracked("forgetEdge", { namespace }, async () => {
-    const gp = await getProvider();
-    return gp.forgetEdge(edgeId, reason, namespace);
+    // Spec Decision #11: append to _forget_edges.jsonl; reconciler applies
+    // the graph-side invalidation on its sweep.
+    recordForgetEdge(edgeId, reason, namespace);
+    return { edgeId, reason, namespace };
   }, () => ({
     edgeId,
     reason,
