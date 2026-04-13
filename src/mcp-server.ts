@@ -102,7 +102,7 @@ export function createKnowledgebaseMcpServer() {
 
   server.tool(
     "search",
-    "Search the knowledge graph. Returns edges (facts as relationships), memories, and entities. Use detail parameter to control response granularity: 'summary' (cheapest, abstracts only), 'full' (default, summaries + facts), 'source' (everything including full text).",
+    "Search the knowledge graph. Returns edges (facts as relationships), memories, entities, and files. Response includes `signals` (degraded, unindexedCount, staleCount, contradictionsDetected) for health-aware rendering — prefer this over the deprecated `guidance` string. Use detail parameter to control response granularity: 'summary' (cheapest, abstracts only), 'full' (default, summaries + facts), 'source' (everything including full text).",
     {
       query: z.string().describe("Search query"),
       namespace: z

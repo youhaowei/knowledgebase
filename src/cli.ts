@@ -210,12 +210,20 @@ async function handleGet(ctx: CmdContext) {
   }
 }
 
+function formatForgetMessage(name: string, result: Awaited<ReturnType<typeof ops.forget>>): string {
+  if (!result.deleted) return `Not found: ${result.reason}`;
+  // Show the recovery path on success — `forget` renames to .md.deleted
+  // (Spec Decision #11) so accidental deletes are recoverable with `mv`.
+  if (!result.tombstonePath) return `Deleted "${name}"`;
+  const restoredPath = result.tombstonePath.replace(/\.deleted$/, "");
+  return `Deleted "${name}" (recover: mv "${result.tombstonePath}" "${restoredPath}")`;
+}
+
 async function handleForget(ctx: CmdContext) {
   const name = ctx.positional[1];
   if (!name) throw new UsageError("Usage: kb forget <name> --ns <namespace>");
   const result = await ops.forget(name, ctx.namespace);
-  const msg = result.deleted ? `Deleted "${name}"` : `Not found: ${result.reason}`;
-  out(ctx, ctx.json ? result : msg);
+  out(ctx, ctx.json ? result : formatForgetMessage(name, result));
 }
 
 async function handleForgetEdge(ctx: CmdContext) {
@@ -257,7 +265,17 @@ async function handleMigrate(ctx: CmdContext) {
   const dryRun = ctx.flags["--dry-run"] === "true";
   const { migrate } = await import("./lib/migrate-to-fs.js");
   await migrate(dryRun);
-  if (ctx.json) out(ctx, { done: true });
+  if (ctx.json) {
+    out(ctx, { done: true, dryRun });
+  } else {
+    // Without this, a human running `kb migrate` gets a silent exit 0 — the
+    // migrate() function logs progress to stderr but the "result" line goes
+    // nowhere. Confirm completion on stdout so success is visible.
+    const target = process.env.KB_MEMORY_PATH ?? "~/.kb/memories";
+    out(ctx, dryRun
+      ? `Migration dry-run complete. No files written. Target: ${target}`
+      : `Migration complete. Target: ${target}`);
+  }
 }
 
 function parseSinceFlag(sinceFlag: string): string {
@@ -349,7 +367,7 @@ Flags:
   --env <name>                  Environment (data isolation, e.g. "test")
   --name <name>                 Name for add command
   --origin <type>               Origin type (manual|retro|mcp|import)
-  --tag <tag>                   Tag for add/search (repeatable: --tag bug --tag ui)
+  --tag <tag>                   Tag for add/search (repeatable: --tag bug --tag ui, or comma-separated: --tag bug,ui)
   --limit <n>                   Result limit for search (default: 10)
   --json                        Output raw JSON (machine-readable contract)
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)

@@ -107,7 +107,13 @@ describe("operations.getByName", () => {
   });
 
   test("case-insensitive filesystem lookup", async () => {
-    const result = await ops.getByName("fallback memory", "ops-get-test");
+    // Self-contained: don't depend on the previous test's add. Test ordering
+    // and afterEach behavior changes shouldn't break this assertion — and
+    // the previous test only calls `resetOperationStateForTests` (singletons)
+    // not a filesystem cleanup, so the file may or may not exist depending
+    // on harness changes. Add explicitly here.
+    await ops.addMemory("Body for case-insensitive lookup", "Fallback Memory", "ops-get-case-test");
+    const result = await ops.getByName("fallback memory", "ops-get-case-test");
     expect(result.memory).toBeDefined();
     expect(result.memory!.name).toBe("Fallback Memory");
   });
