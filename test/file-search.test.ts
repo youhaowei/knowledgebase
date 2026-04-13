@@ -193,22 +193,41 @@ describe("fileSearch — body text matching (ripgrep)", () => {
 
 describe("fileSearch — deduplication", () => {
   test("deduplicates by ID when name and body both match", async () => {
-    // "beta project" name matches "beta" AND body has "ripgrep target"
-    // If we search "ripgrep", beta appears via rg
-    // If we search "beta", beta appears via index scan
-    // Either way it should appear only once
+    // idBeta has body containing "ripgrep" AND name containing "ripgrep" would
+    // never happen in practice, so use a query that matches both surfaces.
+    // "ripgrep" query: body match via rg.
+    // "beta" query: name match via index scan.
+    // Either way beta should appear exactly once — the dedup contract.
     const results = await fileSearch("beta", TEST_NS);
     const betaMatches = results.filter((r) => r.id === idBeta);
     expect(betaMatches.length).toBe(1);
   });
 
-  test("index scan result wins for metadata when both sources match", async () => {
-    // "beta" matches both name AND body has "ripgrep target"
-    // After a broader search, beta should appear once with index scan metadata
+  test("M18: name-only match stays source=\"index\" (frontmatter is not a body match)", async () => {
+    // "beta" matches the frontmatter `name:` field of idBeta but does NOT
+    // appear anywhere in the body. Before the M18 fix, ripgrep surfaced the
+    // frontmatter line as a body hit and upgraded source to "file", feeding
+    // LLM consumers a YAML fragment as the snippet. Correct behavior: the
+    // index-scan name match wins, source stays "index", matchContext absent.
     const results = await fileSearch("beta", TEST_NS);
     const found = results.find((r) => r.id === idBeta);
     expect(found).toBeDefined();
+    expect(found!.source).toBe("index");
+    expect(found!.matchContext).toBeUndefined();
+  });
+
+  test("M18: body match upgrades source to \"file\" with a real body snippet", async () => {
+    // "ripgrep target" appears in the body of idBeta only. A body match
+    // must populate matchContext with the actual body line, not the
+    // frontmatter `name:` line.
+    const results = await fileSearch("ripgrep target", TEST_NS);
+    const found = results.find((r) => r.id === idBeta);
+    expect(found).toBeDefined();
     expect(found!.source).toBe("file");
+    expect(found!.matchContext).toBeDefined();
+    expect(found!.matchContext).toContain("ripgrep target");
+    // Sanity: the frontmatter `name:` line is not what we surface.
+    expect(found!.matchContext).not.toContain("name:");
   });
 });
 

@@ -8,7 +8,7 @@
  * Results are merged and deduped by memory ID. Target: <50ms for 100 files.
  */
 
-import { statSync } from "fs";
+import { statSync, readFileSync } from "fs";
 import matter from "gray-matter";
 import { listMemoryFiles, normalizeTags, resolveNamespacePath, type MemoryFileEntry } from "./fs-memory.js";
 
@@ -108,22 +108,69 @@ function indexScanFromEntries(
 }
 
 /**
- * Parse ripgrep JSON output and extract first match context per file.
+ * Returns the 1-indexed line number where the YAML frontmatter closes
+ * (the second `---` fence). Returns 0 if the file has no frontmatter,
+ * or the file can't be read — callers treat 0 as "no filter", i.e.
+ * fall back to the old behavior where frontmatter hits could slip through.
+ *
+ * Cached per search call; a single memory file may produce many ripgrep
+ * matches and we only want to scan it once.
+ */
+function frontmatterEndLine(filePath: string, cache: Map<string, number>): number {
+  const cached = cache.get(filePath);
+  if (cached !== undefined) return cached;
+
+  let end = 0;
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const lines = content.split("\n");
+    if (lines[0]?.trim() === "---") {
+      for (let i = 1; i < lines.length; i++) {
+        if (lines[i].trim() === "---") {
+          end = i + 1; // 1-indexed, match ripgrep's line_number
+          break;
+        }
+      }
+    }
+  } catch {
+    // File vanished between rg and here — leave end at 0 so the match
+    // passes through (we don't want an I/O race to drop real results).
+  }
+
+  cache.set(filePath, end);
+  return end;
+}
+
+/**
+ * Parse ripgrep JSON output and extract the first BODY match context per
+ * file. Matches inside the YAML frontmatter (line_number ≤ closing fence)
+ * are dropped — otherwise searching "dx-review" surfaces the `name:` line
+ * as the snippet, which is useless to LLM consumers expecting body content.
  */
 function parseRgOutput(output: string): Map<string, string> {
   const result = new Map<string, string>();
   const lines = output.trim().split("\n").filter(Boolean);
+  const frontmatterCache = new Map<string, number>();
 
   for (const line of lines) {
     try {
       const obj = JSON.parse(line);
-      if (obj.type === "match") {
-        const filePath = obj.data.path.text as string;
-        const context = (obj.data.lines.text as string).trim();
-        // Only store the first match context per file
-        if (!result.has(filePath)) {
-          result.set(filePath, context);
-        }
+      if (obj.type !== "match") continue;
+
+      const filePath = obj.data.path.text as string;
+      const lineNumber = obj.data.line_number as number | undefined;
+      const context = (obj.data.lines.text as string).trim();
+
+      // Drop matches inside frontmatter. Falls back to the previous "any
+      // match" behavior if we can't determine the fence position (empty
+      // frontmatterEndLine), so missing files don't vanish from results.
+      if (lineNumber !== undefined) {
+        const endLine = frontmatterEndLine(filePath, frontmatterCache);
+        if (endLine > 0 && lineNumber <= endLine) continue;
+      }
+
+      if (!result.has(filePath)) {
+        result.set(filePath, context);
       }
     } catch {
       // skip malformed JSON lines
