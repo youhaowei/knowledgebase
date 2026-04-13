@@ -338,11 +338,26 @@ Flags:
   --origin <type>               Origin type (manual|retro|mcp|import)
   --tag <tag>                   Tag for add/search (repeatable: --tag bug --tag ui)
   --limit <n>                   Result limit for search (default: 10)
-  --json                        Output raw JSON
+  --json                        Output raw JSON (machine-readable contract)
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)
   --op <operation>              Analytics operation filter
   --dry-run                     Preview migrate without writing files
   -i                            Interactive mode
+
+Environment:
+  KB_MEMORY_PATH                Memory directory (default: ~/.kb/memories)
+  LADYBUG_DATA_PATH             LadybugDB data directory (default: ./.ladybug)
+  EXTRACTION_MODEL              Ollama extraction model (default: gemma4:e4b)
+  EMBEDDING_MODEL               Embedder choice: "built-in" (default) or "ollama"
+  OLLAMA_URL                    Ollama server URL (default: http://localhost:11434)
+  NEO4J_URI                     Opt-in Neo4j backend (replaces LadybugDB when set)
+  KB_DISABLE_SERVER_INDEXER     Set to "true" to disable the 60s indexer sweep
+
+Output contract:
+  Default stdout is human-readable prose for terminal use. For piping or
+  scripting, pass --json — every command emits a JSON payload on stdout
+  with the same shape as the MCP response (Spec Decision #8). All
+  diagnostics and progress messages go to stderr regardless of --json.
 
 Interactive: Run 'kb' or 'kb -i' for a REPL.
 `.trim());

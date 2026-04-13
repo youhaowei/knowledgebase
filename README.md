@@ -271,23 +271,32 @@ bun run tsc --noEmit
 
 ## 🔧 Configuration
 
-**Environment Variables** (`.env`):
+**Environment Variables** (`.env`, or set in shell):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KB_MEMORY_PATH` | `~/.kb/memories` | Memory filesystem root — source of truth per Spec Decision #1. Set to isolate test data from production. |
+| `LADYBUG_DATA_PATH` | `./.ladybug` | LadybugDB graph index location. `kb --env <name>` overrides this + `KB_MEMORY_PATH`. |
+| `NEO4J_URI` | unset | Opt-in: switches the graph backend from embedded LadybugDB to remote Neo4j. Requires `NEO4J_USER`, `NEO4J_PASSWORD`. |
+| `NEO4J_USER` | `neo4j` | Neo4j username (when `NEO4J_URI` is set). |
+| `NEO4J_PASSWORD` | (required with `NEO4J_URI`) | Neo4j password. |
+| `EXTRACTION_MODEL` | `gemma4:e4b` | Ollama model used for entity/edge extraction. Benchmarked default. |
+| `EMBEDDING_MODEL` | `built-in` | Embedder choice — `built-in` (Snowflake Arctic xs, 384-dim, in-process) or `ollama` (2560-dim, requires OLLAMA_URL reachable). Resolved Open Q #4: built-in is sufficient for all retrieval tiers. |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL. Used by extraction always; by embedder only when `EMBEDDING_MODEL=ollama`. |
+| `KB_DISABLE_SERVER_INDEXER` | unset | Set to `"true"` to suppress the 60s reconciliation sweep (useful in tests and short-lived server runs). |
+| `CLAUDE_CODE_OAUTH_TOKEN` | unset | MCP-only: OAuth token for the Claude backend used by `unifai` during extraction. |
+| `API_PORT` | `4000` | Web/MCP server port. |
+
+Minimal `.env`:
 
 ```bash
-# Claude OAuth (for MCP only)
+# MCP extraction (optional — falls back to Ollama if not set)
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 
-# Neo4j
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=password
-
-# Ollama
-OLLAMA_URL=http://localhost:11434
-EMBEDDING_MODEL=qwen3-embedding:4b
-
-# API Server
-API_PORT=4000
+# Remote Neo4j (optional — default is embedded LadybugDB)
+# NEO4J_URI=bolt://localhost:7687
+# NEO4J_USER=neo4j
+# NEO4J_PASSWORD=password
 ```
 
 ## 📊 Example Workflow
