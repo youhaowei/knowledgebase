@@ -35,14 +35,42 @@ describe("operations.addMemory", () => {
     expect(frontmatter.name).toBe("First line title");
   });
 
-  test("deduplicates concurrent adds for the same name within one process", async () => {
-    const [first, second] = await Promise.all([
-      ops.addMemory("Memory text A", "Concurrent Name", "default"),
-      ops.addMemory("Memory text B", "concurrent name", "default"),
-    ]);
+  test("US-5 + edge-case 'Two adds with same name': first wins, second returns existing ID", async () => {
+    // Serialize the two adds so "first" is determined by call order, not by
+    // whichever Promise.all branch the scheduler ran first.
+    const first = await ops.addMemory("Memory text A", "Concurrent Name", "default");
+    const second = await ops.addMemory("Memory text B", "concurrent name", "default");
 
     const entries = listMemoryFiles("default").filter(
       (entry) => entry.name.toLowerCase() === "concurrent name",
+    );
+
+    expect(entries).toHaveLength(1);
+    // Second call returns the first's ID (Spec edge-case "First write wins.
+    // Second detects existing file, returns existing ID").
+    expect(first.status).toBe("written");
+    expect(second.status).toBe("existing");
+    expect(second.id).toBe(first.id);
+
+    // The surviving file must contain the first writer's body, not the second's.
+    // Without this, "first wins" is satisfied only on IDs — the body could
+    // silently belong to the loser and the test would still pass.
+    const surviving = readMemoryFile(entries[0]!.path);
+    expect(surviving.text).toContain("Memory text A");
+    expect(surviving.text).not.toContain("Memory text B");
+  });
+
+  test("US-5: concurrent adds via Promise.all still collapse to a single file", async () => {
+    // Same contract, race variant. Doesn't assert which body won (order is
+    // non-deterministic) — only that exactly one file exists and the two
+    // callers agree on the id.
+    const [first, second] = await Promise.all([
+      ops.addMemory("Memory text A2", "Race Name", "default"),
+      ops.addMemory("Memory text B2", "race name", "default"),
+    ]);
+
+    const entries = listMemoryFiles("default").filter(
+      (entry) => entry.name.toLowerCase() === "race name",
     );
 
     expect(entries).toHaveLength(1);

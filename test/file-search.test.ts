@@ -69,11 +69,15 @@ beforeAll(async () => {
     makeFrontmatter({ id: idTagged, name: "tagged item", tags: ["important"] }),
   );
 
-  // "indexed notes" — indexed, shares "notes" with gamma (unindexed) for sort testing
+  // "indexed notes" — indexed, shares "notes" with gamma (unindexed) for sort testing.
+  // Use an indexedAt explicitly 1 minute in the future so mtime (stamped at write
+  // time) is deterministically less than indexedAt, avoiding flaky stale=true on
+  // fast machines where file write lands after the new Date() call.
+  const futureIndexedAt = new Date(Date.now() + 60_000).toISOString();
   writeMemoryFile(
     idIndexedNotes,
     "Some indexed notes body.",
-    makeFrontmatter({ id: idIndexedNotes, name: "indexed notes", indexedAt: new Date().toISOString() }),
+    makeFrontmatter({ id: idIndexedNotes, name: "indexed notes", indexedAt: futureIndexedAt }),
   );
 });
 

@@ -477,6 +477,44 @@ function readDiskIds(nsPath: string): string[] {
 }
 
 /**
+ * Returns true if any memory file in the namespace has an mtime newer than
+ * `_index.md`. Signals that a user edited frontmatter in place and the cache
+ * is serving stale metadata (same ID set but different names/tags/indexedAt).
+ *
+ * Without this check, Spec Decision #1 ("files win on disagreement") is
+ * violated on the fast path — the cache serves stale data forever once the
+ * ID set matches.
+ */
+function isIndexStale(nsPath: string): boolean {
+  const indexPath = join(nsPath, "_index.md");
+  let indexMtime: number;
+  try {
+    indexMtime = statSync(indexPath).mtimeMs;
+  } catch {
+    // No _index.md — treat as stale so the slow path regenerates it.
+    return true;
+  }
+
+  let files: string[];
+  try {
+    files = readdirSync(nsPath).filter(
+      (f) => f.endsWith(".md") && f !== "_index.md" && !f.startsWith("."),
+    );
+  } catch {
+    return false;
+  }
+
+  for (const file of files) {
+    try {
+      if (statSync(join(nsPath, file)).mtimeMs > indexMtime) return true;
+    } catch {
+      // File disappeared mid-check — ignore, slow path handles it.
+    }
+  }
+  return false;
+}
+
+/**
  * Lists all memory files in a namespace directory.
  * Excludes _index.md. Returns parsed frontmatter metadata only (no body text).
  *
@@ -492,11 +530,13 @@ export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
   const indexedEntries = parseIndexEntries(nsPath);
   if (indexedEntries) {
     const diskIds = new Set(readDiskIds(nsPath));
-    const inSync =
+    const idsInSync =
       diskIds.size === indexedEntries.length
       && indexedEntries.every((e) => diskIds.has(e.id));
-    if (inSync) return indexedEntries;
-    // Drift detected — fall through to slow path, then regenerate the index.
+    if (idsInSync && !isIndexStale(nsPath)) return indexedEntries;
+    // Drift detected — either ID set diverged, or a memory file is newer
+    // than _index.md (user edited frontmatter in place). Spec Decision #1:
+    // files win. Fall through to slow path and regenerate the index.
   }
 
   const files = readdirSync(nsPath).filter(
@@ -663,6 +703,10 @@ export function updateIndexEntry(namespacePath: string, entry: MemoryFrontmatter
   const nextLines = [...lines];
   nextLines[rowIndex] = newRow;
   nextLines[0] = formatIndexHeader(namespace, total, unindexed - unindexedDelta);
+  // Trailing newline is mandatory — appendToIndex writes with one, so
+  // updateIndexEntry must too, or every pair of writes flip-flops the
+  // newline and produces spurious git diffs (Goal #3 git-trackable).
+  nextLines.push("");
 
   atomicWriteFile(indexPath, nextLines.join("\n"));
 }

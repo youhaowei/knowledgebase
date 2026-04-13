@@ -571,6 +571,34 @@ describe("listMemoryFiles — Decision #1: files win on _index.md drift", () => 
     expect(indexContent).toContain(idIndexed);
     expect(indexContent).toContain(idOrphan);
   });
+
+  test("Decision #1: file edited in place (name/tags) invalidates _index.md cache via mtime", async () => {
+    const ns = `drift-mtime-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const id = randomUUID();
+
+    writeMemoryFile(id, "body", makeFrontmatter({ id, namespace: ns, name: "Original Name", tags: ["a"] }));
+    generateIndex(nsPath);
+
+    // Prime the fast path
+    const firstCall = listMemoryFiles(ns);
+    expect(firstCall[0]!.name).toBe("Original Name");
+
+    // Ensure the memory file's mtime crosses the 1ms boundary above _index.md's mtime.
+    // On fast filesystems writes can land in the same ms tick as the index regeneration,
+    // which would make the drift check miss a real edit. Real user edits take longer
+    // than this gap — we bump explicitly so the test exercises the invariant.
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Simulate a user editing frontmatter in place via text editor. Same ID, new name.
+    writeMemoryFile(id, "body", makeFrontmatter({ id, namespace: ns, name: "Renamed", tags: ["a", "b"] }));
+
+    // Fast path must detect the drift and serve the updated metadata (Decision #1:
+    // files win on disagreement, not the cache).
+    const afterEdit = listMemoryFiles(ns);
+    expect(afterEdit[0]!.name).toBe("Renamed");
+    expect(afterEdit[0]!.tags).toContain("b");
+  });
 });
 
 describe("listMemoryFiles — malformed files", () => {

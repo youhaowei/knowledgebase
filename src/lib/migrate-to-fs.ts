@@ -102,6 +102,37 @@ function filterActive<T extends { name: string }>(memories: T[]): T[] {
   return memories.filter((m) => m.name !== "__ns_rollup__");
 }
 
+/**
+ * Paginate through all memories in a namespace. Continues fetching until the
+ * provider returns fewer rows than `pageSize` (signal that the stable-sorted
+ * stream is exhausted). Sorts by `createdAt` ascending so pages are stable
+ * across concurrent writers — a row inserted mid-export with a newer createdAt
+ * lands in the tail, not somewhere we've already scanned past.
+ *
+ * Per Spec Phase 1 Migration contract (pagination is mandatory): single-page
+ * reads silently truncate namespaces that exceed the ceiling.
+ */
+async function paginateMemories(
+  gp: Awaited<ReturnType<typeof createGraphProvider>>,
+  namespace: string,
+): Promise<MigrateMemory[]> {
+  const pageSize = 500;
+  const all: MigrateMemory[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await gp.findMemories(
+      { namespace },
+      pageSize,
+      { offset, sortBy: "createdAt", sortDir: "asc" },
+    );
+    const active = filterActive(page);
+    all.push(...active);
+    if (page.length < pageSize) break;
+    offset += page.length;
+  }
+  return all;
+}
+
 export async function migrate(
   dryRun = false,
   deps: MigrateDependencies = defaultMigrateDependencies,
@@ -114,11 +145,15 @@ export async function migrate(
   const namespaces = await gp.listNamespaces();
   console.error(`[migrate] Found namespaces: ${namespaces.join(", ") || "(none)"}`);
 
-  // Phase 1: Collect + preflight (query once, reuse for write phase)
+  // Phase 1: Collect + preflight (query once, reuse for write phase).
+  // Spec migration contract: paginate with a stable sort key (createdAt asc,
+  // ties broken by id) and continue until the provider returns fewer rows
+  // than the page size. Single-page reads silently truncate namespaces that
+  // exceed any hardcoded ceiling, which masks data loss.
   const allSummaries: MemorySummary[] = [];
   const memoriesByNs = new Map<string, MigrateMemory[]>();
   for (const ns of namespaces) {
-    const active = filterActive(await gp.findMemories({ namespace: ns }, 10000));
+    const active = await paginateMemories(gp, ns);
     memoriesByNs.set(ns, active);
     for (const m of active) {
       allSummaries.push({ id: m.id, name: m.name, namespace: ns });
