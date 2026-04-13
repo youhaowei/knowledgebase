@@ -5,9 +5,14 @@ import typescript from "typescript-eslint";
 
 export default defineConfig([
   {
-    ignores: ["dist/**", "node_modules/**", ".ladybug*/**"]
+    ignores: ["dist/**", "node_modules/**", ".ladybug*/**", "libs/**"]
   },
   eslint.configs.recommended,
   typescript.configs.recommended,
   sonarjs.configs.recommended,
+  {
+    rules: {
+      "sonarjs/todo-tag": "off",
+    },
+  },
 ]);
