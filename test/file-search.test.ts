@@ -314,6 +314,74 @@ describe("fileSearch — edge cases", () => {
     }
   });
 
+  test("PRD edge case: extraction-failed (unindexed) memories remain keyword-searchable", async () => {
+    // PRD edge-case table: "Extraction fails (LLM unavailable) → File remains
+    // unindexed. Retried on next cycle. File is still searchable via keywords."
+    // The cheapest way to simulate this without mocking the extractor is to
+    // write a memory file without `indexedAt` — that's the on-disk shape an
+    // unindexed file takes. ripgrep body-match must still find it, and the
+    // result must carry indexed=false so consumers know enrichment is pending.
+    const ns = `unindexed-keyword-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    try {
+      writeMemoryFile(
+        id,
+        "platypus venom evolution research notes",
+        {
+          id,
+          name: "platypus-research",
+          origin: "manual",
+          namespace: ns,
+          tags: [],
+          createdAt: new Date().toISOString(),
+          // indexedAt deliberately omitted — extraction never completed.
+        },
+      );
+
+      const results = await fileSearch("platypus", ns);
+      const match = results.find((r) => r.id === id);
+      expect(match).toBeDefined();
+      expect(match!.indexed).toBe(false);
+      expect(match!.indexedAt).toBeNull();
+      // Stale only applies to indexed files (Decision #8: stale = mtime > indexedAt;
+      // unindexed is "pending", not "stale").
+      expect(match!.stale).toBe(false);
+    } finally {
+      rmSync(ensureNamespacePath(ns), { recursive: true, force: true });
+    }
+  });
+
+  test("Decision #3: hard namespace isolation — search in ns-A returns nothing from ns-B", async () => {
+    // Spec Decision #3: namespaces are hard isolation boundaries. A query
+    // targeting ns-B must never surface a memory from ns-A — both via the
+    // index-scan name-match path and the ripgrep body-match path.
+    const nsA = `iso-a-${randomUUID().slice(0, 8)}`;
+    const nsB = `iso-b-${randomUUID().slice(0, 8)}`;
+    const aId = randomUUID();
+    const bId = randomUUID();
+    try {
+      writeMemoryFile(aId, "Quokka habits and habitat",
+        { id: aId, name: "quokka-notes", origin: "manual", namespace: nsA, tags: [], createdAt: new Date().toISOString() });
+      writeMemoryFile(bId, "Different topic about engines",
+        { id: bId, name: "engine-notes", origin: "manual", namespace: nsB, tags: [], createdAt: new Date().toISOString() });
+
+      // Body query that only matches ns-A; searching from ns-B must return [].
+      const fromBBody = await fileSearch("quokka", nsB);
+      expect(fromBBody.find((r) => r.id === aId)).toBeUndefined();
+
+      // Name query that only matches ns-A; searching from ns-B must return [].
+      const fromBName = await fileSearch("quokka-notes", nsB);
+      expect(fromBName.find((r) => r.id === aId)).toBeUndefined();
+
+      // Sanity: from ns-A we still find ns-A's memory.
+      const fromASelf = await fileSearch("quokka", nsA);
+      expect(fromASelf.find((r) => r.id === aId)).toBeDefined();
+    } finally {
+      rmSync(ensureNamespacePath(nsA), { recursive: true, force: true });
+      rmSync(ensureNamespacePath(nsB), { recursive: true, force: true });
+    }
+  });
+
   test("treats queries starting with dashes as literals, not ripgrep flags", async () => {
     const ns = `dash-query-${randomUUID().slice(0, 8)}`;
     const id = randomUUID();
