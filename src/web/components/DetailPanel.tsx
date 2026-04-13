@@ -11,14 +11,11 @@ import {
   FileText,
   Tag,
   Clock,
-  TrendingUp,
-  TrendingDown,
-  Minus,
-  Shield,
   Link2,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { getMemory } from "@/server/functions";
+import { SentimentBadge, ConfidenceBadge } from "./detail/SentimentBadge";
 
 interface DetailPanelProps {
   result: {
@@ -76,47 +73,10 @@ interface DetailData {
   edges: EdgeDetail[];
 }
 
-function SentimentBadge({ sentiment }: { sentiment: number }) {
-  if (sentiment > 0.3) {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-medium">
-        <TrendingUp className="w-3 h-3" />
-        positive ({sentiment.toFixed(1)})
-      </span>
-    );
-  }
-  if (sentiment < -0.3) {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-glow-magenta/20 text-glow-magenta text-xs font-medium">
-        <TrendingDown className="w-3 h-3" />
-        negative ({sentiment.toFixed(1)})
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-surface text-text-tertiary text-xs font-medium">
-      <Minus className="w-3 h-3" />
-      neutral
-    </span>
-  );
-}
-
-function ConfidenceBadge({ confidence }: { confidence: number }) {
-  const pct = Math.round(confidence * 100);
-  let color = "text-text-tertiary bg-surface";
-  if (confidence > 0.7) {
-    color = "text-glow-cyan bg-glow-cyan-dim";
-  } else if (confidence > 0.4) {
-    color = "text-glow-amber bg-glow-amber/20";
-  }
-
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${color}`}>
-      <Shield className="w-3 h-3" />
-      {pct}%
-    </span>
-  );
-}
+// Sentiment + Confidence badges live in detail/SentimentBadge — this file
+// re-exports them via import so the two implementations can't drift. Prior
+// local copies used raw tailwind colors (bg-emerald-500, bg-glow-magenta)
+// and diverged from the stdui Badge component's semantic colors.
 
 function EdgeCard({ edge }: { edge: EdgeDetail }) {
   return (
@@ -242,7 +202,7 @@ function EntityView({ entity, edges }: { entity: EntityDetail; edges: EdgeDetail
       {/* Header */}
       <div>
         <h3 className="text-lg font-semibold text-text-primary">{entity.name}</h3>
-        <span className="inline-block mt-1 px-2 py-0.5 bg-amber-400/20 text-amber-400 rounded text-xs font-medium">
+        <span className="inline-block mt-1 px-2 py-0.5 bg-glow-amber/20 text-glow-amber rounded text-xs font-medium">
           {entity.type}
         </span>
       </div>

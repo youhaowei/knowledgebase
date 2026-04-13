@@ -111,6 +111,11 @@ function writeRegeneratedFrontmatter(
 export class Queue {
   private entries: Map<string, QueueEntry[]> = new Map();
   private processing: Set<string> = new Set();
+  // Per-namespace guard: at most one fire-and-forget regenerateOneStale
+  // in flight. Without this, a sweep that drains 100 unindexed entries
+  // kicks off 100 concurrent regenerations — each calling extract() +
+  // updateMemorySummary() against the same graph connection.
+  private regeneratingNamespaces: Set<string> = new Set();
   private graph: GraphProvider;
 
   constructor(graph: GraphProvider) {
@@ -153,11 +158,14 @@ export class Queue {
 
       try {
         const processed = await this.processEntry(memory, onStored);
-        if (processed) {
-          // Self-evolving: regenerate one stale memory per cycle (fire-and-forget)
-          this.regenerateOneStale(memory.namespace).catch((err: unknown) =>
-            console.error(`[Queue] Self-evolving maintenance error:`, err),
-          );
+        if (processed && !this.regeneratingNamespaces.has(memory.namespace)) {
+          // Self-evolving: regenerate one stale memory per cycle
+          // (fire-and-forget, deduped per namespace).
+          const ns = memory.namespace;
+          this.regeneratingNamespaces.add(ns);
+          this.regenerateOneStale(ns)
+            .catch((err: unknown) => console.error(`[Queue] Self-evolving maintenance error:`, err))
+            .finally(() => this.regeneratingNamespaces.delete(ns));
         }
         resolve();
       } catch (error) {

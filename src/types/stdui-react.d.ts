@@ -1,5 +1,5 @@
 declare module "@stdui/react" {
-  import type { ComponentType, ReactNode } from "react";
+  import type { ComponentType, ReactElement, ReactNode } from "react";
 
   export interface BadgeProps {
     children?: ReactNode;
@@ -8,7 +8,10 @@ declare module "@stdui/react" {
     color?: "primary" | "secondary" | "warning" | "danger" | "success" | "info";
   }
 
-  export function Badge(props: BadgeProps): ReactNode;
+  // Declare as a React component returning a real element (or null) rather
+  // than the broader ReactNode — ReactNode permits undefined, arrays, and
+  // strings, which can break consumers that expect a discrete element.
+  export function Badge(props: BadgeProps): ReactElement | null;
 
   export interface ButtonProps {
     label: string;

@@ -474,12 +474,17 @@ function buildSearchContext(searchResult: Awaited<ReturnType<typeof hybridSearch
 
 const askLLMSchema = z.object({
   question: z.string().min(1, "Question is required"),
+  // Explicit namespace keeps intent visible at the boundary. hybridSearch
+  // also defaults to "default" internally, but relying on that default at
+  // both layers made it easy to miss that this endpoint never considered
+  // non-default namespaces.
+  namespace: z.string().default("default"),
 });
 
 export const askLLM = createServerFn()
   .inputValidator((data: unknown) => askLLMSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    const searchResult = await hybridSearch(data.question, undefined, 5);
+    const searchResult = await hybridSearch(data.question, data.namespace, 5);
     const context = buildSearchContext(searchResult);
 
     const result = await prompt("claude", `You are a helpful assistant with access to a personal knowledge base.

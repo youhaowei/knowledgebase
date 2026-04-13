@@ -96,11 +96,22 @@ function getKbRoot(): string {
 /**
  * Resolves the directory path for a namespace without creating it.
  * Use for read-only operations (search, list, get).
+ *
+ * Namespaces are single-segment directory names. Multi-segment inputs
+ * (`foo/bar`) are rejected — otherwise `_index.md` header rendering
+ * (which calls `basename(namespacePath)`) would show just the tail
+ * segment and hide the true namespace. Spec Decision #3: namespaces are
+ * hard isolation boundaries, not a hierarchy.
  */
 export function resolveNamespacePath(namespace: string): string {
   const root = getKbRoot();
   if (namespace.startsWith(".")) {
     throw new Error(`Invalid namespace: "${namespace}"`);
+  }
+  if (namespace.includes("/") || namespace.includes(sep)) {
+    throw new Error(
+      `Invalid namespace: "${namespace}" — namespaces are single-segment directory names, not paths`,
+    );
   }
   const nsPath = resolve(root, namespace);
   if (!nsPath.startsWith(`${resolve(root)}${sep}`)) {
@@ -756,7 +767,12 @@ export function updateIndexEntry(namespacePath: string, entry: MemoryFrontmatter
 
   const { total, unindexed } = readIndexCounts(lines);
   const oldRow = lines[rowIndex];
-  const wasIndexed = oldRow.endsWith(" ✓ |");
+  // Parse the indexed marker out of the last cell rather than matching
+  // against the full row suffix. endsWith(" ✓ |") would silently return
+  // wrong counts if the row format ever gains trailing whitespace or
+  // another column — this stays correct through layout changes.
+  const oldCells = splitRowCells(oldRow).slice(1, -1).map(parseIndexCell);
+  const wasIndexed = (oldCells[3]?.trim() ?? "") === "✓";
   const nowIndexed = Boolean(entry.indexedAt);
   const unindexedDelta = (wasIndexed ? 0 : 1) - (nowIndexed ? 0 : 1);
 

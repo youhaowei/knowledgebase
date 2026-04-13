@@ -31,7 +31,10 @@ interface ExtractedEdge {
 }
 
 const SAMPLE_SIZE = parseInt(process.env.SAMPLE ?? "30", 10);
-const MODEL = process.env.EXTRACTION_MODEL ?? "qwen3.5";
+// Default tracks the extractor benchmark result (see scripts/README.md):
+// gemma4:e4b replaced qwen3.5 across all metrics. Pass EXTRACTION_MODEL
+// to reproduce historical qwen3.5 runs.
+const MODEL = process.env.EXTRACTION_MODEL ?? "gemma4:e4b";
 const CACHE_FILE = `/tmp/retro-edges-${MODEL.replace(/[:/]/g, "-")}-sample-${SAMPLE_SIZE}.json`;
 
 function isTestEntry(f: RetroFinding): boolean {

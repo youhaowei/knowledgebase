@@ -105,14 +105,26 @@ function toForceLinks(links: GraphLink[], nodeSet: Set<string>): ForceLink[] {
     }));
 }
 
-function getNodeSize(node: ForceNode, globalScale: number): number {
+interface NodeSizing {
+  size: number;
+  degreeScale: number;
+  zoomCompensation: number;
+}
+
+/**
+ * Computes the render size for a node plus the two scale factors that drive
+ * the rest of the paint pipeline (shadow blur, label offsets). Returns all
+ * three together so `paintNode` doesn't re-derive `degreeScale` and
+ * `zoomCompensation` independently and risk drift when the formulas change.
+ */
+function getNodeSizing(node: ForceNode, globalScale: number): NodeSizing {
   const isZoomedOut = globalScale < 0.5;
   const degreeScale = Math.min(node.degree / 8, 1);
   const baseSize = isZoomedOut
     ? 3 + degreeScale * 12
     : 5 + node.importance * 6;
   const zoomCompensation = Math.max(0.7, Math.min(2.5, 1.2 / globalScale));
-  return baseSize * zoomCompensation;
+  return { size: baseSize * zoomCompensation, degreeScale, zoomCompensation };
 }
 
 function getLabelTier(node: ForceNode): NodeLabelTier {
@@ -214,9 +226,7 @@ export function Graph({ nodes, links, onNodeClick, selectedNodeName }: GraphProp
   // Custom node rendering — adapts to zoom level
   // When zoomed out: high-degree nodes grow, low-degree nodes shrink → visual hierarchy
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const size = getNodeSize(node, globalScale);
-    const degreeScale = Math.min(node.degree / 8, 1);
-    const zoomCompensation = Math.max(0.7, Math.min(2.5, 1.2 / globalScale));
+    const { size, degreeScale, zoomCompensation } = getNodeSizing(node, globalScale);
 
     ctx.save();
     ctx.shadowColor = node.color;

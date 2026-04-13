@@ -513,18 +513,21 @@ export class LadybugProvider implements GraphProvider {
     namespace: string,
     createdAt: string,
   ): Promise<void> {
-    // Build embedding columns for RELATES_TO (only the primary/first registered dim)
-    // RELATES_TO only has factEmbedding column (2560-dim historically)
-    const firstDim = this.dimensionRegistry.keys().next().value;
-    const firstInfo = firstDim !== undefined ? this.dimensionRegistry.get(firstDim) : undefined;
-    const relEmbStr = firstDim !== undefined && firstInfo
+    // RELATES_TO has a single fixed-dimension factEmbedding column (2560)
+    // for historical compat — the Fact node mirror carries both 2560 and 384.
+    // We name the dimension explicitly here rather than reading the first
+    // Map.keys() slot, which depended on insertion order from
+    // KNOWN_DIMENSIONS and would silently break if that literal were reordered.
+    const EDGE_EMB_DIM = 2560;
+    const edgeInfo = this.dimensionRegistry.get(EDGE_EMB_DIM);
+    const relEmbStr = edgeInfo
       ? (() => {
-          const vec = embeddings.get(firstDim);
+          const vec = embeddings.get(EDGE_EMB_DIM);
           return vec && !isZeroEmbedding(vec)
             ? `[${vec.join(",")}]`
-            : this.zeroEmbeddingStr(firstDim);
+            : this.zeroEmbeddingStr(EDGE_EMB_DIM);
         })()
-      : `[${new Array(2560).fill(0).join(",")}]`;
+      : `[${new Array(EDGE_EMB_DIM).fill(0).join(",")}]`;
 
     await this.executeQuery(
       `MATCH (source:Entity {uuid: $sourceUuid})
