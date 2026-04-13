@@ -158,8 +158,12 @@ afterEach(async () => {
   else process.env.LADYBUG_DATA_PATH = originalEnv.LADYBUG_DATA_PATH;
 });
 
-describe("operations write-path regressions", () => {
-  test("queueMemoryForIndexing releases the in-flight key if the initial file read fails", async () => {
+// These tests defend specific race-condition regressions discovered during
+// Phase 1 implementation. Each test name names the invariant it guards.
+// They're intentionally narrower than end-to-end contract tests — the value
+// is that they pin down subtle state transitions that naïve refactors break.
+describe("operations write-path invariants", () => {
+  test("US-1: queueMemoryForIndexing releases in-flight key on file-read failure (no deadlock)", async () => {
     createTempEnvironment();
 
     const ops = await loadOperations();
@@ -177,7 +181,7 @@ describe("operations write-path regressions", () => {
     expect(await ops.queueMemoryForIndexing(id, "default")).toBe(true);
   });
 
-  test("persistProcessedMemory preserves a user-edited name while still writing index metadata", async () => {
+  test("Goal #3: persistProcessedMemory preserves user-edited name during async indexing (file is canonical)", async () => {
     createTempEnvironment();
 
     const deferredQueue = createDeferredQueueMutation((memory) => {
@@ -216,7 +220,7 @@ describe("operations write-path regressions", () => {
     expect(updated.indexedAt).toBeDefined();
   });
 
-  test("getProvider retries after an initialization failure instead of caching the rejection forever", async () => {
+  test("getProvider retries after init failure (doesn't cache the rejected promise) — degraded-mode recovery path", async () => {
     createTempEnvironment();
 
     let attempts = 0;
@@ -238,7 +242,7 @@ describe("operations write-path regressions", () => {
     expect(attempts).toBe(2);
   });
 
-  test("processUnindexedMemories stops once it reaches the sweep batch limit", async () => {
+  test("Decision #6: processUnindexedMemories respects the sweep batch limit (bounded work per cycle)", async () => {
     createTempEnvironment();
 
     const ops = await loadOperations();

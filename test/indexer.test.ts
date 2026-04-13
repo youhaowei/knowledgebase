@@ -10,8 +10,14 @@ afterEach(() => {
   resetIndexerStateForTests();
 });
 
-describe("ensureServerIndexerStarted", () => {
-  test("starts one immediate sweep and one interval even if called twice", async () => {
+// These tests verify the singleton + dedup mechanics of ensureServerIndexerStarted.
+// They are intentionally implementation-shaped because the contract we're
+// defending — "called twice still only produces one sweep per cycle" — is
+// a race-condition guarantee, not a visible-behavior contract. Spec anchor:
+// Decision #6 (server watcher + 60s reconciliation sweep) and US-19 (server
+// indexing is a single background process, not one-per-import).
+describe("Decision #6: ensureServerIndexerStarted — single reconciliation loop", () => {
+  test("Decision #6: idempotent boot — two calls produce one sweep + one interval", async () => {
     let sweeps = 0;
     let intervals = 0;
     const fakeTimer = { unref() {} } as ReturnType<typeof setInterval>;
@@ -35,7 +41,7 @@ describe("ensureServerIndexerStarted", () => {
     expect(intervals).toBe(1);
   });
 
-  test("reuses the in-flight sweep promise instead of running overlapping reconciliations", async () => {
+  test("Decision #6: in-flight sweep is reused — no overlapping reconciliations", async () => {
     let sweeps = 0;
     let release!: () => void;
     let intervalCallback: (() => void) | undefined;

@@ -481,20 +481,26 @@ describe("appendToIndex", () => {
     generateIndex(nsPath); // create initial index with 1 entry
 
     const indexPath = join(nsPath, "_index.md");
-    const linesBefore = readFileSync(indexPath, "utf-8").split("\n").length;
+    const contentBefore = readFileSync(indexPath, "utf-8");
+    expect(contentBefore).toContain(id1);
+    expect(contentBefore).not.toContain(id2);
 
     // Append second entry
     const fm2 = makeFrontmatter({ id: id2, namespace: ns, name: "Second", indexedAt: new Date().toISOString() });
     appendToIndex(nsPath, fm2);
 
-    const linesAfter = readFileSync(indexPath, "utf-8").split("\n").length;
-    expect(linesAfter).toBe(linesBefore + 1); // exactly one new line added
-
+    // Contract test, not formatting test: the new entry must be findable
+    // in the index AND the header counts must update. A prior assertion
+    // counted raw line delta, which encoded `_index.md`'s exact layout
+    // (one row = one line) — a valid implementation that added a blank
+    // separator row would break that without violating the real contract.
     const content = readFileSync(indexPath, "utf-8");
-    expect(content).toContain("2 memories");
-    expect(content).toContain("1 unindexed");
-    expect(content).toContain("Second");
-    expect(content).toContain("✓"); // indexed
+    expect(content).toContain(id1);           // existing entry preserved
+    expect(content).toContain(id2);           // new entry present
+    expect(content).toContain("Second");      // by name, not just id
+    expect(content).toContain("2 memories");  // count updated
+    expect(content).toContain("1 unindexed"); // one of the two is unindexed
+    expect(content).toContain("✓");           // the indexed one's marker
   });
 
   test("creates _index.md with header if it doesn't exist", () => {

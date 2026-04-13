@@ -12,7 +12,14 @@ const ops = await import("../src/lib/operations.js");
 const { listMemoryFiles, readMemoryFile, deleteMemoryFile, generateIndex, resolveNamespacePath } = await import("../src/lib/fs-memory");
 
 beforeAll(() => {
+  // Re-assert every env var this file depends on, not just KB_MEMORY_PATH.
+  // Four test files share one bun process and each sets env at module scope;
+  // whichever's top-level ran last "wins" until the next one — so re-asserting
+  // in beforeAll prevents cross-file leaks where a test here picks up another
+  // file's LADYBUG_DATA_PATH or __ANALYTICS_DB_PATH.
   process.env.KB_MEMORY_PATH = tempDir;
+  process.env.__ANALYTICS_DB_PATH = join(tempDir, "analytics.db");
+  process.env.LADYBUG_DATA_PATH = join(tempDir, "ladybug");
 });
 
 afterEach(() => {

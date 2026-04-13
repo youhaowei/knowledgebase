@@ -47,10 +47,15 @@ function parseArgs(argv: string[]): ParsedArgs {
 const initialArgs = parseArgs(process.argv.slice(2));
 const envName = initialArgs.flags["--env"];
 
-// Set env BEFORE importing modules that create Graph singletons
+// Set env BEFORE importing modules that create Graph singletons.
+// Only fill gaps — if the caller (a test harness, a sandboxed child, a
+// developer experimenting) already exported KB_MEMORY_PATH or
+// LADYBUG_DATA_PATH, respect it. `--env` is a convenience default, not
+// an override. This preserves the Decision #11 isolation guarantee while
+// letting test runners pin paths to tmpdir for cleanup.
 if (envName) {
-  process.env.LADYBUG_DATA_PATH = `./.ladybug-${envName}`;
-  process.env.KB_MEMORY_PATH = `./.kb-${envName}/memories`;
+  process.env.LADYBUG_DATA_PATH ??= `./.ladybug-${envName}`;
+  process.env.KB_MEMORY_PATH ??= `./.kb-${envName}/memories`;
 }
 
 // --- Dynamic imports (after env is set) ---
@@ -228,7 +233,15 @@ async function handleStats(ctx: CmdContext) {
     out(ctx, result);
     return;
   }
-  const pending = await ops.getQueueStatus(ctx.namespace);
+  // getQueueStatus still requires a working provider (it reads the in-memory
+  // queue state that lives next to the graph connection). Degrade gracefully
+  // so `kb stats` still prints file counts when the graph is unavailable.
+  let pending = 0;
+  try {
+    pending = await ops.getQueueStatus(ctx.namespace);
+  } catch {
+    // Graph unavailable — queue state is inaccessible too. Omit pending count.
+  }
   console.log(`\nKnowledgebase Stats (namespace: ${ctx.namespace}):`);
   console.log(`  Memories: ${result.memories}`);
   // Degraded-mode contract: graph counts are null when server is unavailable.
