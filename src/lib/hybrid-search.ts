@@ -13,15 +13,30 @@ import type { Memory, StoredEdge, StoredEntity, Intent } from "../types.js";
 
 export type { FileSearchResult };
 
+/**
+ * Structured signals describing the health of a search response per Spec
+ * Decision #8. Consumers render these into surface-appropriate language
+ * (CLI text, MCP prose, UI badges). Replaces the single `guidance` string
+ * for anything beyond legacy contradiction prompts.
+ */
+export interface SearchSignals {
+  degraded: boolean;              // graph unavailable — filesystem-only results
+  unindexedCount: number;         // result files lacking indexedAt (pending indexing)
+  staleCount: number;             // result files with mtime > indexedAt (edited since last index)
+  contradictionsDetected: boolean; // graph surfaced opposing sentiments for the same entity pair
+}
+
 export interface HybridSearchResult {
   // Graph search results (unchanged shape)
   memories: Memory[];
   edges: StoredEdge[];
   entities: StoredEntity[];
   intent: Intent;
-  guidance: string;
+  guidance: string;               // deprecated for new consumers — read `signals` instead
   // File search results
   files: FileSearchResult[];
+  // Structured response health (Spec Decision #8)
+  signals: SearchSignals;
 }
 
 type GraphSearchPayload = {
@@ -114,16 +129,91 @@ export async function hybridSearch(
   // Filter file results to exclude IDs already covered by graph
   const dedupedFiles = fileResults.filter((f) => !graphMemoryIds.has(f.id));
 
+  const signals = buildSignals(graphResult, dedupedFiles, edges);
+  const guidance = buildGuidance(graphResult, signals);
+
   return {
     memories,
     edges,
     entities,
     intent: graphResult?.intent ?? "general",
-    guidance:
-      graphResult?.guidance ??
-      "If any facts appear contradictory, use forgetEdge to invalidate with a reason.",
+    guidance,
     files: dedupedFiles,
+    signals,
   };
+}
+
+/**
+ * Compose the structured signals object from graph + file slices of the result.
+ * Decision #8 contract: consumers rely on these counts, not on parsed prose.
+ */
+function buildSignals(
+  graphResult: GraphSearchPayload | null,
+  files: FileSearchResult[],
+  edges: StoredEdge[],
+): SearchSignals {
+  const unindexedCount = files.filter((f) => !f.indexed).length;
+  const staleCount = files.filter((f) => f.stale).length;
+  return {
+    degraded: graphResult === null,
+    unindexedCount,
+    staleCount,
+    contradictionsDetected: detectContradictions(edges),
+  };
+}
+
+/**
+ * Detects the "two edges on the same entity pair with opposing sentiment"
+ * pattern used throughout the Phase 4 consolidation spec. Cheap approximate
+ * check — Phase 4 replaces this with the full contradiction clustering.
+ */
+function detectContradictions(edges: StoredEdge[]): boolean {
+  const byPair = new Map<string, number[]>();
+  for (const edge of edges) {
+    const key = `${edge.sourceEntityName}\u0000${edge.targetEntityName}`;
+    const sentiments = byPair.get(key) ?? [];
+    sentiments.push(edge.sentiment ?? 0);
+    byPair.set(key, sentiments);
+  }
+  for (const sentiments of byPair.values()) {
+    if (sentiments.length < 2) continue;
+    const min = Math.min(...sentiments);
+    const max = Math.max(...sentiments);
+    if (max - min > 1.0) return true;
+  }
+  return false;
+}
+
+/**
+ * Render `signals` into a single prose guidance string for legacy MCP/CLI
+ * consumers. New consumers should read `signals` directly. Kept intentionally
+ * short — surface-specific polish belongs to each caller.
+ */
+function buildGuidance(
+  graphResult: GraphSearchPayload | null,
+  signals: SearchSignals,
+): string {
+  const parts: string[] = [];
+
+  if (signals.degraded) {
+    parts.push("Graph index unavailable — results are filesystem-only. Semantic and relationship signals are absent until the server reconciler runs.");
+  } else if (graphResult?.guidance) {
+    parts.push(graphResult.guidance);
+  } else {
+    parts.push("If any facts appear contradictory, use forgetEdge to invalidate with a reason.");
+  }
+
+  if (signals.unindexedCount > 0) {
+    parts.push(`${signals.unindexedCount} result${signals.unindexedCount === 1 ? "" : "s"} not yet indexed — semantic enrichment pending.`);
+  }
+  if (signals.staleCount > 0) {
+    parts.push(`${signals.staleCount} result${signals.staleCount === 1 ? "" : "s"} edited since last index — the index may lag the file.`);
+  }
+  if (signals.contradictionsDetected) {
+    parts.push("Contradictions detected — consider resolving with forgetEdge.");
+  }
+
+  return parts.join(" ");
 }
 
 export function configureHybridSearchDependenciesForTests(

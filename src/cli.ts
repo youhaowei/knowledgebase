@@ -143,6 +143,19 @@ function printSearchResults(result: Awaited<ReturnType<typeof hybridSearch>>) {
 
   const total = result.files.length + result.memories.length + result.edges.length + result.entities.length;
   if (total === 0) console.log("No results found.");
+
+  // Structured signals per Spec Decision #8 — rendered to stderr so stdout
+  // stays machine-readable when piped without --json.
+  const { signals } = result;
+  if (signals.degraded) {
+    console.error("  ⚠ graph unavailable — filesystem results only");
+  }
+  if (signals.unindexedCount > 0) {
+    console.error(`  ⚠ ${signals.unindexedCount} result${signals.unindexedCount === 1 ? "" : "s"} not yet indexed`);
+  }
+  if (signals.staleCount > 0) {
+    console.error(`  ⚠ ${signals.staleCount} result${signals.staleCount === 1 ? "" : "s"} edited since last index`);
+  }
 }
 
 async function handleSearch(ctx: CmdContext) {
@@ -218,9 +231,13 @@ async function handleStats(ctx: CmdContext) {
   const pending = await ops.getQueueStatus(ctx.namespace);
   console.log(`\nKnowledgebase Stats (namespace: ${ctx.namespace}):`);
   console.log(`  Memories: ${result.memories}`);
-  console.log(`  Entities: ${result.entities}`);
-  console.log(`  Edges:    ${result.edges}`);
+  // Degraded-mode contract: graph counts are null when server is unavailable.
+  console.log(`  Entities: ${result.entities ?? "—"}`);
+  console.log(`  Edges:    ${result.edges ?? "—"}`);
   if (pending > 0) console.log(`  Pending:  ${pending}`);
+  if (result.degraded) {
+    console.error("  (graph unavailable — run the server or check NEO4J_URI / LADYBUG_DATA_PATH)");
+  }
 }
 
 async function handleMigrate(ctx: CmdContext) {

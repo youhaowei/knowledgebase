@@ -15,11 +15,13 @@ import { listMemoryFiles, normalizeTags, resolveNamespacePath, type MemoryFileEn
 export interface FileSearchResult {
   id: string;
   name: string;
-  source: "file";
-  indexed: boolean;     // whether indexedAt is set
-  stale: boolean;       // file mtime > indexedAt (Spec Decision #8 metadata contract)
+  path: string;                  // absolute file path (Spec Decision #8 public contract)
+  source: "file" | "index";      // "index" = matched via _index.md fast path, "file" = ripgrep body match
+  indexed: boolean;              // whether the graph has extracted entities/edges for this file (false = pending)
+  stale: boolean;                // file mtime > indexedAt (Spec Decision #8)
+  indexedAt: string | null;      // ISO timestamp when graph last indexed this file, or null if unindexed
   tags: string[];
-  matchContext?: string; // snippet from ripgrep match (if available)
+  matchContext?: string;         // snippet from ripgrep match (if available)
 }
 
 /**
@@ -90,15 +92,19 @@ function indexScanFromEntries(
       if (!entry.name.toLowerCase().includes(q)) return false;
       return matchesTagFilter(entry.tags, tagFilter);
     })
-    .map((entry) => ({
-      id: entry.id,
-      name: entry.name,
-
-      source: "file" as const,
-      indexed: entry.indexed,
-      stale: isStale(entry.path, resolveIndexedAt(entry)),
-      tags: entry.tags,
-    }));
+    .map((entry) => {
+      const indexedAt = resolveIndexedAt(entry);
+      return {
+        id: entry.id,
+        name: entry.name,
+        path: entry.path,
+        source: "index" as const,
+        indexed: entry.indexed,
+        stale: isStale(entry.path, indexedAt),
+        indexedAt: indexedAt ?? null,
+        tags: entry.tags,
+      };
+    });
 }
 
 /**
@@ -216,14 +222,18 @@ function mergeRgMatches(
     const existing = resultById.get(entry.id);
     if (existing) {
       existing.matchContext = context;
+      // Upgrade source from "index" (name-only hit) to "file" (body match).
+      existing.source = "file";
     } else {
+      const indexedAt = resolveIndexedAt(entry);
       resultById.set(entry.id, {
         id: entry.id,
         name: entry.name,
-
+        path: entry.path,
         source: "file",
         indexed: entry.indexed,
-        stale: isStale(entry.path, resolveIndexedAt(entry)),
+        stale: isStale(entry.path, indexedAt),
+        indexedAt: indexedAt ?? null,
         tags: entry.tags,
         matchContext: context,
       });

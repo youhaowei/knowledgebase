@@ -166,7 +166,7 @@ export function Sidebar({ stats, memories, onAddMemory }: SidebarProps) {
               >
                 <div className="absolute inset-0 bg-gradient-to-b from-glow-cyan-dim to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
                 <div className="font-display text-[1.75rem] font-semibold text-text-primary leading-none relative z-10">
-                  {stat.value}
+                  {stat.value ?? "—"}
                 </div>
                 <div className="text-xs font-medium tracking-wide uppercase text-text-tertiary mt-2 relative z-10">
                   {stat.label}

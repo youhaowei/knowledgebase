@@ -49,6 +49,9 @@ export interface Memory {
 
 export interface Stats {
   memories: number;
-  entities: number;
-  edges: number;
+  entities: number | null;  // null when graph is unavailable (degraded mode)
+  edges: number | null;     // null when graph is unavailable (degraded mode)
+  degraded?: boolean;       // true when graph stats were skipped
+  filesOnDisk?: number;
+  indexed?: number;
 }

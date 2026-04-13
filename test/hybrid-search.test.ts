@@ -170,7 +170,10 @@ describe("hybridSearch file results", () => {
     expect(result.edges).toEqual([]);
     expect(result.entities).toEqual([]);
     expect(result.intent).toBe("general");
-    expect(result.guidance).toContain("forgetEdge");
+    // Spec Decision #8: degraded responses carry structured signals; guidance
+    // is composed from them rather than the default forgetEdge prompt.
+    expect(result.signals.degraded).toBe(true);
+    expect(result.guidance).toContain("Graph index unavailable");
   });
 
   test("deduplicates: graph memories exclude IDs already in file results", async () => {
@@ -204,5 +207,85 @@ describe("hybridSearch file results", () => {
 
     expect(result.memories.map((memory) => memory.id)).toEqual([id]);
     expect(result.files.some((file) => file.id === id)).toBe(false);
+  });
+
+  test("Decision #8: signals.unindexedCount reflects file results lacking indexedAt", async () => {
+    const ns = `hybrid-signals-unindexed-${randomUUID().slice(0, 8)}`;
+    const unindexedId = randomUUID();
+    writeMemoryFile(
+      unindexedId,
+      "New content awaiting the indexer",
+      makeFrontmatter({ id: unindexedId, namespace: ns, name: "Pending Memory" }),
+    );
+
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [],
+        edges: [],
+        entities: [],
+        intent: "general",
+        guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("Pending", ns, 10);
+
+    expect(result.files.some((f) => f.id === unindexedId)).toBe(true);
+    // Public contract: consumers read signals.unindexedCount to render "not indexed yet" badges.
+    expect(result.signals.unindexedCount).toBe(1);
+    expect(result.signals.degraded).toBe(false);
+    expect(result.guidance).toContain("not yet indexed");
+  });
+
+  test("Decision #8: file results carry `path` and `indexedAt` as public contract", async () => {
+    const ns = `hybrid-signals-path-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    const fm = makeFrontmatter({ id, namespace: ns, name: "With Path" });
+    const path = writeMemoryFile(id, "body", fm);
+
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [], edges: [], entities: [],
+        intent: "general", guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("With", ns, 10);
+    const match = result.files.find((f) => f.id === id);
+
+    // H10 fix: MCP/CLI consumers depend on these fields to read the underlying file.
+    expect(match).toBeDefined();
+    expect(match!.path).toBe(path);
+    expect(match!.indexedAt).toBeNull(); // unindexed: explicit null, not undefined
+  });
+
+  test("Decision #8: signals.contradictionsDetected fires when edges carry opposing sentiment on the same pair", async () => {
+    const ns = `hybrid-contradict-${randomUUID().slice(0, 8)}`;
+
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [],
+        edges: [
+          {
+            id: "e1", sourceEntityName: "A", targetEntityName: "B",
+            relationType: "uses", fact: "A uses B", sentiment: 0.8, confidence: 0.9,
+            episodes: [], createdAt: new Date(), namespace: ns,
+          },
+          {
+            id: "e2", sourceEntityName: "A", targetEntityName: "B",
+            relationType: "rejects", fact: "A rejects B", sentiment: -0.8, confidence: 0.9,
+            episodes: [], createdAt: new Date(), namespace: ns,
+          },
+        ],
+        entities: [],
+        intent: "general",
+        guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("A B", ns, 10);
+
+    expect(result.signals.contradictionsDetected).toBe(true);
+    expect(result.guidance).toContain("Contradictions detected");
   });
 });

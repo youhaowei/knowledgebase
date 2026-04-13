@@ -116,6 +116,9 @@ export function createKnowledgebaseMcpServer() {
     withMcpSource(async ({ query, namespace, limit, detail, tags }) => {
       try {
         const result = await hybridSearch(query, namespace, limit, tags);
+        // Spec Decision #8: `files` entries carry `path` and `indexedAt` as
+        // part of the public contract. `signals` is the structured health
+        // object consumers read to render degraded/unindexed/stale messaging.
         return {
           content: [
             {
@@ -127,10 +130,8 @@ export function createKnowledgebaseMcpServer() {
                   edges: result.edges.map((e) => formatEdge(e, detail)),
                   entities: result.entities.map((e) => formatEntity(e, detail)),
                   files: result.files,
-                  guidance: result.guidance
-                    + (result.files.some((f) => !f.indexed)
-                      ? " Some results are recently added and not yet indexed — entities/edges haven't been extracted. Full text is available at the file path."
-                      : ""),
+                  signals: result.signals,
+                  guidance: result.guidance,
                 },
                 null,
                 2,

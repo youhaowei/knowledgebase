@@ -402,8 +402,17 @@ export async function getByName(
 }> {
   const ns = namespace ?? "default";
   return tracked("get", { namespace: ns }, async () => {
-    const gp = await getProvider();
-    const result = await gp.get(name, ns);
+    // Degraded-mode contract (Spec): `get` must return file content even when
+    // the graph is unavailable. The graph enriches with entities/edges; the
+    // file is the source of truth.
+    let result: { memory?: Memory; entity?: StoredEntity; edges: StoredEdge[] };
+    try {
+      const gp = await getProvider();
+      result = await gp.get(name, ns);
+    } catch (err) {
+      console.error(`[kb] Graph unavailable on get — serving filesystem-only: ${err instanceof Error ? err.message : err}`);
+      result = { edges: [] };
+    }
 
     // Filesystem fallback: if graph doesn't have this memory, check files
     // Case-insensitive to match addMemory dedup behavior
@@ -470,8 +479,16 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
 
 export async function stats(namespace?: string) {
   return tracked("stats", { namespace: namespace ?? "all" }, async () => {
-    const gp = await getProvider();
-    const graphStats = await gp.stats(namespace);
+    // Degraded-mode contract (Spec): when the graph is unavailable, return
+    // filesystem counts only with graph-derived fields reported as null.
+    // Callers depend on filesOnDisk/indexed regardless of graph state.
+    let graphStats: Awaited<ReturnType<GraphProvider["stats"]>> | null = null;
+    try {
+      const gp = await getProvider();
+      graphStats = await gp.stats(namespace);
+    } catch (err) {
+      console.error(`[kb] Graph unavailable on stats — serving filesystem-only: ${err instanceof Error ? err.message : err}`);
+    }
 
     // Count filesystem memories — scope must match graph query
     let totalFiles = 0;
@@ -490,10 +507,11 @@ export async function stats(namespace?: string) {
     }
 
     return {
-      ...graphStats,
+      ...(graphStats ?? { entities: null, edges: null }),
       memories: totalFiles,
       filesOnDisk: totalFiles,
       indexed: totalIndexed,
+      degraded: graphStats === null,
     };
   });
 }

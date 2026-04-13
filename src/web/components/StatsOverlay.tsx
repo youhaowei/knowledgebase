@@ -110,7 +110,7 @@ export function StatsOverlay({
             >
               <item.icon className="w-3.5 h-3.5 text-text-tertiary group-hover:text-glow-cyan transition-colors" />
               <span className="font-display text-sm font-semibold text-text-primary">
-                {item.value}
+                {item.value ?? "—"}
               </span>
               <span className="text-[11px] font-medium tracking-wide uppercase text-text-tertiary hidden sm:inline">
                 {item.label}
