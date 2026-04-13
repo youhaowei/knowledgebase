@@ -488,8 +488,11 @@ export async function forget(
 export async function forgetEdge(edgeId: string, reason: string, namespace = "default") {
   return tracked("forgetEdge", { namespace }, async () => {
     // Spec Decision #11: append to _forget_edges.jsonl; reconciler applies
-    // the graph-side invalidation on its sweep.
-    recordForgetEdge(edgeId, reason, namespace);
+    // the graph-side invalidation on its sweep. The namespace lock serializes
+    // with concurrent writers (add / forget) that may also touch the directory.
+    await withNamespaceLock(namespace, async () => {
+      recordForgetEdge(edgeId, reason, namespace);
+    });
     return { edgeId, reason, namespace };
   }, () => ({
     edgeId,
@@ -538,9 +541,18 @@ export async function stats(namespace?: string) {
 
 export async function listNamespaces(): Promise<string[]> {
   return tracked("listNamespaces", {}, async () => {
-    const gp = await getProvider();
-    const graphNs = await gp.listNamespaces();
+    // Degraded mode (Spec): the filesystem is the source of truth, so
+    // namespaces are always available from disk. Graph state is additive —
+    // when the provider is unavailable, fall back to fs-only rather than
+    // failing the call (which would break Sidebar, AddMemoryDialog, etc.).
     const fsNs = listNamespaceDirs();
+    let graphNs: string[] = [];
+    try {
+      const gp = await getProvider();
+      graphNs = await gp.listNamespaces();
+    } catch (err) {
+      console.error("[operations] listNamespaces: graph unavailable, returning fs-only namespaces:", err);
+    }
     return [...new Set([...graphNs, ...fsNs])].sort();
   });
 }
