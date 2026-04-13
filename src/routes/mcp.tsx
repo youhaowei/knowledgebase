@@ -9,6 +9,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createKnowledgebaseMcpServer } from "@/mcp-server";
+import { ensureServerIndexerStarted } from "@/server/indexer";
+
+// Ensure the background indexer runs whenever the MCP endpoint is active.
+// An MCP-only server process (no web function hits) would otherwise never
+// start the 60s reconciliation sweep required by Spec Decision #6.
+if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
+  ensureServerIndexerStarted();
+}
 
 type Session = {
   transport: WebStandardStreamableHTTPServerTransport;

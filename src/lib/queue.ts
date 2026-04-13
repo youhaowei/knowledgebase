@@ -11,13 +11,15 @@
 
 import { statSync } from "fs";
 import { join } from "path";
+import matter from "gray-matter";
+import { readFileSync, writeFileSync, renameSync } from "fs";
 import { extract } from "./extractor.js";
 import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
 import { track } from "./analytics.js";
 import { summarySchema } from "./versions.js";
-import { resolveNamespacePath } from "./fs-memory.js";
+import { resolveNamespacePath, type MemoryFrontmatter } from "./fs-memory.js";
 import {
   semver,
   isoFrom,
@@ -56,6 +58,54 @@ export function isFileChangedSince(filePath: string, snapshot: number | null): b
   if (snapshot === null) return false;
   const current = safeMtimeMs(filePath);
   return current === null || current !== snapshot;
+}
+
+/**
+ * Reads a memory file for regeneration. Returns null if the file is missing
+ * or unreadable — callers treat that as "abandon the regen pass".
+ */
+async function readFileFromDiskForRegen(
+  filePath: string,
+): Promise<{ frontmatter: MemoryFrontmatter; text: string } | null> {
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    const parsed = matter(raw);
+    return {
+      frontmatter: parsed.data as MemoryFrontmatter,
+      text: parsed.content,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomically writes regenerated frontmatter (abstract/summary/schemaVersion/
+ * versionedAt) back to the file, preserving the body verbatim. Unknown user
+ * frontmatter keys survive per Spec Decision #12. Uses tempfile + rename so
+ * a crash mid-write leaves either the old or new content, never partial.
+ */
+function writeRegeneratedFrontmatter(
+  filePath: string,
+  current: { frontmatter: MemoryFrontmatter; text: string },
+  updates: {
+    abstract: string;
+    summary: string;
+    schemaVersion: string;
+    versionedAt: string;
+  },
+): void {
+  const merged = {
+    ...current.frontmatter,
+    abstract: updates.abstract,
+    summary: updates.summary,
+    schemaVersion: updates.schemaVersion,
+    versionedAt: updates.versionedAt,
+  };
+  const content = matter.stringify(current.text, merged as Record<string, unknown>);
+  const tmp = `${filePath}.tmp`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, filePath);
 }
 
 export class Queue {
@@ -192,8 +242,17 @@ export class Queue {
   }
 
   /**
-   * Self-evolving: find one stale memory in this namespace and regenerate its summary.
-   * Checks version lag, then time-based staleness. Processes at most one per call.
+   * Self-evolving: find one stale memory in this namespace and regenerate its
+   * summary. Rewrites the source file's frontmatter FIRST (Spec Decision #11:
+   * files are canonical), then the graph. If the file write fails, the graph
+   * is left untouched — a subsequent sweep will retry against a consistent
+   * starting state. Before the file write, we re-read from disk: the in-graph
+   * memory.text may be stale relative to the current file body, and running
+   * extraction on stale text would commit a regenerated summary that describes
+   * content the user already edited away.
+   *
+   * Previously only the graph was updated, which meant db:reindex from files
+   * silently dropped the regeneration — a filesystem-first invariant violation.
    */
   private async regenerateOneStale(namespace: string): Promise<void> {
     const memories = await this.graph.findMemories({ namespace }, 50);
@@ -208,13 +267,37 @@ export class Queue {
 
     if (!staleMemory) return;
 
+    const filePath = join(resolveNamespacePath(namespace), `${staleMemory.id}.md`);
+    const currentFile = await readFileFromDiskForRegen(filePath);
+    if (!currentFile) {
+      // File was deleted or unreadable — nothing to regenerate against.
+      // The stale graph memory will be cleaned up by Phase 2 reconciliation.
+      return;
+    }
+
     console.error(`[Queue] Regenerating stale memory ${staleMemory.id} (${staleMemory.name})...`);
-    const { abstract: newAbstract, summary: newSummary } = await extract(staleMemory.text);
+    const { abstract: newAbstract, summary: newSummary } = await extract(currentFile.text);
+    const schemaVersion = String(summarySchema.current);
+    const versionedAt = new Date().toISOString();
+
+    // Write the file first. If this throws, the graph remains untouched.
+    try {
+      writeRegeneratedFrontmatter(filePath, currentFile, {
+        abstract: newAbstract,
+        summary: newSummary,
+        schemaVersion,
+        versionedAt,
+      });
+    } catch (err) {
+      console.error(`[Queue] File write-back failed for ${staleMemory.id}, abandoning regen:`, err);
+      return;
+    }
+
     await this.graph.updateMemorySummary(staleMemory.id, {
       abstract: newAbstract,
       summary: newSummary,
-      schemaVersion: String(summarySchema.current),
-      versionedAt: new Date().toISOString(),
+      schemaVersion,
+      versionedAt,
     });
     track("queue.regenerate", {
       namespace,
