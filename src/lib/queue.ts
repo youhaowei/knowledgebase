@@ -19,7 +19,7 @@ import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
 import { track } from "./analytics.js";
 import { summarySchema } from "./versions.js";
-import { resolveNamespacePath, type MemoryFrontmatter } from "./fs-memory.js";
+import { resolveNamespacePath, withNamespaceLock, parseFrontmatter, type MemoryFrontmatter } from "./fs-memory.js";
 import {
   semver,
   isoFrom,
@@ -61,19 +61,16 @@ export function isFileChangedSince(filePath: string, snapshot: number | null): b
 }
 
 /**
- * Reads a memory file for regeneration. Returns null if the file is missing
- * or unreadable — callers treat that as "abandon the regen pass".
+ * Reads a memory file for regeneration. Returns null if the file is missing,
+ * unreadable, or has frontmatter that fails Zod validation — callers treat
+ * that as "abandon the regen pass" rather than crashing mid-write-back.
  */
 async function readFileFromDiskForRegen(
   filePath: string,
 ): Promise<{ frontmatter: MemoryFrontmatter; text: string } | null> {
   try {
     const raw = readFileSync(filePath, "utf-8");
-    const parsed = matter(raw);
-    return {
-      frontmatter: parsed.data as MemoryFrontmatter,
-      text: parsed.content,
-    };
+    return parseFrontmatter(raw);
   } catch {
     return null;
   }
@@ -283,23 +280,47 @@ export class Queue {
       return;
     }
 
+    // Spec Decision #8 ordering invariant applies to regen as well as initial
+    // indexing: snapshot mtime before the slow extract, re-stat under the lock
+    // before committing, abandon if the user edited the file in the window.
+    const snapshotMtime = safeMtimeMs(filePath);
+
     console.error(`[Queue] Regenerating stale memory ${staleMemory.id} (${staleMemory.name})...`);
     const { abstract: newAbstract, summary: newSummary } = await extract(currentFile.text);
     const schemaVersion = String(summarySchema.current);
     const versionedAt = new Date().toISOString();
 
-    // Write the file first. If this throws, the graph remains untouched.
-    try {
-      writeRegeneratedFrontmatter(filePath, currentFile, {
-        abstract: newAbstract,
-        summary: newSummary,
-        schemaVersion,
-        versionedAt,
-      });
-    } catch (err) {
-      console.error(`[Queue] File write-back failed for ${staleMemory.id}, abandoning regen:`, err);
-      return;
-    }
+    // Spec Decision #12: the namespace lock serializes the commit window with
+    // CLI writers (add, forget) and other indexer write-backs. The slow
+    // extract() above intentionally runs *outside* the lock so it doesn't
+    // starve other writers. Graph update only runs when the file write-back
+    // actually landed — otherwise db:reindex from files would produce different
+    // content than the graph reports.
+    let committed = false;
+    await withNamespaceLock(namespace, async () => {
+      if (isFileChangedSince(filePath, snapshotMtime)) {
+        console.error(`[Queue] File changed during regen ${staleMemory.id} — abandoning, retry on next sweep`);
+        return;
+      }
+      // Re-read under the lock so the write-back merges against the latest
+      // user-owned frontmatter (identity + any user tags), not a pre-extract
+      // snapshot that may have been superseded.
+      const latest = await readFileFromDiskForRegen(filePath);
+      if (!latest) return;
+      try {
+        writeRegeneratedFrontmatter(filePath, latest, {
+          abstract: newAbstract,
+          summary: newSummary,
+          schemaVersion,
+          versionedAt,
+        });
+        committed = true;
+      } catch (err) {
+        console.error(`[Queue] File write-back failed for ${staleMemory.id}, abandoning regen:`, err);
+      }
+    });
+
+    if (!committed) return;
 
     await this.graph.updateMemorySummary(staleMemory.id, {
       abstract: newAbstract,
