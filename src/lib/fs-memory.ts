@@ -16,6 +16,7 @@ import {
   readdirSync,
   existsSync,
   writeFileSync,
+  appendFileSync,
   readFileSync,
   rmSync,
   unlinkSync,
@@ -24,6 +25,7 @@ import {
   closeSync,
   utimesSync,
 } from "fs";
+import { randomUUID } from "crypto";
 import matter from "gray-matter";
 import { MemoryCategory } from "../types.js";
 
@@ -147,6 +149,10 @@ function getLockHeartbeatPath(lockPath: string): string {
   return join(lockPath, ".heartbeat");
 }
 
+function getLockTokenPath(lockPath: string): string {
+  return join(lockPath, ".token");
+}
+
 function touchLockHeartbeat(lockPath: string): void {
   const heartbeatPath = getLockHeartbeatPath(lockPath);
   const now = new Date();
@@ -155,6 +161,27 @@ function touchLockHeartbeat(lockPath: string): void {
   } catch {
     writeFileSync(heartbeatPath, "");
   }
+}
+
+/**
+ * Release a lock only if we still own it.
+ *
+ * If a slow holder was judged stale and reclaimed while its work was still
+ * running, a blind `rmSync(lockPath)` in a finally block would delete the
+ * reclaimer's live lock and open the critical section to concurrent writers.
+ * The token written at acquire time is the ownership proof: only remove the
+ * directory if the token on disk still matches ours.
+ */
+function releaseLockIfOwned(lockPath: string, token: string): void {
+  let onDisk: string;
+  try {
+    onDisk = readFileSync(getLockTokenPath(lockPath), "utf8");
+  } catch {
+    // Lock directory or token file already gone — someone else owns (or owned) it.
+    return;
+  }
+  if (onDisk !== token) return;
+  rmSync(lockPath, { recursive: true, force: true });
 }
 
 function breakStaleLock(lockPath: string): boolean {
@@ -202,10 +229,12 @@ export async function withNamespaceLock<T>(
 ): Promise<T> {
   const lockPath = getNamespaceLockPath(namespace);
   const startedAt = Date.now();
+  const token = randomUUID();
 
   while (true) {
     try {
       mkdirSync(lockPath);
+      writeFileSync(getLockTokenPath(lockPath), token);
       touchLockHeartbeat(lockPath);
       break;
     } catch (error) {
@@ -234,7 +263,7 @@ export async function withNamespaceLock<T>(
     return await fn();
   } finally {
     clearInterval(heartbeat);
-    rmSync(lockPath, { recursive: true, force: true });
+    releaseLockIfOwned(lockPath, token);
   }
 }
 
@@ -397,8 +426,10 @@ export function tombstoneMemoryFile(
     timestamp: new Date().toISOString(),
   }) + "\n";
   try {
-    const existing = existsSync(jsonlPath) ? readFileSync(jsonlPath, "utf-8") : "";
-    writeFileSync(jsonlPath, existing + record);
+    // O_APPEND is atomic for single writes under PIPE_BUF on POSIX, so this
+    // is crash-safer than read-concat-write and avoids dropping concurrent
+    // records if a caller skips the namespace lock.
+    appendFileSync(jsonlPath, record);
   } catch (err) {
     // Best-effort: if the log write fails after the rename, the file is still
     // tombstoned (searches won't return it). Reconciler will catch up via directory scan.
@@ -426,8 +457,10 @@ export function recordForgetEdge(
     reason,
     timestamp: new Date().toISOString(),
   }) + "\n";
-  const existing = existsSync(jsonlPath) ? readFileSync(jsonlPath, "utf-8") : "";
-  writeFileSync(jsonlPath, existing + record);
+  // O_APPEND is atomic for single writes under PIPE_BUF on POSIX. Prior
+  // read-concat-write silently lost concurrent records when called outside a
+  // namespace lock — appendFileSync is both correct and lock-free-safe.
+  appendFileSync(jsonlPath, record);
 }
 
 /**

@@ -751,6 +751,47 @@ describe("withNamespaceLock", () => {
     rmSync(lockPath, { recursive: true, force: true });
   });
 
+  test("a reclaimed holder's release does not delete the reclaimer's live lock", async () => {
+    // Regression for a TOCTOU in the lock protocol: if writer A is judged
+    // stale and writer B reclaims, A's resumption must NOT rmSync the lock
+    // directory — that would open the critical section to concurrent writers.
+    configureFsMemoryTimingForTests({ timeoutMs: 500, retryMs: 5, staleLockAgeMs: 20 });
+
+    const ns = `lock-reclaim-${randomUUID().slice(0, 8)}`;
+    const lockPath = join(tempDir, ".locks", `${encodeURIComponent(ns)}.lock`);
+
+    let bHoldingLock = false;
+    let aCanRelease = false;
+
+    const aPromise = withNamespaceLock(ns, async () => {
+      // Simulate a stalled holder: backdate the heartbeat so B's breakStaleLock
+      // fires. Using an explicit past date (60s ago) beats the 20ms threshold
+      // with margin.
+      const past = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, past, past);
+      try {
+        utimesSync(join(lockPath, ".heartbeat"), past, past);
+      } catch {
+        // heartbeat file may not exist yet — the directory mtime alone is enough.
+      }
+      // Wait for B to reclaim and start running.
+      while (!bHoldingLock) await Bun.sleep(5);
+      aCanRelease = true;
+      // fn returns — finally block will run releaseLockIfOwned() with A's token.
+    });
+
+    const bPromise = withNamespaceLock(ns, async () => {
+      bHoldingLock = true;
+      // Hold the lock until A has returned from its finally block.
+      while (!aCanRelease) await Bun.sleep(5);
+      await Bun.sleep(15);
+      // If the bug still exists, A's finally already rmSync'd our lock dir.
+      expect(existsSync(lockPath)).toBe(true);
+    });
+
+    await Promise.all([aPromise, bPromise]);
+  });
+
   test("breaks one stale lock once and still serializes concurrent entrants", async () => {
     configureFsMemoryTimingForTests({ timeoutMs: 200, retryMs: 5, staleLockAgeMs: 20 });
 
