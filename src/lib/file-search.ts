@@ -8,6 +8,8 @@
  * Results are merged and deduped by memory ID. Target: <50ms for 100 files.
  */
 
+import { statSync } from "fs";
+import matter from "gray-matter";
 import { listMemoryFiles, normalizeTags, resolveNamespacePath, type MemoryFileEntry } from "./fs-memory.js";
 
 export interface FileSearchResult {
@@ -15,9 +17,42 @@ export interface FileSearchResult {
   name: string;
   source: "file";
   indexed: boolean;     // whether indexedAt is set
-  stale: boolean;       // false for Phase 1 (no staleness detection yet)
+  stale: boolean;       // file mtime > indexedAt (Spec Decision #8 metadata contract)
   tags: string[];
   matchContext?: string; // snippet from ripgrep match (if available)
+}
+
+/**
+ * Computes staleness per Spec Decision #8: `stale` is true when the file's mtime
+ * is newer than the stored `indexedAt` timestamp. An unindexed entry is not
+ * "stale" — it's pending. Returns false on stat failure (file removed mid-search).
+ */
+function isStale(filePath: string, indexedAt: string | undefined): boolean {
+  if (!indexedAt) return false;
+  const indexedAtMs = Date.parse(indexedAt);
+  if (!Number.isFinite(indexedAtMs)) return false;
+  try {
+    return statSync(filePath).mtimeMs > indexedAtMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns the entry's indexedAt if already populated. Otherwise — when the
+ * entry came via the `_index.md` fast path which doesn't carry timestamps —
+ * reads just the frontmatter from disk. Bounded to `limit` calls per search.
+ */
+function resolveIndexedAt(entry: MemoryFileEntry): string | undefined {
+  if (entry.indexedAt !== undefined) return entry.indexedAt;
+  if (!entry.indexed) return undefined;
+  try {
+    const parsed = matter.read(entry.path);
+    const value = (parsed.data as { indexedAt?: unknown }).indexedAt;
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface FileSearchOptions {
@@ -61,7 +96,7 @@ function indexScanFromEntries(
 
       source: "file" as const,
       indexed: entry.indexed,
-      stale: false,
+      stale: isStale(entry.path, resolveIndexedAt(entry)),
       tags: entry.tags,
     }));
 }
@@ -179,10 +214,10 @@ function mergeRgMatches(
       resultById.set(entry.id, {
         id: entry.id,
         name: entry.name,
-  
+
         source: "file",
         indexed: entry.indexed,
-        stale: false,
+        stale: isStale(entry.path, resolveIndexedAt(entry)),
         tags: entry.tags,
         matchContext: context,
       });

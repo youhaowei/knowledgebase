@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -128,6 +128,39 @@ describe("fileSearch — name matching (index scan)", () => {
     expect(indexedNotesIdx).not.toBe(-1);
     // Indexed should come before unindexed
     expect(indexedNotesIdx).toBeLessThan(gammaIdx);
+  });
+});
+
+describe("fileSearch — staleness (Spec Decision #8)", () => {
+  test("unindexed entry is not stale", async () => {
+    const results = await fileSearch("alpha", TEST_NS);
+    const found = results.find((r) => r.id === idAlpha);
+    expect(found!.indexed).toBe(false);
+    expect(found!.stale).toBe(false);
+  });
+
+  test("indexed entry with mtime <= indexedAt is not stale", async () => {
+    const results = await fileSearch("indexed notes", TEST_NS);
+    const found = results.find((r) => r.id === idIndexedNotes);
+    expect(found!.indexed).toBe(true);
+    expect(found!.stale).toBe(false);
+  });
+
+  test("indexed entry with mtime > indexedAt is stale", async () => {
+    // Bump the file's mtime to 1h after its indexedAt
+    const ns = ensureNamespacePath(TEST_NS);
+    const path = join(ns, `${idIndexedNotes}.md`);
+    const futureMs = Date.now() + 60 * 60 * 1000;
+    utimesSync(path, new Date(futureMs), new Date(futureMs));
+
+    const results = await fileSearch("indexed notes", TEST_NS);
+    const found = results.find((r) => r.id === idIndexedNotes);
+    expect(found!.indexed).toBe(true);
+    expect(found!.stale).toBe(true);
+
+    // Reset mtime so later tests aren't affected
+    const now = new Date();
+    utimesSync(path, now, now);
   });
 });
 
