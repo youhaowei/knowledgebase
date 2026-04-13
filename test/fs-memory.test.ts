@@ -35,7 +35,7 @@ import {
   withNamespaceLock,
   configureFsMemoryTimingForTests,
   resetFsMemoryTimingForTests,
-  type MemoryFrontmatter,
+  MemoryFrontmatter,
 } from "../src/lib/fs-memory";
 
 // ---------------------------------------------------------------------------
@@ -411,6 +411,58 @@ describe("generateIndex", () => {
     const normal = entries.find((e) => e.id === id2);
     expect(normal!.name).toBe("Normal");
     expect(normal!.tags).toEqual(["simple"]);
+  });
+
+  test("Spec 'Dedup check': names with `\\|` and `\\\\` survive the _index.md round-trip", () => {
+    const ns = `pipe-backslash-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const id = randomUUID();
+
+    // Literal chars: backslash, pipe, space, backslash, backslash, word.
+    // Without `\` escaping, the writer would emit `\\|` (backslash + escape
+    // sequence for pipe) which the parser would read as a single escaped
+    // pipe — the original backslash would vanish.
+    const tricky = "foo\\|bar \\\\baz";
+    writeMemoryFile(id, "body", makeFrontmatter({
+      id, namespace: ns, name: tricky, tags: ["plain\\tag"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+    generateIndex(nsPath);
+
+    const entries = listMemoryFiles(ns);
+    const match = entries.find((e) => e.id === id);
+    expect(match).toBeDefined();
+    expect(match!.name).toBe(tricky);
+    expect(match!.tags).toEqual(["plain\\tag"]);
+  });
+
+  test("MemoryFrontmatter rejects non-ISO createdAt/indexedAt values", () => {
+    // User hand-edits the frontmatter to a human-friendly date. Downstream
+    // code does `Date.parse` / `localeCompare` / `new Date(...)` on these
+    // values — invalid strings would surface as crashes or mis-sorts far
+    // from the source. Validation must fail loudly at read time.
+    expect(() =>
+      MemoryFrontmatter.parse({
+        id: randomUUID(),
+        name: "x",
+        origin: "manual",
+        namespace: "default",
+        tags: [],
+        createdAt: "not-a-date",
+      }),
+    ).toThrow();
+
+    expect(() =>
+      MemoryFrontmatter.parse({
+        id: randomUUID(),
+        name: "x",
+        origin: "manual",
+        namespace: "default",
+        tags: [],
+        createdAt: "2026-01-01T00:00:00Z",
+        indexedAt: "yesterday",
+      }),
+    ).toThrow();
   });
 });
 

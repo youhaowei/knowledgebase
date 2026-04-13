@@ -34,19 +34,30 @@ import { MemoryCategory } from "../types.js";
 export const Origin = z.enum(["manual", "retro", "mcp", "import"]);
 export type Origin = z.infer<typeof Origin>;
 
+// ISO 8601 timestamp refinement. Downstream code calls `Date.parse`,
+// `localeCompare`, and constructs `new Date(...)` on these values; a
+// user-edited file with a human-readable date like "2026-04-13" would
+// otherwise slip past validation and surface as a crash or a mis-sort
+// far from the source of the corruption.
+const IsoTimestamp = z
+  .string()
+  .refine((s) => !Number.isNaN(Date.parse(s)), {
+    message: "expected ISO 8601 timestamp (e.g., 2026-04-13T00:00:00Z)",
+  });
+
 export const MemoryFrontmatter = z.object({
   id: z.uuid(),
   name: z.string(),
   origin: Origin,
   namespace: z.string().min(1, "namespace must be a non-empty string"),
   tags: z.array(z.string()).default([]),
-  createdAt: z.string(),        // ISO 8601
-  indexedAt: z.string().optional(), // set when server has processed this file
+  createdAt: IsoTimestamp,
+  indexedAt: IsoTimestamp.optional(), // set when server has processed this file
   abstract: z.string().optional(),  // filled by indexer (Phase 2)
   summary: z.string().optional(),
   category: MemoryCategory.optional(),
   schemaVersion: z.string().optional(),
-  versionedAt: z.string().optional(),
+  versionedAt: IsoTimestamp.optional(),
 }).loose();
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatter>;
 
@@ -389,14 +400,35 @@ export function recordForgetEdge(
   writeFileSync(jsonlPath, existing + record);
 }
 
+/**
+ * Unescapes a cell value written by `escapeCell`. Reverses both the
+ * `\\` → `\` and `\|` → `|` transforms in the correct order: `\\` first so
+ * a literal backslash-pipe sequence is not misread as an escape.
+ */
 function parseIndexCell(cell: string): string {
-  return cell.trim().replace(/\\\|/g, "|");
+  return cell
+    .trim()
+    // Walk the cell char-by-char so `\\` and `\|` are decoded in one pass
+    // without the regex reordering hazard (decoding `\\` after `\|` would
+    // turn a user's literal `\|` into `|` followed by a stray `\`).
+    .replace(/\\(.)/g, (_match, c) => c);
 }
 
 /**
- * Splits a markdown table row on unescaped `|`. Writers escape literal pipes
- * inside cells as `\|`, so a raw `split("|")` corrupts any row whose name
- * or tags contain a pipe.
+ * Escapes a cell value for writing into a markdown table row. Both `\` and
+ * `|` need escaping — `|` because it's the column separator, `\` because
+ * its presence before a literal `|` would otherwise be misread as an
+ * escape sequence during parse. Order matters: escape `\` first so the
+ * backslashes introduced by the `|` replacement aren't themselves escaped.
+ */
+function escapeCell(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
+
+/**
+ * Splits a markdown table row on unescaped `|`. Writers use `escapeCell`
+ * to produce `\\` and `\|` escapes; this scanner consumes one escape per
+ * `\` so literal `\|` sequences survive round-trip without collapsing.
  */
 function splitRowCells(row: string): string[] {
   const cells: string[] = [];
@@ -404,6 +436,10 @@ function splitRowCells(row: string): string[] {
   let escapeNext = false;
   for (const c of row) {
     if (escapeNext) {
+      // Preserve the escape sequence verbatim — parseIndexCell will decode
+      // `\\` → `\` and `\|` → `|` in a second pass. Doing the decode here
+      // would be wrong: cell boundaries are determined first (on UNESCAPED
+      // `|`), then each cell's contents are unescaped.
       buf += "\\" + c;
       escapeNext = false;
       continue;
@@ -620,8 +656,8 @@ export function generateIndex(namespacePath: string): void {
   ];
 
   for (const e of entries) {
-    const tags = e.tags.join(", ").replace(/\|/g, "\\|");
-    const escapedName = e.name.replace(/\|/g, "\\|");
+    const tags = escapeCell(e.tags.join(", "));
+    const escapedName = escapeCell(e.name);
     const indexed = e.indexedAt ? "✓" : "✗";
     lines.push(`| ${e.id} | ${escapedName} | ${tags} | ${indexed} |`);
   }
@@ -689,8 +725,8 @@ export function updateIndexEntry(namespacePath: string, entry: MemoryFrontmatter
     return;
   }
 
-  const escapedName = entry.name.replace(/\|/g, "\\|");
-  const tags = entry.tags.join(", ").replace(/\|/g, "\\|");
+  const escapedName = escapeCell(entry.name);
+  const tags = escapeCell(entry.tags.join(", "));
   const indexed = entry.indexedAt ? "✓" : "✗";
   const newRow = `| ${entry.id} | ${escapedName} | ${tags} | ${indexed} |`;
 
@@ -714,8 +750,8 @@ export function updateIndexEntry(namespacePath: string, entry: MemoryFrontmatter
 export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): void {
   const indexPath = join(namespacePath, "_index.md");
   const namespace = basename(namespacePath);
-  const escapedName = entry.name.replace(/\|/g, "\\|");
-  const tags = entry.tags.join(", ").replace(/\|/g, "\\|");
+  const escapedName = escapeCell(entry.name);
+  const tags = escapeCell(entry.tags.join(", "));
   const indexed = entry.indexedAt ? "✓" : "✗";
   const row = `| ${entry.id} | ${escapedName} | ${tags} | ${indexed} |`;
 
