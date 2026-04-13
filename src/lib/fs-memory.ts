@@ -47,7 +47,7 @@ export const MemoryFrontmatter = z.object({
   category: MemoryCategory.optional(),
   schemaVersion: z.string().optional(),
   versionedAt: z.string().optional(),
-});
+}).loose();
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatter>;
 
 export interface MemoryFileEntry {
@@ -55,6 +55,13 @@ export interface MemoryFileEntry {
   name: string;
   path: string;
   indexed: boolean;
+  /**
+   * ISO timestamp of last indexing, when known. The slow path (directory walk)
+   * populates this from frontmatter. The `_index.md` fast path does not carry
+   * the timestamp — only the `indexed` bool — so this is `undefined` there.
+   * Callers that need staleness detection must read it on demand when missing.
+   */
+  indexedAt?: string;
   tags: string[];
 }
 
@@ -318,6 +325,37 @@ function parseIndexCell(cell: string): string {
   return cell.trim().replace(/\\\|/g, "|");
 }
 
+/**
+ * Splits a markdown table row on unescaped `|`. Writers escape literal pipes
+ * inside cells as `\|`, so a raw `split("|")` corrupts any row whose name
+ * or tags contain a pipe.
+ */
+function splitRowCells(row: string): string[] {
+  const cells: string[] = [];
+  let buf = "";
+  let escapeNext = false;
+  for (const c of row) {
+    if (escapeNext) {
+      buf += "\\" + c;
+      escapeNext = false;
+      continue;
+    }
+    if (c === "\\") {
+      escapeNext = true;
+      continue;
+    }
+    if (c === "|") {
+      cells.push(buf);
+      buf = "";
+      continue;
+    }
+    buf += c;
+  }
+  if (escapeNext) buf += "\\";
+  cells.push(buf);
+  return cells;
+}
+
 function parseIndexEntries(namespacePath: string): MemoryFileEntry[] | null {
   const indexPath = join(namespacePath, "_index.md");
   if (!existsSync(indexPath)) return null;
@@ -336,7 +374,7 @@ function parseIndexEntries(namespacePath: string): MemoryFileEntry[] | null {
 
     const entries: MemoryFileEntry[] = [];
     for (const row of rows) {
-      const parts = row.split("|").slice(1, -1).map(parseIndexCell);
+      const parts = splitRowCells(row).slice(1, -1).map(parseIndexCell);
       if (parts.length < 4) return null;
       const [id, name, tags, indexed] = parts;
       if (!id || !MEMORY_ID_RE.test(id)) {
@@ -357,8 +395,27 @@ function parseIndexEntries(namespacePath: string): MemoryFileEntry[] | null {
 }
 
 /**
+ * Reads `.md` filenames (IDs) from a namespace directory, excluding `_index.md`
+ * and hidden files. Returns an empty array if the directory doesn't exist.
+ */
+function readDiskIds(nsPath: string): string[] {
+  try {
+    return readdirSync(nsPath)
+      .filter((f) => f.endsWith(".md") && f !== "_index.md" && !f.startsWith("."))
+      .map((f) => f.replace(/\.md$/, ""));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Lists all memory files in a namespace directory.
  * Excludes _index.md. Returns parsed frontmatter metadata only (no body text).
+ *
+ * Fast path: read `_index.md` and verify its ID set matches the directory.
+ * On drift (ghost entries or orphan files — e.g. crash mid-write, manual
+ * edits), fall through to the slow path and regenerate the index so the
+ * next call is fast again. Spec Decision #1: files win on disagreement.
  */
 export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
   const nsPath = resolveNamespacePath(namespace);
@@ -366,7 +423,12 @@ export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
 
   const indexedEntries = parseIndexEntries(nsPath);
   if (indexedEntries) {
-    return indexedEntries;
+    const diskIds = new Set(readDiskIds(nsPath));
+    const inSync =
+      diskIds.size === indexedEntries.length
+      && indexedEntries.every((e) => diskIds.has(e.id));
+    if (inSync) return indexedEntries;
+    // Drift detected — fall through to slow path, then regenerate the index.
   }
 
   const files = readdirSync(nsPath).filter(
@@ -385,11 +447,21 @@ export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
         name: frontmatter.name,
         path: filePath,
         indexed: !!frontmatter.indexedAt,
+        indexedAt: frontmatter.indexedAt,
         tags: frontmatter.tags,
       });
     } catch (err) {
       console.error(`[fs-memory] Failed to parse ${filePath}:`, err);
     }
+  }
+
+  // Self-heal: reconcile _index.md with disk so the next call takes the fast path.
+  // Best-effort — drift detection triggered the slow path, but a failure here must
+  // not break the caller.
+  try {
+    generateIndex(nsPath);
+  } catch (err) {
+    console.error(`[fs-memory] Failed to regenerate _index.md after drift:`, err);
   }
 
   return entries;

@@ -305,21 +305,22 @@ describe("listMemoryFiles", () => {
     expect(entries).toEqual([]);
   });
 
-  test("uses _index.md as a metadata cache when it contains full IDs", async () => {
+  test("uses _index.md as a metadata cache when the disk matches", async () => {
     const ns = `index-cache-${randomUUID().slice(0, 8)}`;
     const nsPath = ensureNamespacePath(ns);
     const id = randomUUID();
+    const indexedAt = new Date().toISOString();
     writeMemoryFile(id, "Indexed body", makeFrontmatter({
       id,
       namespace: ns,
       name: "Indexed Entry",
       tags: ["cached"],
-      indexedAt: new Date().toISOString(),
+      indexedAt,
     }));
     generateIndex(nsPath);
 
-    rmSync(join(nsPath, `${id}.md`));
-
+    // File still present — fast path trusts the index; indexedAt is not carried
+    // by the _index.md row, so it's undefined on the fast path.
     const entries = listMemoryFiles(ns);
     expect(entries).toEqual([
       {
@@ -376,6 +377,40 @@ describe("generateIndex", () => {
     expect(existsSync(indexPath)).toBe(true);
     const content = readFileSync(indexPath, "utf-8");
     expect(content).toContain("0 memories");
+  });
+
+  test("Spec 'Dedup check': names and tags with `|` round-trip through _index.md fast path", () => {
+    const ns = `pipe-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const id1 = randomUUID();
+    const id2 = randomUUID();
+
+    // Name with pipes + tag with pipe — both must survive write → read
+    writeMemoryFile(id1, "body", makeFrontmatter({
+      id: id1, namespace: ns, name: "A | B | C",
+      tags: ["tag|one", "plain"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+    writeMemoryFile(id2, "body", makeFrontmatter({
+      id: id2, namespace: ns, name: "Normal",
+      tags: ["simple"],
+      createdAt: "2026-02-01T00:00:00.000Z",
+    }));
+
+    generateIndex(nsPath);
+
+    // parseIndexEntries (fast path) must recover the original strings.
+    const entries = listMemoryFiles(ns);
+    expect(entries.length).toBe(2);
+
+    const piped = entries.find((e) => e.id === id1);
+    expect(piped).toBeDefined();
+    expect(piped!.name).toBe("A | B | C");
+    expect(piped!.tags).toEqual(["tag|one", "plain"]);
+
+    const normal = entries.find((e) => e.id === id2);
+    expect(normal!.name).toBe("Normal");
+    expect(normal!.tags).toEqual(["simple"]);
   });
 });
 
@@ -485,6 +520,59 @@ describe("resolveNamespacePath", () => {
 // listMemoryFiles — malformed frontmatter
 // ---------------------------------------------------------------------------
 
+describe("listMemoryFiles — Decision #1: files win on _index.md drift", () => {
+  test("ghost entry (index row without file) is filtered; index self-heals", () => {
+    const ns = `ghost-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const idKeep = randomUUID();
+    const idGone = randomUUID();
+
+    writeMemoryFile(idKeep, "stays", makeFrontmatter({ id: idKeep, namespace: ns, name: "Keep" }));
+    writeMemoryFile(idGone, "deleted", makeFrontmatter({ id: idGone, namespace: ns, name: "Gone" }));
+    generateIndex(nsPath);
+
+    // Simulate external deletion — file vanishes but _index.md still references it
+    rmSync(join(nsPath, `${idGone}.md`));
+
+    const entries = listMemoryFiles(ns);
+    expect(entries.length).toBe(1);
+    expect(entries[0]!.id).toBe(idKeep);
+
+    // Self-heal: second call should see a regenerated, clean index
+    const secondCall = listMemoryFiles(ns);
+    expect(secondCall.length).toBe(1);
+    expect(secondCall[0]!.id).toBe(idKeep);
+
+    // _index.md should no longer mention the gone id
+    const indexContent = readFileSync(join(nsPath, "_index.md"), "utf-8");
+    expect(indexContent).not.toContain(idGone);
+    expect(indexContent).toContain(idKeep);
+  });
+
+  test("orphan file (on disk, not in index — e.g. crash mid-write) is surfaced", () => {
+    const ns = `orphan-${randomUUID().slice(0, 8)}`;
+    const nsPath = ensureNamespacePath(ns);
+    const idIndexed = randomUUID();
+    const idOrphan = randomUUID();
+
+    writeMemoryFile(idIndexed, "in index", makeFrontmatter({ id: idIndexed, namespace: ns, name: "Indexed" }));
+    generateIndex(nsPath);
+
+    // Simulate a crash between writeMemoryFile and appendToIndex — file exists, index doesn't know
+    writeMemoryFile(idOrphan, "orphan", makeFrontmatter({ id: idOrphan, namespace: ns, name: "Orphan" }));
+    // (intentionally skip appendToIndex/updateIndexEntry — this is the crash-window scenario)
+
+    const entries = listMemoryFiles(ns);
+    expect(entries.length).toBe(2);
+    expect(entries.map((e) => e.id).sort()).toEqual([idIndexed, idOrphan].sort());
+
+    // Self-heal: next call sees a regenerated index with both
+    const indexContent = readFileSync(join(nsPath, "_index.md"), "utf-8");
+    expect(indexContent).toContain(idIndexed);
+    expect(indexContent).toContain(idOrphan);
+  });
+});
+
 describe("listMemoryFiles — malformed files", () => {
   test("skips files with invalid frontmatter without crashing", () => {
     const ns = `malformed-${randomUUID().slice(0, 8)}`;
@@ -500,6 +588,51 @@ describe("listMemoryFiles — malformed files", () => {
     const entries = listMemoryFiles(ns);
     expect(entries.length).toBe(1);
     expect(entries[0]!.name).toBe("Valid");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frontmatter — preserve unknown user-added keys
+// ---------------------------------------------------------------------------
+
+describe("MemoryFrontmatter — Goal #3 / edge case: human-editable file preserved through indexer write-back", () => {
+  test("preserves unknown user-added keys through parse + write round-trip", () => {
+    const ns = `passthrough-${randomUUID().slice(0, 8)}`;
+    ensureNamespacePath(ns);
+
+    const id = randomUUID();
+    const raw = `---
+id: ${id}
+name: With extras
+origin: manual
+namespace: ${ns}
+tags: []
+createdAt: "2026-04-13T00:00:00Z"
+priority: high
+author: youhao
+custom_block:
+  nested: value
+  count: 3
+---
+body`;
+
+    writeFileSync(join(resolveNamespacePath(ns), `${id}.md`), raw);
+
+    // Read parses through Zod — unknown keys must survive
+    const { frontmatter } = readMemoryFile(join(resolveNamespacePath(ns), `${id}.md`));
+    const fm = frontmatter as Record<string, unknown>;
+    expect(fm.priority).toBe("high");
+    expect(fm.author).toBe("youhao");
+    expect(fm.custom_block).toEqual({ nested: "value", count: 3 });
+
+    // Re-write (simulating indexer write-back) preserves them on disk
+    writeMemoryFile(id, "body", { ...frontmatter, indexedAt: new Date().toISOString() });
+    const reread = readMemoryFile(join(resolveNamespacePath(ns), `${id}.md`));
+    const fm2 = reread.frontmatter as Record<string, unknown>;
+    expect(fm2.priority).toBe("high");
+    expect(fm2.author).toBe("youhao");
+    expect(fm2.custom_block).toEqual({ nested: "value", count: 3 });
+    expect(fm2.indexedAt).toBeDefined();
   });
 });
 
