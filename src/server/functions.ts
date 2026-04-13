@@ -93,6 +93,10 @@ export const searchMemories = createServerFn()
         summary: e.summary,
       })),
       files: result.files,
+      // Spec Decision #8: `signals` is the public health contract — UI badges
+      // (degraded, unindexed, stale, contradictions) read this directly.
+      // `guidance` remains for legacy consumers but is deprecated for new ones.
+      signals: result.signals,
       guidance: result.guidance,
     };
   }));
@@ -686,10 +690,17 @@ export const streamingSearch = createServerFn()
     for (const file of result.files) {
       yield {
         type: "file" as const,
+        // Spec Decision #8: `path`, `indexed`, `stale`, `indexedAt`, `source`
+        // are the public per-result contract. Streaming consumers must receive
+        // the same shape as non-streaming ones to render staleness/freshness.
         data: {
           id: file.id,
           name: file.name,
+          source: file.source,
+          path: file.path,
           indexed: file.indexed,
+          stale: file.stale,
+          indexedAt: file.indexedAt,
           tags: file.tags,
           matchContext: file.matchContext,
         },
@@ -738,6 +749,13 @@ export const streamingSearch = createServerFn()
         },
       };
     }
+
+    // Spec Decision #8: `signals` is the structured health contract. Emit
+    // before the deprecated `guidance` event so consumers can prefer it.
+    yield {
+      type: "signals" as const,
+      data: result.signals,
+    };
 
     yield {
       type: "guidance" as const,
