@@ -147,23 +147,42 @@ function touchLockHeartbeat(lockPath: string): void {
 }
 
 function breakStaleLock(lockPath: string): boolean {
+  let heartbeatPath: string;
+  let statMs: number;
   try {
-    const heartbeatPath = getLockHeartbeatPath(lockPath);
+    heartbeatPath = getLockHeartbeatPath(lockPath);
     const statPath = existsSync(heartbeatPath) ? heartbeatPath : lockPath;
-    const age = Date.now() - statSync(statPath).mtimeMs;
-    if (age > lockTimings.staleLockAgeMs) {
-      const claimPath = join(lockPath, ".reclaiming");
-      const claimFd = openSync(claimPath, "wx");
-      closeSync(claimFd);
-      rmSync(lockPath, { recursive: true, force: true });
-      console.error(`[fs-memory] Broke stale lock (${Math.round(age / 1000)}s old): ${lockPath}`);
-      return true;
-    }
-  } catch {
-    // Lock disappeared between check and stat — treat as broken
-    return true;
+    statMs = statSync(statPath).mtimeMs;
+  } catch (err) {
+    // ENOENT: the lock (or heartbeat) disappeared between existsSync and stat.
+    // That's the benign race we actually want to signal as "broken" so the
+    // caller retries mkdir. Every other errno (EACCES on a read-only volume,
+    // ENOSPC, EIO, permission on the parent) is a real problem — silently
+    // swallowing it would let two writers into the critical section on a
+    // system that can't hold a lock at all. Spec Decision #13 says only ENOENT
+    // is recoverable during break.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw err;
   }
-  return false;
+
+  const age = Date.now() - statMs;
+  if (age <= lockTimings.staleLockAgeMs) return false;
+
+  try {
+    const claimPath = join(lockPath, ".reclaiming");
+    const claimFd = openSync(claimPath, "wx");
+    closeSync(claimFd);
+    rmSync(lockPath, { recursive: true, force: true });
+    console.error(`[fs-memory] Broke stale lock (${Math.round(age / 1000)}s old): ${lockPath}`);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // Another writer beat us to the reclaim (EEXIST) or the lock vanished
+    // (ENOENT) — in both cases our subsequent mkdir attempt will detect
+    // and handle the state correctly.
+    if (code === "EEXIST" || code === "ENOENT") return true;
+    throw err;
+  }
 }
 
 export async function withNamespaceLock<T>(
