@@ -59,9 +59,10 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
 
   const { Provider } = providerState;
 
-  return (
-    <Provider defaultMode="dark" storageKey="kb">
-      {children}
-    </Provider>
-  );
+  // defaultMode/storageKey are intentionally NOT passed here — WrappedProvider
+  // receives `{ children }` only and hardcodes the values on the real
+  // StduiProvider inside createWrappedProvider. Passing them again here would
+  // be a silent no-op and invite "why doesn't changing this do anything?"
+  // bugs. Edit the values in createWrappedProvider instead.
+  return <Provider>{children}</Provider>;
 }

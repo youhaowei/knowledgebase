@@ -229,7 +229,6 @@ function Home() {
             <GraphClient
               nodes={nodes}
               links={links}
-              onClusterClick={handleNamespaceChange}
               onNodeClick={(node) => setSelectedItem({ type: "entity", name: node.name })}
               selectedNodeName={_selectedItem?.type === "entity" ? _selectedItem.name : undefined}
             />

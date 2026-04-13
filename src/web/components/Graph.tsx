@@ -20,7 +20,6 @@ import type { GraphNode, GraphLink } from "./types";
 interface GraphProps {
   nodes: GraphNode[];
   links: GraphLink[];
-  onClusterClick?: (namespace: string) => void;
   onNodeClick?: (node: { name: string; type: string }) => void;
   selectedNodeName?: string;
 }
@@ -60,7 +59,6 @@ interface ForceNode extends NodeObject {
   importance: number;
   degree: number;
   color: string;
-  clusterId?: number;
 }
 
 // Extended link type for force graph
