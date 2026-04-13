@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -235,6 +235,66 @@ describe("hybridSearch file results", () => {
     expect(result.signals.unindexedCount).toBe(1);
     expect(result.signals.degraded).toBe(false);
     expect(result.guidance).toContain("not yet indexed");
+  });
+
+  test("Decision #8: signals.staleCount reflects file results with mtime > indexedAt", async () => {
+    const ns = `hybrid-signals-stale-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    const indexedAt = new Date(Date.now() - 60_000).toISOString(); // 60s ago
+    const path = writeMemoryFile(
+      id,
+      "Stale body — edited after the indexer last touched the file",
+      makeFrontmatter({ id, namespace: ns, name: "Stale Memory", indexedAt }),
+    );
+    // Bump mtime forward so file-search judges the file stale
+    // (Decision #8: stale = mtime > indexedAt).
+    const future = new Date(Date.now() + 30_000);
+    utimesSync(path, future, future);
+
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [], edges: [], entities: [],
+        intent: "general", guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("Stale", ns, 10);
+    expect(result.signals.staleCount).toBe(1);
+  });
+
+  test("Decision #8: signals.staleCount counts stale files even when graph dedups them out of `files`", async () => {
+    // Regression: dedup must not erase the stale signal. A memory present in
+    // BOTH graph and file results gets dropped from `files[]` (graph wins),
+    // but consumers expect `signals.staleCount` to reflect the response
+    // population, not just the file-only slice.
+    const ns = `hybrid-signals-stale-dedup-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    const indexedAt = new Date(Date.now() - 60_000).toISOString();
+    const path = writeMemoryFile(
+      id,
+      "Body that's been edited since indexing",
+      makeFrontmatter({ id, namespace: ns, name: "Stale + Graph", indexedAt }),
+    );
+    const future = new Date(Date.now() + 30_000);
+    utimesSync(path, future, future);
+
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [{
+          id, name: "Stale + Graph", text: "graph copy",
+          abstract: "", summary: "", namespace: ns, schemaVersion: "0.0.0",
+          createdAt: new Date(),
+        }],
+        edges: [], entities: [],
+        intent: "general", guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("Body", ns, 10);
+    // Graph wins → file row dropped from `files`...
+    expect(result.files.some((f) => f.id === id)).toBe(false);
+    // ...but the staleness signal must persist across the dedup boundary.
+    expect(result.signals.staleCount).toBe(1);
   });
 
   test("Decision #8: file results carry `path` and `indexedAt` as public contract", async () => {

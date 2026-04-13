@@ -135,7 +135,12 @@ export async function hybridSearch(
   // Filter file results to exclude IDs already covered by graph
   const dedupedFiles = fileResults.filter((f) => !graphMemoryIds.has(f.id));
 
-  const signals = buildSignals(graphResult, dedupedFiles, edges);
+  // Spec Decision #8: signals describe the *response population*, not just the
+  // file-only slice. Stale/unindexed metadata lives on the FileSearchResult,
+  // so a graph-covered memory whose file was edited post-indexing must still
+  // increment staleCount even though we drop it from `files` to avoid a
+  // duplicated row. Build counts from pre-dedup file metadata.
+  const signals = buildSignals(graphResult, fileResults, edges);
   const guidance = buildGuidance(graphResult, signals);
 
   return {
