@@ -104,11 +104,25 @@ export function MemoryList({ namespace, selectedItem, onSelect }: MemoryListProp
                     <span className="text-xs font-medium text-neutral-fg truncate flex-1">
                       {memory.name}
                     </span>
-                    {memory.category && (
-                      <Badge variant="soft" color={CATEGORY_COLORS[memory.category] ?? "secondary"} className="text-[10px] shrink-0">
-                        {memory.category}
-                      </Badge>
-                    )}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {/* US-10: Unindexed memories are labeled so consumers know
+                          semantic enrichment is pending. */}
+                      {(memory.status === "pending" || memory.status === "processing") && (
+                        <Badge variant="soft" color="warning" className="text-[10px]">
+                          {memory.status === "processing" ? "Indexing" : "Pending"}
+                        </Badge>
+                      )}
+                      {memory.status === "failed" && (
+                        <Badge variant="soft" color="danger" className="text-[10px]">
+                          Failed
+                        </Badge>
+                      )}
+                      {memory.category && (
+                        <Badge variant="soft" color={CATEGORY_COLORS[memory.category] ?? "secondary"} className="text-[10px]">
+                          {memory.category}
+                        </Badge>
+                      )}
+                    </div>
                   </div>
                   {memory.summary && (
                     <p className="text-[11px] text-neutral-fg-subtle mt-0.5 line-clamp-2">
