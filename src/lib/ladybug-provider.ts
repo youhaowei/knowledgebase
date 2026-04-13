@@ -1030,18 +1030,22 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async getPendingMemories(namespace?: string, limit = 10): Promise<Memory[]> {
-    let whereClause = "WHERE m.status = 'pending' AND m.deletedAt = ''";
-    if (namespace !== undefined) {
-      whereClause += ` AND m.namespace = '${namespace}'`;
-    }
+    // Parameterized to prevent Cypher injection and match the rest of the
+    // provider's query style. Limit is interpolated because LadybugDB does
+    // not yet support LIMIT bound params — guarded by a numeric coercion.
+    const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 10;
+    const whereClause = namespace !== undefined
+      ? "WHERE m.status = 'pending' AND m.deletedAt = '' AND m.namespace = $namespace"
+      : "WHERE m.status = 'pending' AND m.deletedAt = ''";
 
-    const result = await this.conn.query(
-      `MATCH (m:Memory) ${whereClause} RETURN m ORDER BY m.createdAt ASC LIMIT ${limit}`,
+    const result = await this.executeQuery(
+      `MATCH (m:Memory) ${whereClause} RETURN m ORDER BY m.createdAt ASC LIMIT ${safeLimit}`,
+      namespace !== undefined ? { namespace } : {},
     );
 
     const rows = await result.getAll();
     return rows.map((row) => {
-      const m = row.m;
+      const m = row.m as Record<string, unknown>;
       return {
         id: m.id as string,
         name: m.name as string,
