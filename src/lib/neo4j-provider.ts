@@ -1127,11 +1127,13 @@ export class Neo4jProvider implements GraphProvider {
 
       const sortProp = "e.name";
       const sortDir = "ASC";
+      // Tiebreak on uuid for stable pagination across rows with duplicate names.
+      const tiebreak = `, e.uuid ${sortDir}`;
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
       const result = await session.run(
-        `MATCH (e:Entity) ${where} RETURN e ORDER BY ${sortProp} ${sortDir} SKIP $skip LIMIT $limit`,
+        `MATCH (e:Entity) ${where} RETURN e ORDER BY ${sortProp} ${sortDir}${tiebreak} SKIP $skip LIMIT $limit`,
         params,
       );
 
@@ -1191,6 +1193,9 @@ export class Neo4jProvider implements GraphProvider {
 
       const sortProp = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
       const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+      // Tiebreak on r.id for stable pagination across rows with duplicate
+      // createdAt or fact text.
+      const tiebreak = `, r.id ${sortDir}`;
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1211,7 +1216,7 @@ export class Neo4jProvider implements GraphProvider {
                r.validAt as validAt,
                r.invalidAt as invalidAt,
                r.createdAt as createdAt
-        ORDER BY ${sortProp} ${sortDir}
+        ORDER BY ${sortProp} ${sortDir}${tiebreak}
         SKIP $skip
         LIMIT $limit
         `,
@@ -1273,6 +1278,9 @@ export class Neo4jProvider implements GraphProvider {
 
       const sortProp = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
       const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+      // Tiebreak on m.id for stable pagination across rows sharing createdAt
+      // or name (common for batched migrations / retro sync).
+      const tiebreak = `, m.id ${sortDir}`;
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1291,7 +1299,7 @@ export class Neo4jProvider implements GraphProvider {
                m.status as status,
                m.error as error,
                m.createdAt as createdAt
-        ORDER BY ${sortProp} ${sortDir}
+        ORDER BY ${sortProp} ${sortDir}${tiebreak}
         SKIP $skip
         LIMIT $limit
         `,

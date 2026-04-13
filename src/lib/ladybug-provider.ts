@@ -1108,10 +1108,12 @@ export class LadybugProvider implements GraphProvider {
     const offset = pagination?.offset ?? 0;
     const sortCol = "e.name";
     const sortDir = "ASC";
+    // Tiebreak on uuid for stable pagination across rows with duplicate names.
+    const tiebreak = `, e.uuid ${sortDir}`;
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.executeQuery(
-      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir} SKIP ${offset} LIMIT ${effectiveLimit}`,
+      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir}${tiebreak} SKIP ${offset} LIMIT ${effectiveLimit}`,
       params,
     );
 
@@ -1162,6 +1164,9 @@ export class LadybugProvider implements GraphProvider {
     const offset = pagination?.offset ?? 0;
     const sortCol = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+    // Tiebreak on r.id for stable pagination across rows with duplicate
+    // createdAt or fact text.
+    const tiebreak = `, r.id ${sortDir}`;
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.executeQuery(
@@ -1172,7 +1177,7 @@ export class LadybugProvider implements GraphProvider {
               r.confidence as confidence, r.confidenceReason as confidenceReason,
               r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
               r.invalidAt as invalidAt, r.createdAt as createdAt
-       ORDER BY ${sortCol} ${sortDir}
+       ORDER BY ${sortCol} ${sortDir}${tiebreak}
        SKIP ${offset}
        LIMIT ${effectiveLimit}`,
       params,
@@ -1200,6 +1205,10 @@ export class LadybugProvider implements GraphProvider {
     const offset = pagination?.offset ?? 0;
     const sortCol = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+    // Always tiebreak on m.id — without it, rows sharing createdAt (or name)
+    // shuffle between pages under offset-based pagination, producing duplicates
+    // and silently skipping rows. The migration spec mandates stable order.
+    const tiebreak = `, m.id ${sortDir}`;
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.executeQuery(
@@ -1207,7 +1216,7 @@ export class LadybugProvider implements GraphProvider {
        RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
               m.category as category, m.namespace as namespace, m.status as status,
               m.error as error, m.createdAt as createdAt
-       ORDER BY ${sortCol} ${sortDir}
+       ORDER BY ${sortCol} ${sortDir}${tiebreak}
        SKIP ${offset}
        LIMIT ${effectiveLimit}`,
       params,
