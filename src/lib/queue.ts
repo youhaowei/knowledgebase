@@ -9,12 +9,15 @@
  * Per-namespace queues to avoid race conditions
  */
 
+import { statSync } from "fs";
+import { join } from "path";
 import { extract } from "./extractor.js";
 import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
 import { track } from "./analytics.js";
 import { summarySchema } from "./versions.js";
+import { resolveNamespacePath } from "./fs-memory.js";
 import {
   semver,
   isoFrom,
@@ -26,6 +29,34 @@ type QueueEntry = {
   resolve: () => void;
   reject: (e: Error) => void;
 };
+
+/**
+ * Returns the file's mtime in ms, or null if the file doesn't exist.
+ * Used for the Decision #8 snapshot-mtime ordering invariant — synthetic
+ * memories from test harnesses without on-disk files return null and skip
+ * the invariant.
+ *
+ * Exported for testing the Decision #8 invariant directly.
+ */
+export function safeMtimeMs(filePath: string): number | null {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns true if the file's mtime differs from the snapshot, or if the file
+ * has disappeared. Returns false when `snapshot` is null (no invariant to check).
+ *
+ * Exported for testing the Decision #8 invariant directly.
+ */
+export function isFileChangedSince(filePath: string, snapshot: number | null): boolean {
+  if (snapshot === null) return false;
+  const current = safeMtimeMs(filePath);
+  return current === null || current !== snapshot;
+}
 
 export class Queue {
   private entries: Map<string, QueueEntry[]> = new Map();
@@ -71,55 +102,13 @@ export class Queue {
       const { memory, onStored, resolve, reject } = entry;
 
       try {
-        const ns = memory.namespace;
-
-        const start = performance.now();
-
-        // 1. Extract (with existing entity catalog for dedup)
-        const entityCatalog = await this.graph.getEntityCatalog(ns);
-        const { entities, edges, abstract, summary, category } = await extract(memory.text, entityCatalog);
-        memory.abstract = abstract;
-        memory.summary = summary;
-        memory.category = category ?? "general";
-        memory.schemaVersion = String(summarySchema.current);
-        memory.versionedAt = new Date().toISOString();
-        const extractMs = Math.round(performance.now() - start);
-
-        // 2. Auto-generate name
-        if (!memory.name || memory.name === "") {
-          const firstLine = summary.slice(0, 50).split("\n")[0];
-          memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
+        const processed = await this.processEntry(memory, onStored);
+        if (processed) {
+          // Self-evolving: regenerate one stale memory per cycle (fire-and-forget)
+          this.regenerateOneStale(memory.namespace).catch((err: unknown) =>
+            console.error(`[Queue] Self-evolving maintenance error:`, err),
+          );
         }
-
-        // 3. Embed memory + edges
-        const embedStart = performance.now();
-        const memEmb = await embedDual(memory.text);
-        const edgeEmbeddings: EmbeddingMap[] = [];
-        for (const edge of edges) {
-          edgeEmbeddings.push(await embedDual(edge.fact));
-        }
-        const embedMs = Math.round(performance.now() - embedStart);
-
-        // 4. Store
-        const storeStart = performance.now();
-        await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
-        await onStored?.(memory);
-        const storeMs = Math.round(performance.now() - storeStart);
-
-        const totalMs = Math.round(performance.now() - start);
-        console.error(`[kb] ${memory.name} → ${entities.length}E ${edges.length}R (${extractMs}ms extract, ${embedMs}ms embed, ${storeMs}ms store = ${totalMs}ms)`);
-
-        track("queue.process", {
-          namespace: ns,
-          duration_ms: totalMs,
-          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, extractMs, embedMs, storeMs },
-        });
-
-        // 6. Self-evolving: regenerate one stale memory per cycle (fire-and-forget)
-        this.regenerateOneStale(ns).catch((err: unknown) =>
-          console.error(`[Queue] Self-evolving maintenance error:`, err),
-        );
-
         resolve();
       } catch (error) {
         console.error(`[Queue] Error processing memory ${memory.id}:`, error);
@@ -134,6 +123,72 @@ export class Queue {
     }
 
     this.processing.delete(namespace);
+  }
+
+  /**
+   * Process a single queued memory. Returns true if the memory was stored,
+   * false if the pass was abandoned (e.g., file changed during extraction).
+   *
+   * Spec Decision #8 ordering invariant: snapshot the file's mtime before
+   * extraction, re-stat before commit. If the file changed, abandon the pass —
+   * do not write stale extraction to the graph or stamp indexedAt on edited content.
+   */
+  private async processEntry(
+    memory: Memory,
+    onStored?: (memory: Memory) => Promise<void>,
+  ): Promise<boolean> {
+    const ns = memory.namespace;
+    const start = performance.now();
+
+    const filePath = join(resolveNamespacePath(ns), `${memory.id}.md`);
+    const snapshotMtime = safeMtimeMs(filePath);
+
+    const entityCatalog = await this.graph.getEntityCatalog(ns);
+    const { entities, edges, abstract, summary, category } = await extract(memory.text, entityCatalog);
+    memory.abstract = abstract;
+    memory.summary = summary;
+    memory.category = category ?? "general";
+    memory.schemaVersion = String(summarySchema.current);
+    memory.versionedAt = new Date().toISOString();
+    const extractMs = Math.round(performance.now() - start);
+
+    if (!memory.name || memory.name === "") {
+      const firstLine = summary.slice(0, 50).split("\n")[0];
+      memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
+    }
+
+    const embedStart = performance.now();
+    const memEmb = await embedDual(memory.text);
+    const edgeEmbeddings: EmbeddingMap[] = [];
+    for (const edge of edges) {
+      edgeEmbeddings.push(await embedDual(edge.fact));
+    }
+    const embedMs = Math.round(performance.now() - embedStart);
+
+    if (isFileChangedSince(filePath, snapshotMtime)) {
+      console.error(`[kb] File changed during indexing ${memory.id} — abandoning pass, retry on next sweep`);
+      track("queue.abandoned", {
+        namespace: ns,
+        meta: { memoryId: memory.id, reason: "mtime-changed" },
+      });
+      return false;
+    }
+
+    const storeStart = performance.now();
+    await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
+    await onStored?.(memory);
+    const storeMs = Math.round(performance.now() - storeStart);
+
+    const totalMs = Math.round(performance.now() - start);
+    console.error(`[kb] ${memory.name} → ${entities.length}E ${edges.length}R (${extractMs}ms extract, ${embedMs}ms embed, ${storeMs}ms store = ${totalMs}ms)`);
+
+    track("queue.process", {
+      namespace: ns,
+      duration_ms: totalMs,
+      meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, extractMs, embedMs, storeMs },
+    });
+
+    return true;
   }
 
   /**
