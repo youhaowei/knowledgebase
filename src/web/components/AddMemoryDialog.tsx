@@ -119,15 +119,17 @@ export function AddMemoryDialog({ open, onClose, onAdded, namespace, namespaces 
               <label className="text-[11px] font-medium text-neutral-fg-subtle uppercase tracking-wider">
                 Origin
               </label>
+              {/* Web UI only exposes user-originated origins. `mcp` is reserved
+                  for the MCP tool handler, `retro` for the retro CLI — letting
+                  users pick them from the dialog pollutes analytics with
+                  mislabeled origins. */}
               <select
                 value={origin}
                 onChange={(e) => setOrigin(e.target.value as typeof origin)}
                 className="mt-1 w-full h-8 rounded-md bg-neutral-bg-subtle border border-neutral-border px-2 text-xs text-neutral-fg focus:border-palette-primary focus:outline-none"
               >
                 <option value="manual">manual</option>
-                <option value="mcp">mcp</option>
                 <option value="import">import</option>
-                <option value="retro">retro</option>
               </select>
             </div>
 
@@ -142,6 +144,23 @@ export function AddMemoryDialog({ open, onClose, onAdded, namespace, namespaces 
                 placeholder="comma, separated, tags"
                 className="mt-1 w-full h-8 rounded-md bg-neutral-bg-subtle border border-neutral-border px-2.5 text-xs text-neutral-fg placeholder:text-neutral-fg-subtle/50 focus:border-palette-primary focus:outline-none"
               />
+              {/* Show the normalized tag set so the user sees what will be
+                  saved. Server-side normalizeTags lowercases + trims; showing
+                  chips here prevents "why did my tags change?" surprises. */}
+              {tags.trim() && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {Array.from(new Set(
+                    tags.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean),
+                  )).map((tag) => (
+                    <span
+                      key={tag}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-bg-subtle border border-neutral-border text-neutral-fg-subtle"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 

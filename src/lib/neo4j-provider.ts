@@ -255,6 +255,7 @@ export class Neo4jProvider implements GraphProvider {
             m.namespace = $namespace,
             m.status = $status,
             m.error = $error,
+            m.deletedAt = '',
             m.createdAt = datetime($createdAt)${createEmbStr}
           ON MATCH SET
             m.name = $name,
@@ -301,7 +302,8 @@ export class Neo4jProvider implements GraphProvider {
               e.description = $description,
               e.namespace = $namespace,
               e.scope = $scope,
-              e.canonicalName = $canonicalName
+              e.canonicalName = $canonicalName,
+              e.deletedAt = ''
             ON MATCH SET
               e.type = $type,
               e.description = COALESCE($description, e.description)
