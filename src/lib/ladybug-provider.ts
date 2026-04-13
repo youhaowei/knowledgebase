@@ -1088,15 +1088,21 @@ export class LadybugProvider implements GraphProvider {
     limit = 100,
     pagination?: PaginationParams,
   ): Promise<StoredEntity[]> {
+    // User-supplied filter values flow through MCP search and HTTP routes.
+    // String interpolation here would be a Cypher injection vector — every
+    // value-bearing predicate is bound via $params and executeQuery's
+    // prepare/execute path.
     const conditions: string[] = ["e.deletedAt = ''"];
-    if (filter.uuid) conditions.push(`e.uuid = '${filter.uuid}'`);
-    if (filter.name)
-      conditions.push(`LOWER(e.name) CONTAINS LOWER('${filter.name}')`);
+    const params: Record<string, unknown> = {};
+    if (filter.uuid) { conditions.push(`e.uuid = $uuid`); params.uuid = filter.uuid; }
+    if (filter.name) { conditions.push(`LOWER(e.name) CONTAINS LOWER($name)`); params.name = filter.name; }
     if (filter.namespace === null) conditions.push("e.namespace = ''");
-    else if (filter.namespace !== undefined)
-      conditions.push(`e.namespace = '${filter.namespace}'`);
-    if (filter.scope) conditions.push(`e.scope = '${filter.scope}'`);
-    if (filter.type) conditions.push(`e.type = '${filter.type}'`);
+    else if (filter.namespace !== undefined) {
+      conditions.push(`e.namespace = $namespace`);
+      params.namespace = filter.namespace;
+    }
+    if (filter.scope) { conditions.push(`e.scope = $scope`); params.scope = filter.scope; }
+    if (filter.type) { conditions.push(`e.type = $type`); params.type = filter.type; }
 
     const effectiveLimit = pagination?.limit ?? limit;
     const offset = pagination?.offset ?? 0;
@@ -1104,13 +1110,14 @@ export class LadybugProvider implements GraphProvider {
     const sortDir = "ASC";
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir} SKIP ${offset} LIMIT ${effectiveLimit}`,
+      params,
     );
 
     const rows = await result.getAll();
     return rows.map((row) => {
-      const e = row.e;
+      const e = row.e as Record<string, unknown>;
       return {
         uuid: e.uuid as string,
         name: e.name as string,
@@ -1124,20 +1131,31 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async findEdges(filter: EdgeFilter, limit = 100, pagination?: PaginationParams): Promise<StoredEdge[]> {
+    // See findEntities — every value-bearing predicate is parameterized to
+    // close the Cypher injection vector for MCP/HTTP-supplied filters.
     const conditions: string[] = [
       "source.deletedAt = ''",
       "target.deletedAt = ''",
     ];
-    if (filter.id) conditions.push(`r.id = '${filter.id}'`);
+    const params: Record<string, unknown> = {};
+    if (filter.id) { conditions.push(`r.id = $id`); params.id = filter.id; }
     if (filter.namespace === null) conditions.push("source.namespace = ''");
-    else if (filter.namespace !== undefined)
-      conditions.push(`source.namespace = '${filter.namespace}'`);
-    if (filter.sourceEntityName)
-      conditions.push(`source.name = '${filter.sourceEntityName}'`);
-    if (filter.targetEntityName)
-      conditions.push(`target.name = '${filter.targetEntityName}'`);
-    if (filter.relationType)
-      conditions.push(`r.relationType = '${filter.relationType}'`);
+    else if (filter.namespace !== undefined) {
+      conditions.push(`source.namespace = $namespace`);
+      params.namespace = filter.namespace;
+    }
+    if (filter.sourceEntityName) {
+      conditions.push(`source.name = $sourceEntityName`);
+      params.sourceEntityName = filter.sourceEntityName;
+    }
+    if (filter.targetEntityName) {
+      conditions.push(`target.name = $targetEntityName`);
+      params.targetEntityName = filter.targetEntityName;
+    }
+    if (filter.relationType) {
+      conditions.push(`r.relationType = $relationType`);
+      params.relationType = filter.relationType;
+    }
     if (!filter.includeInvalidated) conditions.push("r.invalidAt = ''");
 
     const effectiveLimit = pagination?.limit ?? limit;
@@ -1146,7 +1164,7 @@ export class LadybugProvider implements GraphProvider {
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
        ${whereClause}
        RETURN r.id as id, source.name as sourceEntityName, target.name as targetEntityName,
@@ -1157,6 +1175,7 @@ export class LadybugProvider implements GraphProvider {
        ORDER BY ${sortCol} ${sortDir}
        SKIP ${offset}
        LIMIT ${effectiveLimit}`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -1164,14 +1183,18 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async findMemories(filter: MemoryFilter, limit = 100, pagination?: PaginationParams): Promise<Memory[]> {
+    // See findEntities — every value-bearing predicate is parameterized to
+    // close the Cypher injection vector for MCP/HTTP-supplied filters.
     const conditions: string[] = ["m.deletedAt = ''"];
-    if (filter.id) conditions.push(`m.id = '${filter.id}'`);
-    if (filter.name)
-      conditions.push(`LOWER(m.name) CONTAINS LOWER('${filter.name}')`);
+    const params: Record<string, unknown> = {};
+    if (filter.id) { conditions.push(`m.id = $id`); params.id = filter.id; }
+    if (filter.name) { conditions.push(`LOWER(m.name) CONTAINS LOWER($name)`); params.name = filter.name; }
     if (filter.namespace === null) conditions.push("m.namespace = ''");
-    else if (filter.namespace !== undefined)
-      conditions.push(`m.namespace = '${filter.namespace}'`);
-    if (filter.category) conditions.push(`m.category = '${filter.category}'`);
+    else if (filter.namespace !== undefined) {
+      conditions.push(`m.namespace = $namespace`);
+      params.namespace = filter.namespace;
+    }
+    if (filter.category) { conditions.push(`m.category = $category`); params.category = filter.category; }
 
     const effectiveLimit = pagination?.limit ?? limit;
     const offset = pagination?.offset ?? 0;
@@ -1179,7 +1202,7 @@ export class LadybugProvider implements GraphProvider {
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `MATCH (m:Memory) ${whereClause}
        RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
               m.category as category, m.namespace as namespace, m.status as status,
@@ -1187,6 +1210,7 @@ export class LadybugProvider implements GraphProvider {
        ORDER BY ${sortCol} ${sortDir}
        SKIP ${offset}
        LIMIT ${effectiveLimit}`,
+      params,
     );
 
     const rows = await result.getAll();
