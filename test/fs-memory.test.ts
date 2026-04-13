@@ -5,6 +5,7 @@ import {
   mkdirSync,
   rmSync,
   existsSync,
+  readdirSync,
   readFileSync,
   writeFileSync,
   utimesSync,
@@ -212,13 +213,58 @@ describe("writeMemoryFile + readMemoryFile", () => {
 
     writeMemoryFile(id, "Some text", fm);
 
-    // Find the namespace path
+    // atomicWriteFile uses a unique pid+uuid suffix to avoid collisions
+    // between concurrent writers — assert no `.tmp` siblings remain at all,
+    // not just the legacy `${id}.md.tmp` path.
     const nsPath = ensureNamespacePath("default");
-    const tmpPath = join(nsPath, `${id}.md.tmp`);
-    expect(existsSync(tmpPath)).toBe(false); // temp file must be gone
+    const leftovers = readdirSync(nsPath).filter((f) => f.startsWith(`${id}.md.`) && f.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
 
     // Cleanup
     rmSync(join(nsPath, `${id}.md`));
+  });
+
+  test("adversarial names round-trip through write → read → list without corruption", async () => {
+    // Memory names can contain any characters per Spec Decision #1 (UUID is
+    // the filename; name lives in frontmatter). Verify the YAML escape and
+    // _index.md cell escape paths survive characters that would otherwise
+    // break parsing — pipes (table separator), backslashes, newlines (illegal
+    // in single-line frontmatter), and quotes.
+    const ns = `adversarial-${randomUUID().slice(0, 8)}`;
+    const cases: string[] = [
+      "name | with pipe",
+      "name \\ with backslash",
+      "name with \"quotes\" and 'apostrophes'",
+      "name with \\| backslash-pipe",
+      "name: with colon",
+      "name with — em-dash and 🚀 emoji",
+    ];
+
+    try {
+      for (const name of cases) {
+        const id = randomUUID();
+        const fm = makeFrontmatter({ id, name, namespace: ns });
+        const path = writeMemoryFile(id, `body for ${name}`, fm);
+        const parsed = readMemoryFile(path);
+        expect(parsed.frontmatter.id).toBe(id);
+        expect(parsed.frontmatter.name).toBe(name);
+        expect(parsed.text).toBe(`body for ${name}`);
+      }
+
+      // Generate the index and verify each name parses back cleanly through
+      // the cell-escape layer.
+      const nsPath = ensureNamespacePath(ns);
+      generateIndex(nsPath);
+      const listed = listMemoryFiles(ns);
+      expect(listed.length).toBe(cases.length);
+      const listedNames = new Set(listed.map((e) => e.name));
+      for (const name of cases) {
+        expect(listedNames.has(name)).toBe(true);
+      }
+    } finally {
+      const nsPath = ensureNamespacePath(ns);
+      rmSync(nsPath, { recursive: true, force: true });
+    }
   });
 
   test("round-trips correctly via readMemoryFile", async () => {

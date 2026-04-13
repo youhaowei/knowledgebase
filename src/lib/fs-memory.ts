@@ -79,10 +79,16 @@ export interface MemoryFileEntry {
 }
 
 const MEMORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Spec Decision #12: stale-lock break at 30s. The lock is held only for the
+// commit window (tempfile write + rename + _index.md regen) — sub-second on a
+// healthy disk — so 30s is generous margin against false-stale judgements
+// during a stop-the-world GC, FUSE hiccup, or laptop sleep mid-commit.
+// `timeoutMs` is the waiter budget; staying at 10s keeps user-facing waits
+// short while still letting one or two normal commits complete in front of us.
 const defaultLockTimings = {
   timeoutMs: 10_000,
   retryMs: 25,
-  staleLockAgeMs: 10_000,
+  staleLockAgeMs: 30_000,
 };
 const lockTimings = { ...defaultLockTimings };
 
@@ -332,13 +338,27 @@ export function parseFrontmatter(content: string): { frontmatter: MemoryFrontmat
 // ---------------------------------------------------------------------------
 
 /**
- * Atomic file write: write to .tmp sibling then rename.
+ * Atomic file write: write to a unique sibling tempfile, then rename.
  * Safe against crashes — either the old content or new content exists, never partial.
+ *
+ * The tempfile name carries pid + a uuid suffix so two concurrent writers
+ * (e.g. the locked commit path and the lock-free self-heal in
+ * `listMemoryFiles`) never share a tmp path. Without this, a deterministic
+ * `${filePath}.tmp` lets two procs interleave writes — the second's
+ * `writeFileSync` would clobber the first's tmp before either rename, and
+ * the surviving rename could ship corrupted bytes.
  */
 function atomicWriteFile(filePath: string, content: string): void {
-  const tmpPath = `${filePath}.tmp`;
-  writeFileSync(tmpPath, content);
-  renameSync(tmpPath, filePath);
+  const tmpPath = `${filePath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  try {
+    writeFileSync(tmpPath, content);
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    // Best-effort cleanup if the rename failed mid-flight, so we don't leave
+    // unique-suffix detritus behind.
+    try { rmSync(tmpPath, { force: true }); } catch { /* ignore */ }
+    throw err;
+  }
 }
 
 /**
