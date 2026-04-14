@@ -20,6 +20,7 @@ import * as ops from "@/lib/operations.js";
 import { hybridSearch } from "@/lib/hybrid-search.js";
 import { analyticsContext } from "@/lib/analytics.js";
 import type { Memory, StoredEdge, StoredEntity, DetailLevel } from "@/types.js";
+import { namespaceSchema } from "@/types.js";
 
 function formatMemory(m: Memory, detail: DetailLevel) {
   if (detail === "summary") return { id: m.id, name: m.name, abstract: m.abstract };
@@ -68,9 +69,7 @@ export function createKnowledgebaseMcpServer() {
     {
       text: z.string().describe("The text to remember"),
       name: z.string().optional().describe("Optional name for the memory"),
-      namespace: z
-        .string()
-        .default("default")
+      namespace: namespaceSchema
         .describe("Namespace for isolation (e.g., project name)"),
       tags: z.array(z.string()).default([]).describe("Tags for organization (e.g., ['bug', 'worktree'])"),
       origin: z.enum(["manual", "retro", "mcp", "import"]).default("mcp").describe("Origin of the memory"),
@@ -105,9 +104,7 @@ export function createKnowledgebaseMcpServer() {
     "Search the knowledge graph. Returns edges (facts as relationships), memories, entities, and files. Response includes `signals` (degraded, unindexedCount, staleCount, contradictionsDetected) for health-aware rendering — prefer this over the deprecated `guidance` string. Use detail parameter to control response granularity: 'summary' (cheapest, abstracts only), 'full' (default, summaries + facts), 'source' (everything including full text).",
     {
       query: z.string().describe("Search query"),
-      namespace: z
-        .string()
-        .default("default")
+      namespace: namespaceSchema
         .describe("Namespace to search within"),
       limit: z.number().default(10).describe("Max results"),
       detail: z.enum(["summary", "full", "source"]).default("full").describe("Response detail level: summary (L0 abstracts), full (L1 summaries, default), source (L2 full text)"),
@@ -150,9 +147,7 @@ export function createKnowledgebaseMcpServer() {
     "Get entity by exact name. Returns the entity and its related edges (facts). Use detail parameter to control response granularity.",
     {
       name: z.string().describe("Exact entity name"),
-      namespace: z
-        .string()
-        .default("default")
+      namespace: namespaceSchema
         .describe("Namespace to search in"),
       detail: z.enum(["summary", "full", "source"]).default("full").describe("Response detail level"),
     },
@@ -189,9 +184,7 @@ export function createKnowledgebaseMcpServer() {
     "Remove memory or entity by name (soft delete).",
     {
       name: z.string().describe("Exact name to remove"),
-      namespace: z
-        .string()
-        .default("default")
+      namespace: namespaceSchema
         .describe("Namespace to remove from"),
     },
     withMcpSource(async ({ name, namespace }) => {
@@ -230,9 +223,7 @@ export function createKnowledgebaseMcpServer() {
       reason: z
         .string()
         .describe("Reason for invalidation (required for audit trail)"),
-      namespace: z
-        .string()
-        .default("default")
+      namespace: namespaceSchema
         .describe("Namespace of the edge"),
     },
     withMcpSource(async ({ edgeId, reason, namespace }) => {

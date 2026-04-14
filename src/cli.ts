@@ -11,6 +11,7 @@
 // flag short-circuit below doesn't have to pay a dynamic-import round trip.
 // Review pass 7 finding #12.
 import pkg from "../package.json" with { type: "json" };
+import { namespaceSchema } from "@/types.js";
 
 export {};
 
@@ -99,7 +100,13 @@ interface CmdContext {
 }
 
 function ctxFrom(args: ParsedArgs, defaults?: Partial<ParsedArgs>): CmdContext {
-  const ns = args.flags["--namespace"] ?? defaults?.flags?.["--namespace"] ?? "default";
+  // Spec Decision #3: namespaces are hard isolation boundaries. Normalize at
+  // every entry point — not just server/functions — so blank/whitespace input
+  // from CLI can't create a `"   "` directory on disk that web-side reads
+  // (which DO normalize) will never find. fdb6591 covered the HTTP boundary;
+  // this closes the CLI gap flagged in round 8 as Theme A.
+  const raw = args.flags["--namespace"] ?? defaults?.flags?.["--namespace"];
+  const ns = namespaceSchema.parse(raw);
   return {
     positional: args.positional,
     flags: args.flags,
