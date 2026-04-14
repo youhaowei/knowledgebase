@@ -22,7 +22,7 @@ import { classifyIntent, boostEdgesByIntent } from "./intents.js";
 import { tracked } from "./analytics.js";
 import {
   writeMemoryFile, readMemoryFile, appendToIndex, updateIndexEntry, generateIndex,
-  assertValidMemoryId, ensureNamespacePath, resolveNamespacePath, listMemoryFiles, listNamespaceDirs, normalizeTags, withNamespaceLock,
+  assertValidMemoryId, ensureNamespacePath, resolveNamespacePath, listMemoryFiles, listNamespaceDirs, normalizeTags, normalizeNameForLookup, withNamespaceLock,
   tombstoneMemoryFile, recordForgetEdge,
 } from "./fs-memory.js";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
@@ -78,72 +78,80 @@ function buildPendingMemory(frontmatter: MemoryFrontmatter, text: string): Memor
   };
 }
 
-async function persistProcessedMemory(
+/**
+ * Write extraction results back to the file. Does NOT take the namespace lock —
+ * the caller (queue.processEntry) holds it across {mtime recheck, gp.store, file
+ * write} so the Decision #8 ordering invariant covers the entire commit window.
+ *
+ * Two callers:
+ *   - queue.processEntry passes this in as `onStored` and runs it under its lock.
+ *   - direct callers go through `persistProcessedMemory` which wraps this in a lock.
+ */
+async function persistProcessedMemoryUnlocked(
   originalFrontmatter: MemoryFrontmatter,
   memory: Memory,
 ): Promise<void> {
   const ns = originalFrontmatter.namespace;
 
-  await withNamespaceLock(ns, async () => {
-    // Re-read from disk to avoid overwriting user edits made during async extraction.
-    // The extraction window (30-120s) is long enough for the file to be modified or deleted.
-    const path = join(resolveNamespacePath(ns), `${memory.id}.md`);
-    let currentFrontmatter: MemoryFrontmatter;
-    let currentText: string;
-    try {
-      const current = readMemoryFile(path);
-      currentFrontmatter = current.frontmatter;
-      currentText = current.text;
-    } catch {
-      // File was deleted during extraction — nothing to persist
-      return;
-    }
+  // Re-read from disk to avoid overwriting user edits made during async extraction.
+  // The extraction window (30-120s) is long enough for the file to be modified or deleted.
+  const path = join(resolveNamespacePath(ns), `${memory.id}.md`);
+  let currentFrontmatter: MemoryFrontmatter;
+  let currentText: string;
+  try {
+    const current = readMemoryFile(path);
+    currentFrontmatter = current.frontmatter;
+    currentText = current.text;
+  } catch {
+    // File was deleted during extraction — nothing to persist
+    return;
+  }
 
-    // Use `??` (not `||`) for abstract/summary so extractor-returned empty
-    // strings are respected instead of silently falling back to stale values.
-    const nextAbstract = memory.abstract ?? currentFrontmatter.abstract;
-    const nextSummary = memory.summary ?? currentFrontmatter.summary;
+  // Use `??` (not `||`) for abstract/summary so extractor-returned empty
+  // strings are respected instead of silently falling back to stale values.
+  const nextAbstract = memory.abstract ?? currentFrontmatter.abstract;
+  const nextSummary = memory.summary ?? currentFrontmatter.summary;
 
-    // Spec Decision #8 ordering: stamp indexedAt to match the file's final
-    // mtime so `stale = mtime > indexedAt` is NOT true immediately after a
-    // successful write. Stamping Date.now() before writeMemoryFile leaves
-    // indexedAt behind the actual mtime by however long the write takes,
-    // which read-back would misinterpret as the user having edited the
-    // file post-index.
-    const stampedAt = new Date();
-    const nextFrontmatter: MemoryFrontmatter = {
-      ...currentFrontmatter,
-      // Preserve the current on-disk name so user edits made during async
-      // extraction are not clobbered by the queue-time snapshot.
-      name: currentFrontmatter.name,
-      indexedAt: stampedAt.toISOString(),
-      schemaVersion: memory.schemaVersion || currentFrontmatter.schemaVersion || "0.0.0",
-      ...(nextAbstract !== undefined ? { abstract: nextAbstract } : {}),
-      ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
-      ...(memory.category || currentFrontmatter.category
-        ? { category: memory.category || currentFrontmatter.category }
-        : {}),
-      ...(memory.versionedAt || currentFrontmatter.versionedAt
-        ? { versionedAt: memory.versionedAt || currentFrontmatter.versionedAt }
-        : {}),
-    };
+  // Spec Decision #8 ordering: stamp indexedAt to match the file's final
+  // mtime so `stale = mtime > indexedAt` is NOT true immediately after a
+  // successful write. Stamping Date.now() before writeMemoryFile leaves
+  // indexedAt behind the actual mtime by however long the write takes,
+  // which read-back would misinterpret as the user having edited the
+  // file post-index.
+  const stampedAt = new Date();
+  const nextFrontmatter: MemoryFrontmatter = {
+    ...currentFrontmatter,
+    // Preserve the current on-disk name so user edits made during async
+    // extraction are not clobbered by the queue-time snapshot.
+    name: currentFrontmatter.name,
+    indexedAt: stampedAt.toISOString(),
+    schemaVersion: memory.schemaVersion ?? currentFrontmatter.schemaVersion ?? "0.0.0",
+    ...(nextAbstract !== undefined ? { abstract: nextAbstract } : {}),
+    ...(nextSummary !== undefined ? { summary: nextSummary } : {}),
+    ...(memory.category ?? currentFrontmatter.category
+      ? { category: memory.category ?? currentFrontmatter.category }
+      : {}),
+    ...(memory.versionedAt ?? currentFrontmatter.versionedAt
+      ? { versionedAt: memory.versionedAt ?? currentFrontmatter.versionedAt }
+      : {}),
+  };
 
-    const writtenPath = writeMemoryFile(memory.id, currentText, nextFrontmatter);
-    // Align the file's mtime with the stamped indexedAt so the staleness
-    // invariant is self-consistent at write time. Any subsequent real user
-    // edit will bump mtime past indexedAt and correctly flag the file as
-    // stale for the next indexer sweep.
-    try {
-      utimesSync(writtenPath, stampedAt, stampedAt);
-    } catch (err) {
-      // Non-fatal: if we can't set the mtime (e.g., readonly mount in
-      // tests), the file is still written correctly. The next sweep may
-      // briefly see stale=true but will re-extract against the same body.
-      console.error(`[kb] Failed to align mtime for ${memory.id}:`, err);
-    }
-    updateIndexEntry(resolveNamespacePath(ns), nextFrontmatter);
-  });
+  const writtenPath = writeMemoryFile(memory.id, currentText, nextFrontmatter);
+  // Align the file's mtime with the stamped indexedAt so the staleness
+  // invariant is self-consistent at write time. Any subsequent real user
+  // edit will bump mtime past indexedAt and correctly flag the file as
+  // stale for the next indexer sweep.
+  try {
+    utimesSync(writtenPath, stampedAt, stampedAt);
+  } catch (err) {
+    // Non-fatal: if we can't set the mtime (e.g., readonly mount in
+    // tests), the file is still written correctly. The next sweep may
+    // briefly see stale=true but will re-extract against the same body.
+    console.error(`[kb] Failed to align mtime for ${memory.id}:`, err);
+  }
+  updateIndexEntry(resolveNamespacePath(ns), nextFrontmatter);
 }
+
 
 function getIndexingKey(id: string, namespace: string): string {
   return `${namespace}:${id}`;
@@ -214,7 +222,7 @@ async function addMemoryLocked(
 ): Promise<AddMemoryResult> {
   return withNamespaceLock(namespace, async () => {
     const files = listMemoryFiles(namespace);
-    const existing = files.find((f) => f.name.trim().toLowerCase() === resolvedName.toLowerCase());
+    const existing = files.find((f) => normalizeNameForLookup(f.name) === normalizeNameForLookup(resolvedName));
     if (existing) {
       return makeResult({ id: existing.id, name: existing.name, path: existing.path, status: "existing" });
     }
@@ -306,7 +314,7 @@ export async function queueMemoryForIndexing(id: string, namespace: string): Pro
     // The queue does not resolve until graph storage and filesystem finalization
     // both complete, which avoids a crash window between them.
     releaseKey = false;
-    q.add(memory, async (processedMemory) => persistProcessedMemory(frontmatter, processedMemory))
+    q.add(memory, async (processedMemory) => persistProcessedMemoryUnlocked(frontmatter, processedMemory))
       .catch((err) => console.error(`[kb] Indexing failed for ${id}:`, err))
       .finally(() => state.inFlightIndexing.delete(key));
 
@@ -452,12 +460,13 @@ export async function getByName(
       result = { edges: [] };
     }
 
-    // Filesystem fallback: if graph doesn't have this memory, check files
-    // Case-insensitive to match addMemory dedup behavior
+    // Filesystem fallback: if graph doesn't have this memory, check files.
+    // Use the canonical name normalizer so trailing whitespace doesn't make
+    // a file findable by `add` but invisible to `get`.
     if (!result.memory) {
       const files = listMemoryFiles(ns);
-      const nameLower = name.toLowerCase();
-      const match = files.find((f) => f.name.toLowerCase() === nameLower);
+      const nameLower = normalizeNameForLookup(name);
+      const match = files.find((f) => normalizeNameForLookup(f.name) === nameLower);
       if (match) {
         const { frontmatter, text } = readMemoryFile(match.path);
         result.memory = buildPendingMemory(frontmatter, text);
@@ -507,9 +516,12 @@ export async function forget(
 
 export async function forgetEdge(edgeId: string, reason: string, namespace = "default") {
   return tracked("forgetEdge", { namespace }, async () => {
-    // Spec Decision #11: append to _forget_edges.jsonl; reconciler applies
-    // the graph-side invalidation on its sweep. The namespace lock serializes
-    // with concurrent writers (add / forget) that may also touch the directory.
+    // Spec Decision #11: CLI path — append to _forget_edges.jsonl. The
+    // reconciler sweep (Phase 2) will apply the graph-side invalidation.
+    // Until Phase 2 lands the reconciler, the edge stays visible until the
+    // next manual db:reindex; callers should surface this expectation.
+    // Server-side callers that already hold a provider should use
+    // `forgetEdgeViaGraph` instead so the change applies immediately.
     await withNamespaceLock(namespace, async () => {
       recordForgetEdge(edgeId, reason, namespace);
     });
@@ -517,6 +529,34 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
   }, () => ({
     edgeId,
     reason,
+  }));
+}
+
+/**
+ * Server-side forgetEdge: applies the graph-side invalidation immediately
+ * (the server already holds an open provider) AND records the JSONL audit
+ * line so the Phase 2 reconciler stays the durable source of intent. Use
+ * this from MCP/HTTP handlers; the CLI uses `forgetEdge` (JSONL-only) per
+ * Decision #11.
+ */
+export async function forgetEdgeViaGraph(edgeId: string, reason: string, namespace = "default") {
+  return tracked("forgetEdgeViaGraph", { namespace }, async () => {
+    await withNamespaceLock(namespace, async () => {
+      recordForgetEdge(edgeId, reason, namespace);
+    });
+    let appliedToGraph = false;
+    try {
+      const gp = await getProvider();
+      await gp.forgetEdge(edgeId, reason, namespace);
+      appliedToGraph = true;
+    } catch (err) {
+      console.error(`[kb] forgetEdgeViaGraph: graph unavailable, JSONL recorded for reconciler replay: ${err instanceof Error ? err.message : err}`);
+    }
+    return { edgeId, reason, namespace, appliedToGraph };
+  }, (result) => ({
+    edgeId,
+    reason,
+    appliedToGraph: result.appliedToGraph,
   }));
 }
 

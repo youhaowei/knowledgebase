@@ -150,8 +150,9 @@ export async function migrate(
 ): Promise<void> {
   console.error(`[migrate] Starting migration${dryRun ? " (dry-run)" : ""}...`);
 
+  // `createGraphProvider()` returns an initialized provider; calling init()
+  // again ran schema setup twice and risked double-allocating connections.
   const gp = await deps.createGraphProvider();
-  await gp.init();
 
   const namespaces = await gp.listNamespaces();
   console.error(`[migrate] Found namespaces: ${namespaces.join(", ") || "(none)"}`);
@@ -188,7 +189,12 @@ export async function migrate(
   }
 
   console.error(`[migrate] Done. written=${counters.written}, skipped=${counters.skipped}, failed=${counters.failed}`);
-  if (counters.failed > 0) process.exit(1);
+  if (counters.failed > 0) {
+    // Throw rather than process.exit() — the CLI's outer try/catch translates
+    // this to exit(1) and keeps stdout-contract control at the boundary.
+    // Programmatic callers can catch and inspect counters before the runtime exits.
+    throw new Error(`migrate failed: ${counters.failed} memor${counters.failed === 1 ? "y" : "ies"} errored`);
+  }
 }
 
 // Script entry point

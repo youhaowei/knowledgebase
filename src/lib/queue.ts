@@ -12,14 +12,14 @@
 import { statSync } from "fs";
 import { join } from "path";
 import matter from "gray-matter";
-import { readFileSync, writeFileSync, renameSync } from "fs";
+import { readFileSync } from "fs";
 import { extract } from "./extractor.js";
 import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
 import { track } from "./analytics.js";
 import { summarySchema } from "./versions.js";
-import { resolveNamespacePath, withNamespaceLock, parseFrontmatter, type MemoryFrontmatter } from "./fs-memory.js";
+import { resolveNamespacePath, withNamespaceLock, parseFrontmatter, atomicWriteFile, type MemoryFrontmatter } from "./fs-memory.js";
 import {
   semver,
   isoFrom,
@@ -100,9 +100,7 @@ function writeRegeneratedFrontmatter(
     versionedAt: updates.versionedAt,
   };
   const content = matter.stringify(current.text, merged as Record<string, unknown>);
-  const tmp = `${filePath}.tmp`;
-  writeFileSync(tmp, content);
-  renameSync(tmp, filePath);
+  atomicWriteFile(filePath, content);
 }
 
 export class Queue {
@@ -220,19 +218,29 @@ export class Queue {
     }
     const embedMs = Math.round(performance.now() - embedStart);
 
-    if (isFileChangedSince(filePath, snapshotMtime)) {
-      console.error(`[kb] File changed during indexing ${memory.id} — abandoning pass, retry on next sweep`);
-      track("queue.abandoned", {
-        namespace: ns,
-        meta: { memoryId: memory.id, reason: "mtime-changed" },
-      });
-      return false;
-    }
-
-    const storeStart = performance.now();
-    await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
-    await onStored?.(memory);
-    const storeMs = Math.round(performance.now() - storeStart);
+    // Spec Decision #8: re-stat under the namespace lock and gate {gp.store,
+    // file write-back} on the snapshot. Without the lock, a user edit
+    // between the recheck and onStored stamps `indexedAt` on edited content
+    // while the graph holds extraction from the original body — silently
+    // stale graph that no `stale = mtime > indexedAt` reader can detect.
+    let aborted = false;
+    let storeMs = 0;
+    await withNamespaceLock(ns, async () => {
+      if (isFileChangedSince(filePath, snapshotMtime)) {
+        console.error(`[kb] File changed during indexing ${memory.id} — abandoning pass, retry on next sweep`);
+        track("queue.abandoned", {
+          namespace: ns,
+          meta: { memoryId: memory.id, reason: "mtime-changed" },
+        });
+        aborted = true;
+        return;
+      }
+      const storeStart = performance.now();
+      await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
+      await onStored?.(memory);
+      storeMs = Math.round(performance.now() - storeStart);
+    });
+    if (aborted) return false;
 
     const totalMs = Math.round(performance.now() - start);
     console.error(`[kb] ${memory.name} → ${entities.length}E ${edges.length}R (${extractMs}ms extract, ${embedMs}ms embed, ${storeMs}ms store = ${totalMs}ms)`);

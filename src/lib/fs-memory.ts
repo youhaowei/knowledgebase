@@ -145,10 +145,26 @@ export function assertValidMemoryId(id: string): void {
   }
 }
 
+/**
+ * Canonical name normalization used by add-dedup, get, forget. Trailing
+ * whitespace from a hand-edited frontmatter would otherwise let the same
+ * memory be findable by `add` (which trims) but unfindable by `forget`
+ * (which previously did not).
+ */
+export function normalizeNameForLookup(name: string): string {
+  return name.trim().toLowerCase();
+}
+
 function getNamespaceLockPath(namespace: string): string {
-  const lockRoot = join(getKbRoot(), ".locks");
-  mkdirSync(lockRoot, { recursive: true });
-  return join(lockRoot, `${encodeURIComponent(namespace)}.lock`);
+  // Pure resolver — callers that need the directory present (only writers
+  // do) call ensureLockRoot first. Read paths must not mutate the FS just
+  // by asking for a path; previously this mkdir'd unconditionally and
+  // would throw on a readonly mount.
+  return join(getKbRoot(), ".locks", `${encodeURIComponent(namespace)}.lock`);
+}
+
+function ensureLockRoot(): void {
+  mkdirSync(join(getKbRoot(), ".locks"), { recursive: true });
 }
 
 function getLockHeartbeatPath(lockPath: string): string {
@@ -190,6 +206,24 @@ function releaseLockIfOwned(lockPath: string, token: string): void {
   rmSync(lockPath, { recursive: true, force: true });
 }
 
+
+function handleReclaimConflict(lockPath: string): boolean {
+  // Another writer is reclaiming. If their marker is itself stale (a prior
+  // reclaimer crashed between creating .reclaiming and rmSync'ing the lock),
+  // wipe it so the next iteration can try again. Returning false makes the
+  // caller sleep + honor timeoutMs rather than spinning forever.
+  try {
+    const claimPath = join(lockPath, ".reclaiming");
+    const claimAge = Date.now() - statSync(claimPath).mtimeMs;
+    if (claimAge > lockTimings.staleLockAgeMs) {
+      rmSync(claimPath, { force: true });
+    }
+  } catch {
+    // Marker disappeared — next iteration will retry fresh.
+  }
+  return false;
+}
+
 function breakStaleLock(lockPath: string): boolean {
   let heartbeatPath: string;
   let statMs: number;
@@ -221,11 +255,35 @@ function breakStaleLock(lockPath: string): boolean {
     return true;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    // Another writer beat us to the reclaim (EEXIST) or the lock vanished
-    // (ENOENT) — in both cases our subsequent mkdir attempt will detect
-    // and handle the state correctly.
-    if (code === "EEXIST" || code === "ENOENT") return true;
+    if (code === "ENOENT") {
+      // Lock vanished mid-reclaim — caller's next mkdir will succeed.
+      return true;
+    }
+    if (code === "EEXIST") {
+      return handleReclaimConflict(lockPath);
+    }
     throw err;
+  }
+}
+
+
+async function acquireLock(lockPath: string, token: string, startedAt: number): Promise<void> {
+  while (true) {
+    try {
+      mkdirSync(lockPath);
+      writeFileSync(getLockTokenPath(lockPath), token);
+      touchLockHeartbeat(lockPath);
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") {
+        throw error;
+      }
+      if (breakStaleLock(lockPath)) continue;
+      if (Date.now() - startedAt >= lockTimings.timeoutMs) {
+        throw new Error(`Timed out waiting for namespace lock: "${lockPath}"`);
+      }
+      await Bun.sleep(lockTimings.retryMs);
+    }
   }
 }
 
@@ -233,28 +291,11 @@ export async function withNamespaceLock<T>(
   namespace: string,
   fn: () => Promise<T>,
 ): Promise<T> {
+  ensureLockRoot();
   const lockPath = getNamespaceLockPath(namespace);
   const startedAt = Date.now();
   const token = randomUUID();
-
-  while (true) {
-    try {
-      mkdirSync(lockPath);
-      writeFileSync(getLockTokenPath(lockPath), token);
-      touchLockHeartbeat(lockPath);
-      break;
-    } catch (error) {
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") {
-        throw error;
-      }
-      // Check for stale lock from a crashed process
-      if (breakStaleLock(lockPath)) continue;
-      if (Date.now() - startedAt >= lockTimings.timeoutMs) {
-        throw new Error(`Timed out waiting for namespace lock: "${namespace}"`);
-      }
-      await Bun.sleep(lockTimings.retryMs);
-    }
-  }
+  await acquireLock(lockPath, token, startedAt);
 
   const heartbeatIntervalMs = Math.max(1, Math.min(lockTimings.retryMs, Math.floor(lockTimings.staleLockAgeMs / 2)));
   const heartbeat = setInterval(() => {
@@ -348,7 +389,7 @@ export function parseFrontmatter(content: string): { frontmatter: MemoryFrontmat
  * `writeFileSync` would clobber the first's tmp before either rename, and
  * the surviving rename could ship corrupted bytes.
  */
-function atomicWriteFile(filePath: string, content: string): void {
+export function atomicWriteFile(filePath: string, content: string): void {
   const tmpPath = `${filePath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   try {
     writeFileSync(tmpPath, content);
@@ -425,8 +466,11 @@ export function tombstoneMemoryFile(
   reason: string,
 ): { id: string; path: string; tombstonePath: string } | null {
   const entries = listMemoryFiles(namespace);
-  const nameLower = name.toLowerCase();
-  const match = entries.find((e) => e.name.toLowerCase() === nameLower);
+  // Normalize identically to addMemoryLocked's dedup (`name.trim().toLowerCase()`).
+  // Without `.trim()`, a file written with trailing whitespace blocks `add("Foo")`
+  // as existing but `forget("Foo")` misses it — the file becomes unforget-able.
+  const nameLower = normalizeNameForLookup(name);
+  const match = entries.find((e) => normalizeNameForLookup(e.name) === nameLower);
   if (!match) return null;
 
   const tombstonePath = `${match.path}.deleted`;
@@ -508,6 +552,18 @@ function escapeCell(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 }
 
+// Tags are joined by `, ` inside the tags cell; a literal comma in a
+// hand-edited tag (Decision #12 allows manual frontmatter edits) would
+// be split as two tags. Percent-encode commas at the cell boundary so
+// the round-trip preserves them. Slow path (matter.read) is unaffected.
+function encodeTagForIndex(tag: string): string {
+  return tag.replace(/,/g, "%2C");
+}
+
+function decodeTagFromIndex(tag: string): string {
+  return tag.replace(/%2C/g, ",");
+}
+
 /**
  * Splits a markdown table row on unescaped `|`. Writers use `escapeCell`
  * to produce `\\` and `\|` escapes; this scanner consumes one escape per
@@ -572,7 +628,9 @@ function parseIndexEntries(namespacePath: string): MemoryFileEntry[] | null {
         name: name ?? "",
         path: join(namespacePath, `${id}.md`),
         indexed: indexed === "✓",
-        tags: tags ? tags.split(",").map((tag) => tag.trim()).filter(Boolean) : [],
+        tags: tags
+          ? tags.split(",").map((tag) => decodeTagFromIndex(tag.trim())).filter(Boolean)
+          : [],
       });
     }
     return entries;
@@ -744,7 +802,7 @@ export function generateIndex(namespacePath: string): void {
   ];
 
   for (const e of entries) {
-    const tags = escapeCell(e.tags.join(", "));
+    const tags = escapeCell(e.tags.map(encodeTagForIndex).join(", "));
     const escapedName = escapeCell(e.name);
     const indexed = e.indexedAt ? "✓" : "✗";
     lines.push(`| ${e.id} | ${escapedName} | ${tags} | ${indexed} |`);
@@ -814,7 +872,7 @@ export function updateIndexEntry(namespacePath: string, entry: MemoryFrontmatter
   }
 
   const escapedName = escapeCell(entry.name);
-  const tags = escapeCell(entry.tags.join(", "));
+  const tags = escapeCell(entry.tags.map(encodeTagForIndex).join(", "));
   const indexed = entry.indexedAt ? "✓" : "✗";
   const newRow = `| ${entry.id} | ${escapedName} | ${tags} | ${indexed} |`;
 
@@ -844,7 +902,7 @@ export function appendToIndex(namespacePath: string, entry: MemoryFrontmatter): 
   const indexPath = join(namespacePath, "_index.md");
   const namespace = basename(namespacePath);
   const escapedName = escapeCell(entry.name);
-  const tags = escapeCell(entry.tags.join(", "));
+  const tags = escapeCell(entry.tags.map(encodeTagForIndex).join(", "));
   const indexed = entry.indexedAt ? "✓" : "✗";
   const row = `| ${entry.id} | ${escapedName} | ${tags} | ${indexed} |`;
 

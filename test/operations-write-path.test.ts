@@ -181,6 +181,79 @@ describe("operations write-path invariants", () => {
     expect(await ops.queueMemoryForIndexing(id, "default")).toBe(true);
   });
 
+  test("Decision #12: non-null user-set abstract survives extractor returning null (??-discipline)", async () => {
+    createTempEnvironment();
+
+    // Extractor returns null/undefined for derived fields — simulates a
+    // model that couldn't generate a summary, or a re-extract pass on a
+    // memory that already has user-curated metadata.
+    const deferredQueue = createDeferredQueueMutation((memory) => {
+      memory.abstract = null as unknown as string;
+      memory.summary = null as unknown as string;
+      memory.category = "general";
+    });
+    queueState.onAdd = deferredQueue.onAdd;
+
+    const ops = await loadOperations();
+    const id = randomUUID();
+    const frontmatter = makeFrontmatter({
+      id,
+      name: "Pre-Filled",
+      namespace: "default",
+      abstract: "User wrote this abstract by hand",
+      summary: "User-written summary",
+    });
+    const path = writeMemoryFile(id, "Body text", frontmatter);
+
+    expect(await ops.queueMemoryForIndexing(id, "default")).toBe(true);
+    deferredQueue.release();
+    await waitFor(() => Boolean(readMemoryFile(path).frontmatter.indexedAt));
+
+    const updated = readMemoryFile(path).frontmatter;
+    // ?? semantics: null from extractor falls back to the on-disk value
+    // (Decision #12: derived fields filled only when null/missing).
+    expect(updated.abstract).toBe("User wrote this abstract by hand");
+    expect(updated.summary).toBe("User-written summary");
+  });
+
+  test("Decision #12: tags edited by user during indexing are preserved on commit (additive merge)", async () => {
+    createTempEnvironment();
+
+    const deferredQueue = createDeferredQueueMutation((memory) => {
+      memory.abstract = "Done";
+      memory.summary = "Done";
+      memory.category = "general";
+    });
+    queueState.onAdd = deferredQueue.onAdd;
+
+    const ops = await loadOperations();
+    const id = randomUUID();
+    const frontmatter = makeFrontmatter({
+      id,
+      name: "Tagged",
+      namespace: "default",
+      tags: ["original"],
+    });
+    const path = writeMemoryFile(id, "Body text", frontmatter);
+
+    expect(await ops.queueMemoryForIndexing(id, "default")).toBe(true);
+
+    // User edits the file mid-indexing to add a new tag.
+    writeMemoryFile(id, "Body text", {
+      ...frontmatter,
+      tags: ["original", "user-added"],
+    });
+
+    deferredQueue.release();
+    await waitFor(() => Boolean(readMemoryFile(path).frontmatter.indexedAt));
+
+    const updated = readMemoryFile(path).frontmatter;
+    // The on-disk tag set wins because persistProcessedMemoryUnlocked
+    // re-reads under the lock and spreads currentFrontmatter (which
+    // includes user-added tags) into the merged frontmatter.
+    expect(updated.tags).toEqual(["original", "user-added"]);
+  });
+
   test("Goal #3: persistProcessedMemory preserves user-edited name during async indexing (file is canonical)", async () => {
     createTempEnvironment();
 

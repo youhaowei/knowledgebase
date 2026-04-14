@@ -792,7 +792,7 @@ describe("withNamespaceLock", () => {
     const lockPath = join(tempDir, ".locks", `${encodeURIComponent(ns)}.lock`);
     mkdirSync(lockPath, { recursive: true });
 
-    await expect(withNamespaceLock(ns, async () => {})).rejects.toThrow(`Timed out waiting for namespace lock: "${ns}"`);
+    await expect(withNamespaceLock(ns, async () => {})).rejects.toThrow(`Timed out waiting for namespace lock: "${lockPath}"`)
 
     rmSync(lockPath, { recursive: true, force: true });
   });
