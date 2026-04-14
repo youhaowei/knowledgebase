@@ -625,7 +625,13 @@ describe("resolveNamespacePath", () => {
 // ---------------------------------------------------------------------------
 
 describe("listMemoryFiles — Decision #1: files win on _index.md drift", () => {
-  test("ghost entry (index row without file) is filtered; index self-heals", () => {
+  test("ghost entry (index row without file) is filtered from results", () => {
+    // Review pass 7 finding #6: listMemoryFiles used to regenerate _index.md
+    // inline on drift, gated by a check-then-act `existsSync(lockPath)` — a
+    // racing writer could land its own regen between the check and ours,
+    // producing an index that omitted the writer's in-flight entry. The fix
+    // removes the inline regen; readers still get correct results (this test)
+    // but the index stays stale until the next writer regenerates it.
     const ns = `ghost-${randomUUID().slice(0, 8)}`;
     const nsPath = ensureNamespacePath(ns);
     const idKeep = randomUUID();
@@ -638,22 +644,18 @@ describe("listMemoryFiles — Decision #1: files win on _index.md drift", () => 
     // Simulate external deletion — file vanishes but _index.md still references it
     rmSync(join(nsPath, `${idGone}.md`));
 
-    const entries = listMemoryFiles(ns);
-    expect(entries.length).toBe(1);
-    expect(entries[0]!.id).toBe(idKeep);
-
-    // Self-heal: second call should see a regenerated, clean index
-    const secondCall = listMemoryFiles(ns);
-    expect(secondCall.length).toBe(1);
-    expect(secondCall[0]!.id).toBe(idKeep);
-
-    // _index.md should no longer mention the gone id
-    const indexContent = readFileSync(join(nsPath, "_index.md"), "utf-8");
-    expect(indexContent).not.toContain(idGone);
-    expect(indexContent).toContain(idKeep);
+    // Results are correct on every call (that's the load-bearing contract),
+    // but the index now carries a ghost until a writer regenerates it.
+    for (let i = 0; i < 3; i++) {
+      const entries = listMemoryFiles(ns);
+      expect(entries.length).toBe(1);
+      expect(entries[0]!.id).toBe(idKeep);
+    }
+    const staleIndex = readFileSync(join(nsPath, "_index.md"), "utf-8");
+    expect(staleIndex).toContain(idGone); // ghost persists
   });
 
-  test("orphan file (on disk, not in index — e.g. crash mid-write) is surfaced", () => {
+  test("orphan file (crash mid-write) is surfaced in results even though index doesn't know", () => {
     const ns = `orphan-${randomUUID().slice(0, 8)}`;
     const nsPath = ensureNamespacePath(ns);
     const idIndexed = randomUUID();
@@ -670,10 +672,19 @@ describe("listMemoryFiles — Decision #1: files win on _index.md drift", () => 
     expect(entries.length).toBe(2);
     expect(entries.map((e) => e.id).sort()).toEqual([idIndexed, idOrphan].sort());
 
-    // Self-heal: next call sees a regenerated index with both
-    const indexContent = readFileSync(join(nsPath, "_index.md"), "utf-8");
-    expect(indexContent).toContain(idIndexed);
-    expect(indexContent).toContain(idOrphan);
+    // Index stays stale (missing the orphan) until a subsequent writer
+    // regenerates it. Per review pass 7 #6: readers don't regenerate inline.
+    const staleIndex = readFileSync(join(nsPath, "_index.md"), "utf-8");
+    expect(staleIndex).toContain(idIndexed);
+    expect(staleIndex).not.toContain(idOrphan);
+
+    // A writer trigger (e.g. generateIndex directly, or an add/tombstone flow)
+    // brings the index back in sync. Simulating the writer path by calling
+    // generateIndex explicitly under what would be the namespace lock.
+    generateIndex(nsPath);
+    const healedIndex = readFileSync(join(nsPath, "_index.md"), "utf-8");
+    expect(healedIndex).toContain(idIndexed);
+    expect(healedIndex).toContain(idOrphan);
   });
 
   test("Decision #1: file edited in place (name/tags) invalidates _index.md cache via mtime", async () => {

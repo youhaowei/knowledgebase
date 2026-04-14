@@ -297,12 +297,37 @@ export async function withNamespaceLock<T>(
   const token = randomUUID();
   await acquireLock(lockPath, token, startedAt);
 
-  const heartbeatIntervalMs = Math.max(1, Math.min(lockTimings.retryMs, Math.floor(lockTimings.staleLockAgeMs / 2)));
+  // Heartbeat cadence derives from `staleLockAgeMs`, not the waiter poll.
+  // Review pass 7 finding #16: the previous `Math.min(retryMs=25, …)` fired
+  // ~40 utimesSync syscalls per second while the lock was held (a 1s
+  // extraction = ~40 syscalls, a 10s indexing pass = ~400). The heartbeat
+  // only needs to stay well ahead of the stale threshold; divide-by-4 gives
+  // ~7.5s cadence under the 30s default with a sane floor for aggressive
+  // test overrides.
+  const heartbeatIntervalMs = Math.max(500, Math.floor(lockTimings.staleLockAgeMs / 4));
   const heartbeat = setInterval(() => {
     try {
+      // Verify token ownership before refreshing. Review pass 7 finding #11:
+      // if the event loop stalled longer than `staleLockAgeMs` (long sync
+      // work, laptop sleep, GC pause, noisy neighbour on the disk), a second
+      // writer's breakStaleLock would reclaim the namespace. Once the first
+      // holder's event loop catches up, silently firing `touchLockHeartbeat`
+      // here would refresh the REPLACEMENT holder's heartbeat — extending
+      // the reclaimer's window artificially AND, worse, masking later stale
+      // detection against it. Stop heartbeating the moment the token on disk
+      // no longer matches ours.
+      const onDisk = readFileSync(getLockTokenPath(lockPath), "utf8");
+      if (onDisk !== token) {
+        clearInterval(heartbeat);
+        return;
+      }
       touchLockHeartbeat(lockPath);
     } catch {
-      // Lock is gone or being cleaned up; the holder will exit naturally.
+      // Lock / token vanished between our read and touch — either we lost
+      // ownership (releaseLockIfOwned ran concurrently, extremely unlikely
+      // since it only runs in our finally) or the reclaimer's rmSync landed
+      // mid-cycle. Either way the holder will exit naturally on fn return
+      // and releaseLockIfOwned's token check prevents double-release.
     }
   }, heartbeatIntervalMs);
 
@@ -440,8 +465,12 @@ export function readMemoryFile(
  */
 export function deleteMemoryFile(name: string, namespace: string): { id: string; path: string } | null {
   const entries = listMemoryFiles(namespace);
-  const nameLower = name.toLowerCase();
-  const match = entries.find((e) => e.name.toLowerCase() === nameLower);
+  // Use the canonical normalizer so lookup semantics match addMemoryLocked,
+  // tombstoneMemoryFile, and getByName. Without the trim, a file whose stored
+  // name has leading/trailing whitespace (possible via direct file edit) was
+  // findable via tombstone but not via delete — review pass 7 finding #8.
+  const needle = normalizeNameForLookup(name);
+  const match = entries.find((e) => normalizeNameForLookup(e.name) === needle);
   if (!match) return null;
   try {
     unlinkSync(match.path);
@@ -740,20 +769,23 @@ export function listMemoryFiles(namespace: string): MemoryFileEntry[] {
     }
   }
 
-  // Self-heal: reconcile _index.md with disk so the next call takes the fast path.
-  // listMemoryFiles is synchronous and lock-free by design, so we can't reach
-  // through `withNamespaceLock` here. Instead, yield to any in-progress writer:
-  // if the namespace lock directory exists, that writer will regenerate the
-  // index when it commits, and our self-heal would race its snapshot.
-  // When no writer is active, we do the regeneration directly — still best-effort.
-  if (!existsSync(getNamespaceLockPath(namespace))) {
-    try {
-      generateIndex(nsPath);
-    } catch (err) {
-      console.error(`[fs-memory] Failed to regenerate _index.md after drift:`, err);
-    }
-  }
-
+  // Index regeneration intentionally deferred to the next writer.
+  //
+  // Review pass 7 finding #6: the previous `if (!existsSync(lockPath))`
+  // guard was a check-then-act race — a writer could acquire the lock
+  // between the check and generateIndex, producing an _index.md that
+  // omitted the writer's in-flight entry (which would then get an
+  // out-of-date stat when the writer's own updateIndexEntry landed on
+  // top of our regen).
+  //
+  // Trade-off: a namespace with no writes keeps paying the directory-walk
+  // slow path after a drift event until some write triggers regeneration
+  // (addMemoryLocked, tombstoneMemoryFile, updateIndexEntry all hold the
+  // namespace lock and regenerate cleanly). Readers still see correct
+  // results — just slower until the next write. Spec Decision #1: files
+  // win on disagreement, and the writer path owns index maintenance.
+  // For namespaces that rarely write, `kb reindex <namespace>` (or
+  // `db:reindex`) forces regen on demand.
   return entries;
 }
 
