@@ -982,6 +982,37 @@ export class LadybugProvider implements GraphProvider {
       }
     }
 
+    // Round 8 Theme C: mirror the Fact cleanup on the canonical RELATES_TO
+    // edges. Fact is the FTS mirror; RELATES_TO is what `findEdges` /
+    // graph-viz queries actually traverse. Without this block, deleting a
+    // memory left the Fact mirror consistent but RELATES_TO.episodes still
+    // listed the deleted memory — edges with only this memory as support
+    // kept rendering as active. Neo4j's `forgetMemoryById` already does this;
+    // Ladybug was diverging.
+    const edgeResult = await this.executeQuery(
+      `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
+       WHERE $memoryId IN r.episodes AND r.invalidAt = ''
+       RETURN r.id as id, r.episodes as episodes`,
+      { memoryId: id },
+    );
+    const edgeRows = await edgeResult.getAll();
+    for (const row of edgeRows) {
+      const episodes = ((row.episodes as string[]) ?? []).filter((episodeId) => episodeId !== id);
+      if (episodes.length > 0) {
+        await this.executeQuery(
+          `MATCH (:Entity)-[r:RELATES_TO {id: $edgeId}]->(:Entity)
+           SET r.episodes = $episodes`,
+          { edgeId: row.id, episodes },
+        );
+      } else {
+        await this.executeQuery(
+          `MATCH (:Entity)-[r:RELATES_TO {id: $edgeId}]->(:Entity)
+           SET r.invalidAt = $now`,
+          { edgeId: row.id, now },
+        );
+      }
+    }
+
     return true;
   }
 
