@@ -58,6 +58,36 @@ describe("CLI arg parsing and help", () => {
     expect(stdout).toContain("stats");
   });
 
+  // Spec US-1 + round-8 Theme J coverage: `--help` / `-h` / `--version` / `-v`
+  // must short-circuit BEFORE the dynamic imports that pull operations.ts,
+  // analytics.ts, hybrid-search.ts (which transitively pull the extractor,
+  // embedder, ladybug types). If a later import creep breaks the guard, the
+  // `<100ms` CLI goal silently regresses. These tests lock in the contract.
+  test("--help exits 0 without initializing KB data path", async () => {
+    const { stdout, exitCode } = await run("--help");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Knowledgebase CLI");
+  });
+
+  test("-h is an alias for --help", async () => {
+    const { stdout, exitCode } = await run("-h");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Knowledgebase CLI");
+  });
+
+  test("--version prints the package version and exits 0", async () => {
+    const { stdout, exitCode } = await run("--version");
+    expect(exitCode).toBe(0);
+    // Version from package.json — semver-shaped (0.0.0, 1.2.3-beta.4, etc.)
+    expect(stdout).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  test("-v is an alias for --version", async () => {
+    const { stdout, exitCode } = await run("-v");
+    expect(exitCode).toBe(0);
+    expect(stdout).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
   test("errors on unknown command", async () => {
     const { stderr, exitCode } = await run("unknown-cmd");
     expect(exitCode).not.toBe(0);

@@ -157,19 +157,21 @@ describe("withGraphFallback / withGraphRequired (review finding #3)", () => {
       expect(called).toBe(0);
     });
 
-    test("fn exceptions after successful provider init are not caught as degraded", async () => {
+    test("fn exceptions fall back via broad catch (chosen safety-net contract)", async () => {
       useHealthyProvider();
-      // Provider is healthy; the fn itself throws. `withGraphFallback` wraps
-      // provider errors, not business logic errors — a bug inside the fn
-      // should surface as a thrown error, not silently fall back.
+      // Chosen behaviour: broad catch. `withGraphFallback` catches BOTH
+      // provider-init errors AND `fn(gp)` exceptions, treating any throw as
+      // "degrade to the fallback." The alternative (narrow catch, only
+      // provider-init failures degrade) was considered and rejected — the
+      // safety-net framing is more important than surfacing handler bugs
+      // through the UI.
       //
-      // (`withGraphFallback` currently catches all throws from `fn` too;
-      // this test locks in whichever behaviour is chosen. If we want the
-      // narrower contract, add a check inside the helper.)
-      //
-      // Chosen behaviour: broad catch (simpler, matches the "degraded mode
-      // is a safety net" framing). Document it here so the next refactor
-      // doesn't silently narrow it.
+      // This test locks in that contract. Round 8 review flagged this as a
+      // bug; the flag was wrong — see the principal review's disagreement
+      // with Spec Principle #3 ("Degraded, not broken — every operation has
+      // a defined behavior when the graph is unavailable"). If a future
+      // round wants to narrow the catch, it must explicitly override the
+      // decision documented here.
       const result = await ops.withGraphFallback(
         "probe-fn-throw",
         async () => { throw new Error("bug in handler body"); },
