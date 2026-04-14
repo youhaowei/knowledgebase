@@ -285,7 +285,7 @@ const defaultReextractDependencies: ReextractDependencies = {
 
 export async function startReextractAll(
   deps: ReextractDependencies = defaultReextractDependencies,
-): Promise<{ started: boolean; reason?: string; total?: number }> {
+): Promise<{ started: boolean; reason?: string }> {
   if (reextractState.running) return { started: false, reason: "already running" };
 
   reextractState.running = true;
@@ -299,7 +299,18 @@ export async function startReextractAll(
   reextractState.edgeCurrent = 0;
   reextractState.edgeTotal = 0;
 
-  // Start async — don't await, return immediately
+  // Start async — don't await, return immediately.
+  //
+  // Round 8 Theme E: the previous return shape `{ started, total }` was a trap
+  // — `total` was always `0` because the count is resolved inside the IIFE
+  // below, after the sync return. Callers that read `total` got a misleading
+  // zero; the UI rendered "0/0" until the next status poll populated the real
+  // count. Drop the field entirely — consumers must poll `getReextractStatus`
+  // for progress, which is the only path that carries accurate state.
+  //
+  // The sync mutex claim (reextractState.running = true above) must stay
+  // above any `await` so concurrent starts are rejected — see the "marks the
+  // run as active before the async job yields" test.
   void (async () => {
     try {
       const [{ extract }, { embedDual }, gp] = await Promise.all([
@@ -370,7 +381,7 @@ export async function startReextractAll(
     }
   })();
 
-  return { started: true, total: reextractState.total };
+  return { started: true };
 }
 
 /** Find duplicate entity groups using fuzzy name matching (graph-only). */
@@ -589,59 +600,144 @@ function sortMemories(items: Memory[], sortBy: ListMemoriesInput["sortBy"], sort
   });
 }
 
+type ReadMemoryResult = ReturnType<typeof readMemoryFile>;
+
+function memoryFromRead(read: ReadMemoryResult): Memory {
+  const { frontmatter, text } = read;
+  return {
+    id: frontmatter.id,
+    name: frontmatter.name,
+    text,
+    abstract: frontmatter.abstract ?? "",
+    summary: frontmatter.summary ?? "",
+    category: frontmatter.category,
+    namespace: frontmatter.namespace,
+    status: frontmatter.indexedAt ? "completed" : "pending",
+    schemaVersion: frontmatter.schemaVersion ?? "0.0.0",
+    versionedAt: frontmatter.versionedAt,
+    createdAt: new Date(frontmatter.createdAt),
+  };
+}
+
 function readDegradedMemory(path: string, category?: ListMemoriesInput["category"]): Memory | null {
   try {
-    const { frontmatter, text } = readMemoryFile(path);
-    if (category && frontmatter.category !== category) return null;
-    return {
-      id: frontmatter.id,
-      name: frontmatter.name,
-      text,
-      abstract: frontmatter.abstract ?? "",
-      summary: frontmatter.summary ?? "",
-      category: frontmatter.category,
-      namespace: frontmatter.namespace,
-      status: frontmatter.indexedAt ? "completed" : "pending",
-      schemaVersion: frontmatter.schemaVersion ?? "0.0.0",
-      versionedAt: frontmatter.versionedAt,
-      createdAt: new Date(frontmatter.createdAt),
-    };
+    const read = readMemoryFile(path);
+    if (category && read.frontmatter.category !== category) return null;
+    return memoryFromRead(read);
   } catch (err) {
     console.error(`[kb] listMemories degraded: failed to read ${path}`, err);
     return null;
   }
 }
 
-function readDegradedNamespaceMemories(namespace: string, category?: ListMemoriesInput["category"]): { items: Memory[]; indexed: number } {
+/**
+ * Single-namespace degraded list.
+ *
+ * Round 8 Theme F: d770e65 regressed this to O(total memories) body reads +
+ * full `Memory` object construction per page request. Restore the
+ * pre-regression pattern where the paged slice is the only set of bodies
+ * we materialize — where we can.
+ *
+ * Sort dispatch:
+ * - `sortBy: "name"` — `listMemoryFiles` metadata carries name, and the
+ *   `_index.md` fast path makes this free. Sort metadata, paginate, then
+ *   read bodies only for the page slice.
+ * - `sortBy: "createdAt"` — `_index.md` does NOT carry createdAt, and the
+ *   slow path (index missing / stale) returns files in `readdirSync`
+ *   (filename ≈ UUID) order. We cannot trust `listMemoryFiles` ordering
+ *   for createdAt. Codex round-8 review finding: using it here produces
+ *   incorrect results when the index is stale or missing. So: always read
+ *   every file (O(N) disk), sort by the frontmatter createdAt, and hand
+ *   the already-read result for the paged slice to `memoryFromRead` so we
+ *   only allocate the `Memory` wrapper for the page — avoiding the N×
+ *   `Memory` allocation that d770e65 added.
+ *
+ * Category filter: always needs frontmatter. Falls into the same "read all,
+ * filter, sort, paginate" shape but reuses the read for the page slice.
+ */
+function listDegradedNamespace(namespace: string, input: ListMemoriesInput): { items: Memory[]; indexed: number; total: number } {
+  let files;
   try {
-    const files = listMemoryFiles(namespace);
-    const items = files
-      .map((entry) => readDegradedMemory(entry.path, category))
-      .filter((item): item is Memory => item !== null);
-    return {
-      items,
-      indexed: files.filter((file) => file.indexed).length,
-    };
+    files = listMemoryFiles(namespace);
   } catch {
-    return { items: [], indexed: 0 };
+    return { items: [], indexed: 0, total: 0 };
   }
+  const indexed = files.filter((f) => f.indexed).length;
+
+  if (input.sortBy === "name" && !input.category) {
+    // Fast path: metadata-only sort + paginate, bodies only for slice.
+    const ordered = [...files].sort((a, b) =>
+      input.sortDir === "asc" ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name),
+    );
+    const paged = ordered.slice(input.offset, input.offset + input.limit);
+    const items: Memory[] = [];
+    for (const entry of paged) {
+      const m = readDegradedMemory(entry.path);
+      if (m) items.push(m);
+    }
+    return { items, indexed, total: files.length };
+  }
+
+  // createdAt sort, or category filter: scan frontmatter for all files,
+  // sort by frontmatter.createdAt (trustworthy regardless of index state),
+  // then only construct `Memory` objects for the paged slice.
+  const reads: ReadMemoryResult[] = [];
+  for (const f of files) {
+    try {
+      const read = readMemoryFile(f.path);
+      if (input.category && read.frontmatter.category !== input.category) continue;
+      reads.push(read);
+    } catch (err) {
+      console.error(`[kb] listMemories degraded: failed to read ${f.path}`, err);
+    }
+  }
+
+  reads.sort((a, b) => {
+    const cmp = input.sortBy === "name"
+      ? a.frontmatter.name.localeCompare(b.frontmatter.name)
+      : a.frontmatter.createdAt.localeCompare(b.frontmatter.createdAt);
+    return input.sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const paged = reads.slice(input.offset, input.offset + input.limit);
+  const items = paged.map(memoryFromRead);
+  return { items, indexed, total: reads.length };
 }
 
 export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemoriesResponse {
   const namespaces = data.namespace ? [data.namespace] : listNamespaceDirs();
-  const allItems: Memory[] = [];
-  let indexed = 0;
 
-  for (const ns of namespaces) {
-    const namespaceResult = readDegradedNamespaceMemories(ns, data.category);
-    indexed += namespaceResult.indexed;
-    allItems.push(...namespaceResult.items);
+  // Hot path: single namespace. Paginate on metadata, only read paged bodies.
+  if (namespaces.length === 1) {
+    const r = listDegradedNamespace(namespaces[0]!, data);
+    return { ...r, degraded: true };
   }
 
+  // Cross-namespace admin view. Can't cheaply merge per-namespace pages, so
+  // accept the O(total) cost here — this path is rare (dashboard all-ns view)
+  // and there's no equivalent index across namespaces.
+  const allItems: Memory[] = [];
+  let indexed = 0;
+  for (const ns of namespaces) {
+    let files;
+    try {
+      files = listMemoryFiles(ns);
+    } catch {
+      continue;
+    }
+    indexed += files.filter((f) => f.indexed).length;
+    for (const entry of files) {
+      const m = readDegradedMemory(entry.path, data.category);
+      if (m) allItems.push(m);
+    }
+  }
   const sorted = sortMemories(allItems, data.sortBy, data.sortDir);
-  const total = sorted.length;
-  const items = sorted.slice(data.offset, data.offset + data.limit);
-  return { items, indexed, total, degraded: true };
+  return {
+    items: sorted.slice(data.offset, data.offset + data.limit),
+    indexed,
+    total: sorted.length,
+    degraded: true,
+  };
 }
 
 export const listMemories = createServerFn()

@@ -69,7 +69,7 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
   const handleReextract = useCallback(async () => {
     const result = await reextractAll();
     if (result.started) {
-      setReextractStatus({ running: true, current: 0, total: result.total ?? 0, currentName: "", phase: "starting", success: 0, failed: 0 });
+      setReextractStatus({ running: true, current: 0, total: 0, currentName: "", phase: "starting", success: 0, failed: 0 });
     }
   }, []);
 
