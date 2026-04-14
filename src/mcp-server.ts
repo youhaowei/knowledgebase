@@ -204,9 +204,16 @@ export function createKnowledgebaseMcpServer() {
             ],
           };
         }
+        // Decision #11 tombstones the file rather than unlinking. Surface the
+        // .deleted path so users (or agents proxying for users) can recover
+        // from a misclick by renaming back. Graph cleanup waits on the
+        // Phase 2 reconciler sweep.
+        const recovery = result.tombstonePath
+          ? ` (recover: mv "${result.tombstonePath}" "${result.tombstonePath.replace(/\.deleted$/, "")}")`
+          : "";
         return {
           content: [
-            { type: "text" as const, text: `Removed "${name}"` },
+            { type: "text" as const, text: `Tombstoned "${name}"${recovery}` },
           ],
         };
       } catch (err) {
@@ -230,9 +237,10 @@ export function createKnowledgebaseMcpServer() {
     },
     withMcpSource(async ({ edgeId, reason, namespace }) => {
       try {
-        // Spec Decision #11: forgetEdge records intent to _forget_edges.jsonl.
-        // Graph invalidation happens on the next server reconciler sweep (Phase 2).
-        await ops.forgetEdge(edgeId, reason, namespace);
+        // MCP runs in the server process which holds a live provider. Apply
+        // the graph invalidation now; JSONL is recorded as a safety net for
+        // the Phase 2 reconciler to replay on degraded mode.
+        const result = await ops.forgetEdgeViaGraph(edgeId, reason, namespace);
         return {
           content: [
             {
@@ -240,9 +248,12 @@ export function createKnowledgebaseMcpServer() {
               text: JSON.stringify(
                 {
                   success: true,
-                  message: `Queued edge "${edgeId}" for invalidation in namespace "${namespace}". Graph cleanup happens on the next reconciler sweep.`,
+                  message: result.appliedToGraph
+                    ? `Invalidated edge "${edgeId}" in namespace "${namespace}".`
+                    : `Recorded intent for edge "${edgeId}" — graph unavailable, will apply on next reconciler sweep.`,
                   edgeId,
                   namespace,
+                  appliedToGraph: result.appliedToGraph,
                 },
                 null,
                 2,

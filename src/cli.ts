@@ -214,9 +214,11 @@ function formatForgetMessage(name: string, result: Awaited<ReturnType<typeof ops
   if (!result.deleted) return `Not found: ${result.reason}`;
   // Show the recovery path on success — `forget` renames to .md.deleted
   // (Spec Decision #11) so accidental deletes are recoverable with `mv`.
-  if (!result.tombstonePath) return `Deleted "${name}"`;
+  // The graph-side cleanup runs on the Phase 2 reconciler sweep — until it
+  // ships, the entity/edges remain visible in graph-only views.
+  if (!result.tombstonePath) return `Tombstoned "${name}" (graph cleanup pending Phase 2 reconciler)`;
   const restoredPath = result.tombstonePath.replace(/\.deleted$/, "");
-  return `Deleted "${name}" (recover: mv "${result.tombstonePath}" "${restoredPath}")`;
+  return `Tombstoned "${name}" (recover: mv "${result.tombstonePath}" "${restoredPath}"; graph cleanup pending Phase 2 reconciler)`;
 }
 
 async function handleForget(ctx: CmdContext) {
@@ -231,7 +233,10 @@ async function handleForgetEdge(ctx: CmdContext) {
   const reason = ctx.positional[2];
   if (!edgeId || !reason) throw new UsageError('Usage: kb forget-edge <edgeId> "<reason>"');
   const result = await ops.forgetEdge(edgeId, reason, ctx.namespace);
-  const msg = `Queued edge ${edgeId} for invalidation in "${ctx.namespace}"`;
+  // Honest messaging: CLI writes the JSONL queue (Decision #11) but does not
+  // open the graph DB. The Phase 2 reconciler sweep applies the invalidation
+  // to LadybugDB — until then, the edge stays visible in graph-only views.
+  const msg = `Recorded forget intent for edge ${edgeId} in "${ctx.namespace}" (graph cleanup pending Phase 2 reconciler)`;
   out(ctx, ctx.json ? result : msg);
 }
 
@@ -356,7 +361,7 @@ Commands:
   add <text>                    Save a memory to disk (background indexing)
   search <query>                Hybrid search (file + semantic)
   get <name>                    Look up entity by name
-  forget <name>                 Remove entity
+  forget <name>                 Tombstone a memory by name (recoverable via mv)
   forget-edge <id> <reason>     Invalidate an edge with reason
   stats                         Show statistics
   analytics                     Usage analytics summary
@@ -472,11 +477,16 @@ async function repl() {
 const ctx = ctxFrom(initialArgs);
 
 try {
-  // --help / -h must short-circuit BEFORE the REPL fallback. Without this,
-  // `kb --help` (no positional command) would silently drop into interactive
-  // mode and confuse anyone discovering the CLI.
+  // --help / -h / --version / -v must short-circuit BEFORE the REPL fallback.
+  // Without this, `kb --help` or `kb --version` (no positional command) silently
+  // drops into interactive mode and confuses anyone discovering the CLI.
   if (initialArgs.flags["--help"] === "true" || initialArgs.flags["-h"] === "true") {
     showHelp();
+    process.exit(0);
+  }
+  if (initialArgs.flags["--version"] === "true" || initialArgs.flags["-v"] === "true") {
+    const pkg = (await import("../package.json", { with: { type: "json" } })).default as unknown as { version?: string };
+    console.log(pkg.version ?? "0.0.0");
     process.exit(0);
   }
   if (!ctx.positional[0] || initialArgs.flags["-i"] === "true") {

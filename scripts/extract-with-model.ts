@@ -10,7 +10,7 @@
  */
 
 import { spawn } from "bun";
-import { extract } from "../src/lib/extractor.ts";
+import { extract } from "../src/lib/extractor.js";
 
 interface RetroFinding {
   id: number;

@@ -136,10 +136,13 @@ describe("CLI read operations", () => {
     expect(parsed).toHaveProperty("edges");
   });
 
-  test("search returns results with content", async () => {
+  test("US-6/US-7: search returns results with content (self-contained)", async () => {
+    // Self-contained — depending on a memory written by an earlier describe
+    // block makes this test order-dependent and silently breaks if that
+    // describe is skipped, reordered, or runs in a separate process.
+    await run("add", "TypeScript is a typed superset of JavaScript", "--name", "ts-fact", "--json");
     const { stdout, exitCode } = await run("search", "typescript");
     expectSuccess(exitCode);
-    // Should find the memory added in the write tests above
     expect(stdout).toContain("TypeScript");
   });
 
@@ -151,11 +154,18 @@ describe("CLI read operations", () => {
 });
 
 describe("CLI --tag and --origin flags", () => {
-  test("add with --tag stores tags", async () => {
+  test("Decision #12: add --tag persists tags to file frontmatter (not just CLI output)", async () => {
     const { stdout, exitCode } = await run("add", "Bun is fast", "--name", "bun-speed", "--tag", "runtime", "--tag", "perf", "--json");
     expectSuccess(exitCode);
     const parsed = JSON.parse(stdout);
     expect(parsed.status).toBe("written");
+
+    // Verify the tags actually landed on disk — without this, a silent-drop
+    // bug where --tag is parsed but never written would still pass the
+    // status check above.
+    const fileContent = await Bun.file(parsed.path).text();
+    expect(fileContent).toContain("- runtime");
+    expect(fileContent).toContain("- perf");
   }, 10_000); // US-1: <100ms target; 10s accommodates Bun spawn overhead on slow CI
 
   test("search with --tag filters results", async () => {

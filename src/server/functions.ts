@@ -12,6 +12,7 @@ import { hybridSearch } from "../lib/hybrid-search.js";
 import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 import { ensureServerIndexerStarted } from "./indexer.js";
+import { withNamespaceLock } from "../lib/fs-memory.js";
 import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity } from "../types.js";
 
 if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
@@ -218,15 +219,19 @@ const forgetEdgeSchema = z.object({
 export const forgetEdge = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => forgetEdgeSchema.parse(data))
   .handler(({ data }) => analyticsContext.run({ source: "web" }, async () => {
-    // Spec Decision #11: forgetEdge records intent to _forget_edges.jsonl.
-    // The server reconciler (Phase 2) picks it up and applies graph invalidation.
-    await ops.forgetEdge(data.edgeId, data.reason, data.namespace);
+    // Server holds a live provider — apply the graph invalidation now and
+    // record JSONL for the Phase 2 reconciler to replay if the graph call
+    // failed. The web UI sees the change immediately on success.
+    const result = await ops.forgetEdgeViaGraph(data.edgeId, data.reason, data.namespace);
 
     return {
       success: true,
-      message: `Queued for invalidation: edge "${data.edgeId}" in namespace "${data.namespace}". Graph cleanup happens on the next reconciler sweep.`,
+      message: result.appliedToGraph
+        ? `Invalidated edge "${data.edgeId}" in namespace "${data.namespace}".`
+        : `Recorded intent for edge "${data.edgeId}" — graph unavailable, will apply on next reconciler sweep.`,
       edgeId: data.edgeId,
       namespace: data.namespace,
+      appliedToGraph: result.appliedToGraph,
     };
   }));
 
@@ -313,20 +318,27 @@ export async function startReextractAll(
           const memEmb = await embedDual(memory.text);
 
           reextractState.phase = "embedding-edges";
-          const edgeEmbeddings = [];
+          const edgeEmbeddings: Awaited<ReturnType<typeof embedDual>>[] = [];
           for (let j = 0; j < extraction.edges.length; j++) {
             reextractState.edgeCurrent = j + 1;
             edgeEmbeddings.push(await embedDual(extraction.edges[j]!.fact));
           }
 
           reextractState.phase = "storing";
-          await gp.store(
-            { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
-            extraction.entities,
-            extraction.edges,
-            memEmb,
-            edgeEmbeddings,
-          );
+          // Serialize the graph write under the namespace lock so we don't race
+          // the indexer (which holds the lock around store + file write per
+          // Decision #8). Without this, two concurrent stores against the same
+          // memory id race the MATCH...DELETE / CREATE pair inside gp.store().
+          const ns = memory.namespace;
+          await withNamespaceLock(ns, async () => {
+            await gp.store(
+              { ...memory, abstract: extraction.abstract ?? "", summary: extraction.summary },
+              extraction.entities,
+              extraction.edges,
+              memEmb,
+              edgeEmbeddings,
+            );
+          });
           reextractState.success++;
         } catch (err) {
           reextractState.failed++;
@@ -577,15 +589,22 @@ export const listEntities = createServerFn()
     if (data.namespace) filter.namespace = data.namespace;
     if (data.type) filter.type = data.type;
 
-    const items = await gp.findEntities(filter, data.limit, {
+    // Overfetch by 1 to detect "more available" without a separate count query.
+    const fetched = await gp.findEntities(filter, data.limit + 1, {
       offset: data.offset,
-      limit: data.limit,
+      limit: data.limit + 1,
       sortBy: data.sortBy,
       sortDir: data.sortDir,
     });
+    const hasMore = fetched.length > data.limit;
+    const items = hasMore ? fetched.slice(0, data.limit) : fetched;
 
+    // LIMITATION: when a non-namespace filter (type) is active, gp.stats() can't
+    // express it, so `total` reflects unfiltered namespace counts. UI should
+    // prefer `hasMore` for pagination math when filters are active. Tracked as
+    // a follow-up: add countEntities(filter) to the GraphProvider interface.
     const total = await gp.stats(data.namespace || undefined);
-    return { items, total: total.entities };
+    return { items, total: total.entities, hasMore };
   });
 
 const listEdgesSchema = z.object({
@@ -608,15 +627,19 @@ export const listEdges = createServerFn()
     if (data.namespace) filter.namespace = data.namespace;
     if (data.relationType) filter.relationType = data.relationType;
 
-    const items = await gp.findEdges(filter, data.limit, {
+    const fetched = await gp.findEdges(filter, data.limit + 1, {
       offset: data.offset,
-      limit: data.limit,
+      limit: data.limit + 1,
       sortBy: data.sortBy,
       sortDir: data.sortDir,
     });
+    const hasMore = fetched.length > data.limit;
+    const items = hasMore ? fetched.slice(0, data.limit) : fetched;
 
+    // LIMITATION: see listEntities above — total is unfiltered when
+    // relationType / includeInvalidated filters narrow the results.
     const total = await gp.stats(data.namespace || undefined);
-    return { items, total: total.edges };
+    return { items, total: total.edges, hasMore };
   });
 
 const getEntitySchema = z.object({
