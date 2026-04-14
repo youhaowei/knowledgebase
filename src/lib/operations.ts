@@ -15,7 +15,7 @@ import { Queue } from "./queue.js";
 import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import { join } from "path";
-import { existsSync, readFileSync, utimesSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, utimesSync, appendFileSync, renameSync, unlinkSync } from "fs";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
@@ -442,11 +442,40 @@ export async function drainTombstones(): Promise<{ memoriesForgotten: number; ed
   return { memoriesForgotten, edgesForgotten };
 }
 
-async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Promise<number> {
-  const logPath = join(resolveNamespacePath(namespace), "_tombstones.jsonl");
-  if (!existsSync(logPath)) return 0;
-  const content = readFileSync(logPath, "utf8");
-  if (!content.trim()) return 0;
+/**
+ * Reads the contents of `processingPath` (a drained log snapshot), applies
+ * each record via `applyRecord`, and appends any records whose apply threw
+ * back onto the main `logPath` via atomic append. Finally unlinks the
+ * processing file.
+ *
+ * Round 8 Theme H: replaces the prior read-process-writeFileSync(path, "")
+ * pattern which had two correctness gaps:
+ *   1. CLI appenders use `appendFileSync` without acquiring the namespace
+ *      lock (Spec Decision #12: O_APPEND is atomic per-record under PIPE_BUF,
+ *      so CLI writes don't block on the lock). The drain's `writeFileSync`
+ *      truncate-then-rewrite would overwrite CLI records appended between
+ *      our read and our write.
+ *   2. `writeFileSync` is not crash-safe — partial write + power loss leaves
+ *      an inconsistent file.
+ * Atomic rename gives us a consistent snapshot; CLI appenders silently
+ * create a fresh main log while we process the snapshot; append-back
+ * preserves the new CLI records.
+ */
+async function consumeProcessingLog(
+  processingPath: string,
+  logPath: string,
+  applyRecord: (trimmed: string) => Promise<boolean>,
+): Promise<number> {
+  let content: string;
+  try {
+    content = readFileSync(processingPath, "utf8");
+  } catch {
+    return 0;
+  }
+  if (!content.trim()) {
+    unlinkSync(processingPath);
+    return 0;
+  }
 
   let applied = 0;
   const remaining: string[] = [];
@@ -454,59 +483,80 @@ async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Prom
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const rec = JSON.parse(trimmed) as { id?: string; name?: string; reason?: string };
-      // New tombstones include `id`; replay must target that exact memory so a
-      // replacement row reusing the same name is not deleted on the next sweep.
-      // Old logs may only carry `name`, so keep the legacy fallback for them.
-      if (rec.id) {
-        if (await gp.forgetMemoryById(rec.id, namespace)) {
-          applied++;
-        }
-      } else if (rec.name) {
-        await gp.forget(rec.name, namespace);
-        applied++;
-      } else {
-        console.error(`[kb] Tombstone record missing 'name', skipping:`, trimmed);
-      }
+      if (await applyRecord(trimmed)) applied++;
     } catch (err) {
-      console.error(`[kb] Failed to apply tombstone:`, trimmed, err);
+      console.error(`[kb] Failed to apply tombstone record:`, trimmed, err);
       remaining.push(trimmed);
     }
   }
 
-  // Rewrite only failed replay records. The namespace lock held by
-  // drainTombstones guarantees no writer appended between our read and here.
-  writeFileSync(logPath, remaining.length > 0 ? `${remaining.join("\n")}\n` : "");
+  if (remaining.length > 0) {
+    // O_APPEND is atomic under PIPE_BUF (Spec Decision #12). Safe to interleave
+    // with concurrent CLI appenders writing to the same path.
+    appendFileSync(logPath, `${remaining.join("\n")}\n`);
+  }
+  unlinkSync(processingPath);
   return applied;
+}
+
+/**
+ * Atomically snapshots `logPath` to `${logPath}.processing` and processes it.
+ * If a prior drain crashed leaving a leftover `.processing`, consume it first
+ * so no records are ever lost.
+ */
+async function drainJsonlLog(
+  logPath: string,
+  applyRecord: (trimmed: string) => Promise<boolean>,
+): Promise<number> {
+  const processingPath = `${logPath}.processing`;
+  let applied = 0;
+
+  if (existsSync(processingPath)) {
+    // Resume from a prior crashed drain.
+    applied += await consumeProcessingLog(processingPath, logPath, applyRecord);
+  }
+
+  if (!existsSync(logPath)) return applied;
+  try {
+    renameSync(logPath, processingPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return applied;
+    throw err;
+  }
+  applied += await consumeProcessingLog(processingPath, logPath, applyRecord);
+  return applied;
+}
+
+async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Promise<number> {
+  const logPath = join(resolveNamespacePath(namespace), "_tombstones.jsonl");
+  return drainJsonlLog(logPath, async (trimmed) => {
+    const rec = JSON.parse(trimmed) as { id?: string; name?: string; reason?: string };
+    // New tombstones include `id`; replay must target that exact memory so a
+    // replacement row reusing the same name is not deleted on the next sweep.
+    // Old logs may only carry `name`, so keep the legacy fallback for them.
+    if (rec.id) {
+      return gp.forgetMemoryById(rec.id, namespace);
+    }
+    if (rec.name) {
+      await gp.forget(rec.name, namespace);
+      return true;
+    }
+    console.error(`[kb] Tombstone record missing 'name', skipping:`, trimmed);
+    return false;
+  });
 }
 
 async function drainEdgeTombstones(gp: GraphProvider, namespace: string): Promise<number> {
   const logPath = join(resolveNamespacePath(namespace), "_forget_edges.jsonl");
-  if (!existsSync(logPath)) return 0;
-  const content = readFileSync(logPath, "utf8");
-  if (!content.trim()) return 0;
-
-  let applied = 0;
-  const remaining: string[] = [];
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const rec = JSON.parse(trimmed) as { edgeId?: string; reason?: string };
-      if (rec.edgeId) {
-        await gp.forgetEdge(rec.edgeId, rec.reason ?? "tombstone-drain", namespace);
-        applied++;
-      } else {
-        console.error(`[kb] Edge-forget record missing 'edgeId', skipping:`, trimmed);
-      }
-    } catch (err) {
-      console.error(`[kb] Failed to apply edge forget:`, trimmed, err);
-      remaining.push(trimmed);
+  return drainJsonlLog(logPath, async (trimmed) => {
+    const rec = JSON.parse(trimmed) as { edgeId?: string; reason?: string };
+    if (!rec.edgeId) {
+      console.error(`[kb] Edge-forget record missing 'edgeId', skipping:`, trimmed);
+      return false;
     }
-  }
-
-  writeFileSync(logPath, remaining.length > 0 ? `${remaining.join("\n")}\n` : "");
-  return applied;
+    await gp.forgetEdge(rec.edgeId, rec.reason ?? "tombstone-drain", namespace);
+    return true;
+  });
 }
 
 export async function processUnindexedMemories(
@@ -692,10 +742,19 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
 
 /**
  * Server-side forgetEdge: applies the graph-side invalidation immediately
- * (the server already holds an open provider) AND records the JSONL audit
- * line so the Phase 2 reconciler stays the durable source of intent. Use
- * this from MCP/HTTP handlers; the CLI uses `forgetEdge` (JSONL-only) per
- * Decision #11.
+ * (the server already holds an open provider). On graph failure, records the
+ * invalidation in `_forget_edges.jsonl` as a coordination tombstone so the
+ * Phase 2 reconciler can apply it on the next sweep (Spec Decision #11).
+ *
+ * Per Spec Decision #9, the forgetEdge audit trail lives in the graph and is
+ * *expected* to be lost on `db:reindex` — "losing the graph loses nothing."
+ * Durable audit of forgets, if needed, would require writing a regular memory
+ * file with `origin: forget-audit` — not a change to this function. Hence the
+ * JSONL is written only on the degraded path (reconciler coordination), not
+ * on success (where it would be redundant with the graph state).
+ *
+ * Use this from MCP/HTTP handlers; the CLI uses `forgetEdge` (JSONL-only)
+ * per Decision #11.
  */
 export async function forgetEdgeViaGraph(edgeId: string, reason: string, namespace = "default") {
   return tracked("forgetEdgeViaGraph", { namespace }, async () => {
