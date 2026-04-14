@@ -43,8 +43,16 @@ export function MemoryList({ namespace, selectedItem, onSelect }: MemoryListProp
     [namespace, categoryFilter],
   );
 
-  const { items, isLoading, hasMore, loadMore } = useListData({ fetchFn });
+  const { items, total, isLoading, hasMore, loadMore } = useListData({ fetchFn });
   const isEmpty = items.length === 0;
+  // US-10: surface aggregate "N unindexed" so users see whether semantic
+  // enrichment is pending across the full namespace, not just the loaded page.
+  // `indexed` rides on each fetch response — derive unindexed from total.
+  const indexedCount = (items as Memory[]).reduce(
+    (acc, m) => acc + (m.status === "completed" ? 1 : 0),
+    0,
+  );
+  const unindexedShown = items.length - indexedCount;
 
   const timeAgo = useMemo(() => {
     return (date: Date | string) => {
@@ -60,7 +68,7 @@ export function MemoryList({ namespace, selectedItem, onSelect }: MemoryListProp
   return (
     <div className="flex flex-col h-full">
       {/* Filter bar */}
-      <div className="px-3 py-2 border-b border-neutral-border">
+      <div className="px-3 py-2 border-b border-neutral-border space-y-1.5">
         <select
           value={categoryFilter}
           onChange={(e) => setCategoryFilter(e.target.value)}
@@ -72,6 +80,12 @@ export function MemoryList({ namespace, selectedItem, onSelect }: MemoryListProp
           <option value="pattern">Pattern</option>
           <option value="general">General</option>
         </select>
+        {total > 0 && (
+          <div className="text-[10px] text-neutral-fg-subtle flex justify-between">
+            <span>{total} total</span>
+            {unindexedShown > 0 && <span>{unindexedShown} unindexed (loaded)</span>}
+          </div>
+        )}
       </div>
 
       {/* List */}

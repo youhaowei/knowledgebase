@@ -56,10 +56,13 @@ export function StatsOverlay({
 
   if (!stats) return null;
 
+  // In degraded mode (graph offline) entities/edges are null. Render "—"
+  // rather than the misleading "0" the previous fallback produced — Decision
+  // #8 says signals are functional reduced-capability responses, not errors.
   const items = [
     { icon: Brain, value: stats.memories, label: "Memories" },
-    { icon: Users, value: stats.entities, label: "Entities" },
-    { icon: Link2, value: stats.edges, label: "Edges" },
+    { icon: Users, value: stats.entities ?? "—", label: "Entities" },
+    { icon: Link2, value: stats.edges ?? "—", label: "Edges" },
   ];
 
   return (
@@ -100,6 +103,12 @@ export function StatsOverlay({
           </select>
           <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-tertiary pointer-events-none" />
         </div>
+
+        {stats.degraded && (
+          <div className="px-3 py-1.5 rounded-xl bg-yellow-500/10 border border-yellow-500/30 text-[11px] text-yellow-400">
+            Graph offline — filesystem-only results
+          </div>
+        )}
 
         {/* Stats pills */}
         <div className="flex gap-2">
