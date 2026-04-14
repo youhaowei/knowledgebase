@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, Brain, Users, Link2, Sparkles } from "lucide-react";
+import { Search, Brain, Users, Link2, Sparkles, AlertTriangle, Info } from "lucide-react";
 import { searchMemories, askLLM } from "@/server/functions";
 import type { SelectedItem } from "@/routes/index";
 
@@ -26,9 +26,24 @@ interface SearchResult {
   edgeId?: string;
 }
 
+/**
+ * Decision #8 structured signals carried alongside search results. Surfacing
+ * these was the user-facing gap flagged by review pass 7 finding #13: the
+ * backend wiring (`hybridSearch` → `signals`) shipped in commits f17c237 +
+ * e86f2b4, but the CommandPalette (the one search surface) never read the
+ * object, so contradictions / unindexed counts / degraded mode were invisible.
+ */
+interface SearchSignals {
+  degraded: boolean;
+  unindexedCount: number;
+  staleCount: number;
+  contradictionsDetected: boolean;
+}
+
 export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [signals, setSignals] = useState<SearchSignals | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -42,6 +57,7 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
   useEffect(() => {
     if (!query.trim()) {
       setResults([]);
+      setSignals(null);
       return;
     }
 
@@ -50,6 +66,9 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
       try {
         const data = await searchMemories({ data: { query, limit: 15 } });
         const mapped: SearchResult[] = [];
+        // Capture the Decision #8 signals (may be absent on older responses).
+        const s = (data as { signals?: SearchSignals }).signals;
+        setSignals(s ?? null);
 
         for (const m of data.memories) {
           mapped.push({
@@ -167,6 +186,36 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
             <div className="h-4 w-4 border-2 border-glow-cyan/30 border-t-glow-cyan rounded-full animate-spin" />
           )}
         </div>
+
+        {/* Signals banner — Decision #8 + review pass 7 #13 */}
+        {signals && (signals.degraded || signals.contradictionsDetected || signals.unindexedCount > 0 || signals.staleCount > 0) && (
+          <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border text-[11px] text-text-secondary">
+            {signals.degraded && (
+              <span className="inline-flex items-center gap-1 text-glow-amber">
+                <AlertTriangle className="h-3 w-3" />
+                graph offline — file results only
+              </span>
+            )}
+            {signals.contradictionsDetected && (
+              <span className="inline-flex items-center gap-1 text-glow-magenta">
+                <AlertTriangle className="h-3 w-3" />
+                contradictions detected
+              </span>
+            )}
+            {signals.unindexedCount > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <Info className="h-3 w-3" />
+                {signals.unindexedCount} unindexed
+              </span>
+            )}
+            {signals.staleCount > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <Info className="h-3 w-3" />
+                {signals.staleCount} stale (edited since last index)
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Results */}
         {results.length > 0 && (
