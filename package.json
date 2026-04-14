@@ -22,9 +22,9 @@
     "db:backfill-canonical": "bun run src/lib/backfill-canonical.ts",
     "db:migrate-fs": "bun run src/lib/migrate-to-fs.ts",
     "db:reindex": "bun run scripts/clear-indexed.ts",
-    "test": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts test/fs-memory.test.ts test/file-search.test.ts test/hybrid-search.test.ts test/operations.test.ts test/operations-write-path.test.ts test/queue.test.ts test/reextract.test.ts test/indexer.test.ts test/migrate-to-fs.test.ts test/analytics.test.ts && bun test test/provider.test.ts",
+    "test": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts test/fs-memory.test.ts test/file-search.test.ts test/hybrid-search.test.ts test/operations.test.ts test/operations-write-path.test.ts test/queue.test.ts test/reextract.test.ts test/indexer.test.ts test/migrate-to-fs.test.ts test/analytics.test.ts test/server-functions.test.ts test/web-hooks.test.ts && bun test test/provider.test.ts",
     "test:cli": "bun test test/cli.test.ts && bun test test/retro.test.ts",
-    "test:all": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts test/fs-memory.test.ts test/file-search.test.ts test/hybrid-search.test.ts test/operations.test.ts test/operations-write-path.test.ts test/queue.test.ts test/reextract.test.ts test/indexer.test.ts test/migrate-to-fs.test.ts test/analytics.test.ts && bun test test/provider.test.ts && bun test test/cli.test.ts && bun test test/retro.test.ts",
+    "test:all": "bun test test/types.test.ts test/embedder.test.ts test/fallback-embedder.test.ts test/intent.test.ts test/fs-memory.test.ts test/file-search.test.ts test/hybrid-search.test.ts test/operations.test.ts test/operations-write-path.test.ts test/queue.test.ts test/reextract.test.ts test/indexer.test.ts test/migrate-to-fs.test.ts test/analytics.test.ts test/server-functions.test.ts test/web-hooks.test.ts && bun test test/provider.test.ts && bun test test/cli.test.ts && bun test test/retro.test.ts",
     "lint": "eslint .",
     "kb": "bun run src/cli.ts",
     "kb-test": "bun run src/cli.ts --env test"

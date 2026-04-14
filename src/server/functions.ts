@@ -8,12 +8,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import * as ops from "../lib/operations.js";
+import { withGraphFallback, withGraphRequired } from "../lib/operations.js";
 import { hybridSearch } from "../lib/hybrid-search.js";
 import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 import { ensureServerIndexerStarted } from "./indexer.js";
-import { withNamespaceLock } from "../lib/fs-memory.js";
-import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity } from "../types.js";
+import { withNamespaceLock, listMemoryFiles, readMemoryFile } from "../lib/fs-memory.js";
+import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity, Memory } from "../types.js";
 
 if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
   ensureServerIndexerStarted();
@@ -29,21 +30,29 @@ const namespaceFilterSchema = z.object({
 
 export const getGraphData = createServerFn()
   .inputValidator((data: unknown) => namespaceFilterSchema.parse(data ?? {}))
-  .handler(async ({ data }) => {
-    const result = await ops.getGraphData(data.namespace);
-    return {
-      nodes: result.nodes,
-      edges: result.links.map((link) => ({
-        source: link.source,
-        target: link.target,
-        relationType: link.relationType,
-        fact: link.fact,
-        sentiment: link.sentiment,
-        confidence: link.confidence,
-        edgeId: link.edgeId,
-      })),
-    };
-  });
+  .handler(async ({ data }) =>
+    // Graph viz has no filesystem equivalent — entities and edges are graph-derived.
+    // Degraded mode returns empty + `degraded: true`; UI renders "indexer offline" state.
+    withGraphFallback("getGraphData",
+      async () => {
+        const result = await ops.getGraphData(data.namespace);
+        return {
+          nodes: result.nodes,
+          edges: result.links.map((link) => ({
+            source: link.source,
+            target: link.target,
+            relationType: link.relationType,
+            fact: link.fact,
+            sentiment: link.sentiment,
+            confidence: link.confidence,
+            edgeId: link.edgeId,
+          })),
+          degraded: false,
+        };
+      },
+      { nodes: [], edges: [], degraded: true },
+    )
+  );
 
 export const getStats = createServerFn()
   .inputValidator((data: unknown) => namespaceFilterSchema.parse(data ?? {}))
@@ -363,49 +372,52 @@ export async function startReextractAll(
   return { started: true, total: reextractState.total };
 }
 
-/** Find duplicate entity groups using fuzzy name matching */
-export const findDuplicateCandidates = createServerFn().handler(async () => {
-  const gp = await ops.getProvider();
-
-  // Fetch all entities across all namespaces via provider interface
-  const namespaces = await gp.listNamespaces();
-  const allEntities: Array<StoredEntity & { uuid: string }> = [];
-  for (const ns of namespaces) {
-    const entities = await gp.findEntities({ namespace: ns }, 10000);
-    for (const e of entities) {
-      const withUuid = e as StoredEntity & { uuid?: string };
-      if (withUuid.uuid) {
-        allEntities.push({ ...e, uuid: withUuid.uuid });
+/** Find duplicate entity groups using fuzzy name matching (graph-only). */
+export const findDuplicateCandidates = createServerFn().handler(async () =>
+  withGraphFallback("findDuplicateCandidates",
+    async (gp) => {
+      // Fetch all entities across all namespaces via provider interface
+      const namespaces = await gp.listNamespaces();
+      const allEntities: Array<StoredEntity & { uuid: string }> = [];
+      for (const ns of namespaces) {
+        const entities = await gp.findEntities({ namespace: ns }, 10000);
+        for (const e of entities) {
+          const withUuid = e as StoredEntity & { uuid?: string };
+          if (withUuid.uuid) {
+            allEntities.push({ ...e, uuid: withUuid.uuid });
+          }
+        }
       }
-    }
-  }
-  // Also fetch global-scope entities
-  const globalEntities = await gp.findEntities({ namespace: null }, 10000);
-  for (const e of globalEntities) {
-    const withUuid = e as StoredEntity & { uuid?: string };
-    if (withUuid.uuid) {
-      allEntities.push({ ...e, uuid: withUuid.uuid });
-    }
-  }
+      // Also fetch global-scope entities
+      const globalEntities = await gp.findEntities({ namespace: null }, 10000);
+      for (const e of globalEntities) {
+        const withUuid = e as StoredEntity & { uuid?: string };
+        if (withUuid.uuid) {
+          allEntities.push({ ...e, uuid: withUuid.uuid });
+        }
+      }
 
-  const groups = groupDuplicateEntities(allEntities);
+      const groups = groupDuplicateEntities(allEntities);
 
-  // Enrich with edge counts
-  const candidates = [];
-  for (const group of groups) {
-    const edges = await gp.findEdges({ sourceEntityName: group.keep.name }, 1000);
-    const inEdges = await gp.findEdges({ targetEntityName: group.keep.name }, 1000);
+      // Enrich with edge counts
+      const candidates = [];
+      for (const group of groups) {
+        const edges = await gp.findEdges({ sourceEntityName: group.keep.name }, 1000);
+        const inEdges = await gp.findEdges({ targetEntityName: group.keep.name }, 1000);
 
-    candidates.push({
-      keep: { uuid: group.keep.uuid, name: group.keep.name },
-      duplicates: group.duplicates.map((d) => ({ uuid: d.uuid, name: d.name })),
-      normalizedName: group.normalizedName,
-      totalEdges: edges.length + inEdges.length,
-    });
-  }
+        candidates.push({
+          keep: { uuid: group.keep.uuid, name: group.keep.name },
+          duplicates: group.duplicates.map((d) => ({ uuid: d.uuid, name: d.name })),
+          normalizedName: group.normalizedName,
+          totalEdges: edges.length + inEdges.length,
+        });
+      }
 
-  return { candidates };
-});
+      return { candidates, degraded: false };
+    },
+    { candidates: [], degraded: true },
+  )
+);
 
 const mergeDuplicateGroupSchema = z.object({
   keepUuid: z.string(),
@@ -415,28 +427,38 @@ const mergeDuplicateGroupSchema = z.object({
 /** Merge a single duplicate group via provider interface (parameterized queries, both backends) */
 export const mergeDuplicateGroup = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => mergeDuplicateGroupSchema.parse(data))
-  .handler(async ({ data }) => {
-    const gp = await ops.getProvider();
-    return gp.mergeEntities(data.keepUuid, data.duplicateUuids);
-  });
+  .handler(async ({ data }) =>
+    // Write operation — no safe filesystem fallback. Throws ProviderUnavailableError
+    // when the graph is down; UI renders "Graph required for this action".
+    withGraphRequired("mergeDuplicateGroup",
+      (gp) => gp.mergeEntities(data.keepUuid, data.duplicateUuids),
+    )
+  );
 
 /** Merge all duplicate groups at once (batch mode) */
 export const deduplicateEntities = createServerFn({ method: "POST" }).handler(async () => {
   const result = await findDuplicateCandidates();
-
-  let merged = 0;
-  let removed = 0;
-  const details: string[] = [];
-  const gp = await ops.getProvider();
-
-  for (const candidate of result.candidates) {
-    const mergeResult = await gp.mergeEntities(candidate.keep.uuid, candidate.duplicates.map((d) => d.uuid));
-    removed += mergeResult.removed;
-    merged++;
-    details.push(`"${candidate.keep.name}": kept 1, removed ${candidate.duplicates.length}`);
+  // If findDuplicateCandidates itself degraded, surface an honest empty result
+  // instead of pretending a batch merge ran. The caller (UI) already sees the
+  // degraded flag through the individual response.
+  if (result.degraded) {
+    return { merged: 0, removed: 0, total: 0, remaining: 0, details: [], degraded: true };
   }
 
-  return { merged, removed, total: 0, remaining: 0, details };
+  return withGraphRequired("deduplicateEntities", async (gp) => {
+    let merged = 0;
+    let removed = 0;
+    const details: string[] = [];
+
+    for (const candidate of result.candidates) {
+      const mergeResult = await gp.mergeEntities(candidate.keep.uuid, candidate.duplicates.map((d) => d.uuid));
+      removed += mergeResult.removed;
+      merged++;
+      details.push(`"${candidate.keep.name}": kept 1, removed ${candidate.duplicates.length}`);
+    }
+
+    return { merged, removed, total: 0, remaining: 0, details, degraded: false };
+  });
 });
 
 export const reextractAll = createServerFn({ method: "POST" }).handler(async () => {
@@ -551,26 +573,80 @@ const listMemoriesSchema = z.object({
 
 export const listMemories = createServerFn()
   .inputValidator((data: unknown) => listMemoriesSchema.parse(data ?? {}))
-  .handler(async ({ data }) => {
-    const gp = await ops.getProvider();
-    const filter: MemoryFilter = {};
-    if (data.namespace) filter.namespace = data.namespace;
-    if (data.category) filter.category = data.category;
+  .handler(async ({ data }) =>
+    withGraphFallback("listMemories",
+      async (gp) => {
+        const filter: MemoryFilter = {};
+        if (data.namespace) filter.namespace = data.namespace;
+        if (data.category) filter.category = data.category;
 
-    const items = await gp.findMemories(filter, data.limit, {
-      offset: data.offset,
-      limit: data.limit,
-      sortBy: data.sortBy,
-      sortDir: data.sortDir,
-    });
+        const items = await gp.findMemories(filter, data.limit, {
+          offset: data.offset,
+          limit: data.limit,
+          sortBy: data.sortBy,
+          sortDir: data.sortDir,
+        });
 
-    const stats = await ops.stats(data.namespace || undefined);
-    return {
-      items,
-      indexed: stats.indexed,
-      total: stats.memories,
-    };
-  });
+        const stats = await ops.stats(data.namespace || undefined);
+        return { items, indexed: stats.indexed, total: stats.memories, degraded: false };
+      },
+      () => {
+        // Filesystem fallback — files are the source of truth (PRD Goal #3).
+        // `listMemoryFiles` returns entries via `_index.md` fast path, already
+        // ordered by createdAt desc. We read each visible page's frontmatter +
+        // body so the UI gets real content, not empty stubs.
+        const ns = data.namespace || "default";
+        let files;
+        try {
+          files = listMemoryFiles(ns);
+        } catch {
+          // Namespace dir missing (e.g., no files ever written) — empty list.
+          return { items: [], indexed: 0, total: 0, degraded: true };
+        }
+
+        // Apply requested sort. Category filter has no cheap filesystem
+        // equivalent (would need to read all frontmatters); we surface it best-
+        // effort by reading per visible entry and filtering post-hoc.
+        let sorted = files;
+        if (data.sortBy === "name") {
+          sorted = [...files].sort((a, b) =>
+            data.sortDir === "asc"
+              ? a.name.localeCompare(b.name)
+              : b.name.localeCompare(a.name),
+          );
+        } else if (data.sortDir === "asc") {
+          // Default `_index.md` order is createdAt desc; reverse for asc.
+          sorted = [...files].reverse();
+        }
+
+        const paged = sorted.slice(data.offset, data.offset + data.limit);
+        const items: Memory[] = [];
+        for (const entry of paged) {
+          try {
+            const { frontmatter, text } = readMemoryFile(entry.path);
+            if (data.category && frontmatter.category !== data.category) continue;
+            items.push({
+              id: frontmatter.id,
+              name: frontmatter.name,
+              text,
+              abstract: frontmatter.abstract ?? "",
+              summary: frontmatter.summary ?? "",
+              category: frontmatter.category,
+              namespace: frontmatter.namespace,
+              status: frontmatter.indexedAt ? "completed" : "pending",
+              schemaVersion: frontmatter.schemaVersion ?? "0.0.0",
+              versionedAt: frontmatter.versionedAt,
+              createdAt: new Date(frontmatter.createdAt),
+            });
+          } catch (err) {
+            console.error(`[kb] listMemories degraded: failed to read ${entry.path}`, err);
+          }
+        }
+        const indexed = files.filter((f) => f.indexed).length;
+        return { items, indexed, total: files.length, degraded: true };
+      },
+    )
+  );
 
 const listEntitiesSchema = z.object({
   offset: z.number().int().min(0).default(0),
@@ -583,29 +659,35 @@ const listEntitiesSchema = z.object({
 
 export const listEntities = createServerFn()
   .inputValidator((data: unknown) => listEntitiesSchema.parse(data ?? {}))
-  .handler(async ({ data }) => {
-    const gp = await ops.getProvider();
-    const filter: EntityFilter = {};
-    if (data.namespace) filter.namespace = data.namespace;
-    if (data.type) filter.type = data.type;
+  .handler(async ({ data }) =>
+    // Entities are graph-derived (extracted from memory text) — no filesystem
+    // equivalent. Degraded mode returns empty; UI renders "indexer offline".
+    withGraphFallback("listEntities",
+      async (gp) => {
+        const filter: EntityFilter = {};
+        if (data.namespace) filter.namespace = data.namespace;
+        if (data.type) filter.type = data.type;
 
-    // Overfetch by 1 to detect "more available" without a separate count query.
-    const fetched = await gp.findEntities(filter, data.limit + 1, {
-      offset: data.offset,
-      limit: data.limit + 1,
-      sortBy: data.sortBy,
-      sortDir: data.sortDir,
-    });
-    const hasMore = fetched.length > data.limit;
-    const items = hasMore ? fetched.slice(0, data.limit) : fetched;
+        // Overfetch by 1 to detect "more available" without a separate count query.
+        const fetched = await gp.findEntities(filter, data.limit + 1, {
+          offset: data.offset,
+          limit: data.limit + 1,
+          sortBy: data.sortBy,
+          sortDir: data.sortDir,
+        });
+        const hasMore = fetched.length > data.limit;
+        const items = hasMore ? fetched.slice(0, data.limit) : fetched;
 
-    // LIMITATION: when a non-namespace filter (type) is active, gp.stats() can't
-    // express it, so `total` reflects unfiltered namespace counts. UI should
-    // prefer `hasMore` for pagination math when filters are active. Tracked as
-    // a follow-up: add countEntities(filter) to the GraphProvider interface.
-    const total = await gp.stats(data.namespace || undefined);
-    return { items, total: total.entities, hasMore };
-  });
+        // LIMITATION: when a non-namespace filter (type) is active, gp.stats() can't
+        // express it, so `total` reflects unfiltered namespace counts. UI should
+        // prefer `hasMore` for pagination math when filters are active. Tracked as
+        // a follow-up: add countEntities(filter) to the GraphProvider interface.
+        const total = await gp.stats(data.namespace || undefined);
+        return { items, total: total.entities, hasMore, degraded: false };
+      },
+      { items: [], total: 0, hasMore: false, degraded: true },
+    )
+  );
 
 const listEdgesSchema = z.object({
   offset: z.number().int().min(0).default(0),
@@ -619,28 +701,34 @@ const listEdgesSchema = z.object({
 
 export const listEdges = createServerFn()
   .inputValidator((data: unknown) => listEdgesSchema.parse(data ?? {}))
-  .handler(async ({ data }) => {
-    const gp = await ops.getProvider();
-    const filter: EdgeFilter = {
-      includeInvalidated: data.includeInvalidated,
-    };
-    if (data.namespace) filter.namespace = data.namespace;
-    if (data.relationType) filter.relationType = data.relationType;
+  .handler(async ({ data }) =>
+    // Edges are graph-derived (RELATES_TO between extracted entities) — no
+    // filesystem equivalent. Degraded mode returns empty.
+    withGraphFallback("listEdges",
+      async (gp) => {
+        const filter: EdgeFilter = {
+          includeInvalidated: data.includeInvalidated,
+        };
+        if (data.namespace) filter.namespace = data.namespace;
+        if (data.relationType) filter.relationType = data.relationType;
 
-    const fetched = await gp.findEdges(filter, data.limit + 1, {
-      offset: data.offset,
-      limit: data.limit + 1,
-      sortBy: data.sortBy,
-      sortDir: data.sortDir,
-    });
-    const hasMore = fetched.length > data.limit;
-    const items = hasMore ? fetched.slice(0, data.limit) : fetched;
+        const fetched = await gp.findEdges(filter, data.limit + 1, {
+          offset: data.offset,
+          limit: data.limit + 1,
+          sortBy: data.sortBy,
+          sortDir: data.sortDir,
+        });
+        const hasMore = fetched.length > data.limit;
+        const items = hasMore ? fetched.slice(0, data.limit) : fetched;
 
-    // LIMITATION: see listEntities above — total is unfiltered when
-    // relationType / includeInvalidated filters narrow the results.
-    const total = await gp.stats(data.namespace || undefined);
-    return { items, total: total.edges, hasMore };
-  });
+        // LIMITATION: see listEntities above — total is unfiltered when
+        // relationType / includeInvalidated filters narrow the results.
+        const total = await gp.stats(data.namespace || undefined);
+        return { items, total: total.edges, hasMore, degraded: false };
+      },
+      { items: [], total: 0, hasMore: false, degraded: true },
+    )
+  );
 
 const getEntitySchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -649,44 +737,46 @@ const getEntitySchema = z.object({
 
 export const getEntity = createServerFn()
   .inputValidator((data: unknown) => getEntitySchema.parse(data))
-  .handler(async ({ data }) => {
-    const gp = await ops.getProvider();
-    // Find entity by exact name — namespace filter is optional
-    const filter: EntityFilter = { name: data.name };
-    if (data.namespace) filter.namespace = data.namespace;
-    const entities = await gp.findEntities(filter, 10);
-    const entity = entities.find((e) => e.name === data.name);
-    if (!entity) throw new Error(`Entity not found: "${data.name}"`);
+  .handler(async ({ data }) =>
+    // Entity detail has no filesystem equivalent — entities exist only in the
+    // graph. Throws ProviderUnavailableError when graph is down so the UI can
+    // render "entity view requires indexer" rather than "Entity not found".
+    withGraphRequired("getEntity", async (gp) => {
+      const filter: EntityFilter = { name: data.name };
+      if (data.namespace) filter.namespace = data.namespace;
+      const entities = await gp.findEntities(filter, 10);
+      const entity = entities.find((e) => e.name === data.name);
+      if (!entity) throw new Error(`Entity not found: "${data.name}"`);
 
-    // Find all connected edges (both directions)
-    const edgeFilter: EdgeFilter = {};
-    if (data.namespace) edgeFilter.namespace = data.namespace;
-    const outgoing = await gp.findEdges({ ...edgeFilter, sourceEntityName: data.name }, 100);
-    const incoming = await gp.findEdges({ ...edgeFilter, targetEntityName: data.name }, 100);
+      const edgeFilter: EdgeFilter = {};
+      if (data.namespace) edgeFilter.namespace = data.namespace;
+      const outgoing = await gp.findEdges({ ...edgeFilter, sourceEntityName: data.name }, 100);
+      const incoming = await gp.findEdges({ ...edgeFilter, targetEntityName: data.name }, 100);
 
-    return {
-      entity: {
-        name: entity.name,
-        type: entity.type,
-        description: entity.description,
-        summary: entity.summary,
-        namespace: entity.namespace,
-      },
-      edges: [...outgoing, ...incoming].map((e) => ({
-        id: e.id,
-        sourceEntity: e.sourceEntityName,
-        targetEntity: e.targetEntityName,
-        relationType: e.relationType,
-        fact: e.fact,
-        sentiment: e.sentiment,
-        confidence: e.confidence,
-        confidenceReason: e.confidenceReason,
-        validAt: e.validAt,
-        invalidAt: e.invalidAt,
-        createdAt: e.createdAt,
-      })),
-    };
-  });
+      return {
+        entity: {
+          name: entity.name,
+          type: entity.type,
+          description: entity.description,
+          summary: entity.summary,
+          namespace: entity.namespace,
+        },
+        edges: [...outgoing, ...incoming].map((e) => ({
+          id: e.id,
+          sourceEntity: e.sourceEntityName,
+          targetEntity: e.targetEntityName,
+          relationType: e.relationType,
+          fact: e.fact,
+          sentiment: e.sentiment,
+          confidence: e.confidence,
+          confidenceReason: e.confidenceReason,
+          validAt: e.validAt,
+          invalidAt: e.invalidAt,
+          createdAt: e.createdAt,
+        })),
+      };
+    })
+  );
 
 // ============================================================================
 // Streaming
