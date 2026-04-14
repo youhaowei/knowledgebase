@@ -185,7 +185,7 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 - Routes are file-based in `src/routes/` (auto-generates `routeTree.gen.ts`)
 - UI components in `src/web/components/ui/` follow shadcn/ui patterns
 - Design tokens documented in `DESIGN_SYSTEM.md` (neon cyber aesthetic)
-- CLI stdout is for machine-readable output only. All diagnostics/progress → `console.error` (stderr)
+- CLI stdout is human prose by default; `--json` switches to machine-readable. All diagnostics/progress → `console.error` (stderr) regardless.
 
 ## Bun-Specific
 
