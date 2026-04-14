@@ -98,6 +98,18 @@ function indexScanFromEntries(
     return matchesTagFilter(entry.tags, tagFilter);
   });
 
+  // Pre-sort by indexed-first / exact-name priority before applying `limit`.
+  // Without this, an exact match late in the candidate pool gets dropped by
+  // the slice and never reaches the downstream merge sort. Mirrors the final
+  // sort in fileSearch so the cap doesn't break relevance.
+  matched.sort((a, b) => {
+    if (a.indexed !== b.indexed) return a.indexed ? -1 : 1;
+    const aExact = a.name.toLowerCase() === q;
+    const bExact = b.name.toLowerCase() === q;
+    if (aExact !== bExact) return aExact ? -1 : 1;
+    return 0;
+  });
+
   return matched.slice(0, limit).map((entry) => {
     const indexedAt = resolveIndexedAt(entry);
     return {

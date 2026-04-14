@@ -169,24 +169,30 @@ function buildSignals(
     degraded: graphResult === null,
     unindexedCount,
     staleCount,
-    contradictionsDetected: detectContradictions(edges),
+    contradictionsDetected: detectPotentialContradictions(edges),
   };
 }
 
 /**
- * Detects the "two edges on the same entity pair with opposing sentiment"
- * pattern used throughout the Phase 4 consolidation spec. Cheap approximate
- * check — Phase 4 replaces this with the full contradiction clustering.
+ * Detects the "two edges on the same entity pair with the same relationType
+ * and opposing sentiment" pattern. Cheap approximate check — Phase 4 replaces
+ * this with the full contradiction clustering.
+ *
+ * Same `relationType` is required because temporal sequences ("we used to
+ * prefer X" → -0.5; "we now prefer X" → 0.8) on the *same* relation are
+ * legitimate updates, not contradictions. Without the relationType filter,
+ * MCP consumers would see false-positive contradiction prompts on benign
+ * history shifts.
  */
-function detectContradictions(edges: StoredEdge[]): boolean {
-  const byPair = new Map<string, number[]>();
+function detectPotentialContradictions(edges: StoredEdge[]): boolean {
+  const byPairAndRelation = new Map<string, number[]>();
   for (const edge of edges) {
-    const key = `${edge.sourceEntityName}\u0000${edge.targetEntityName}`;
-    const sentiments = byPair.get(key) ?? [];
+    const key = `${edge.sourceEntityName}\u0000${edge.targetEntityName}\u0000${edge.relationType}`;
+    const sentiments = byPairAndRelation.get(key) ?? [];
     sentiments.push(edge.sentiment ?? 0);
-    byPair.set(key, sentiments);
+    byPairAndRelation.set(key, sentiments);
   }
-  for (const sentiments of byPair.values()) {
+  for (const sentiments of byPairAndRelation.values()) {
     if (sentiments.length < 2) continue;
     const min = Math.min(...sentiments);
     const max = Math.max(...sentiments);

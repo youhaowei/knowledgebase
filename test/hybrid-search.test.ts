@@ -363,21 +363,23 @@ describe("hybridSearch file results", () => {
     expect(result.memories.some((m) => m.id === highestGraphRankId)).toBe(true);
   });
 
-  test("Decision #8: signals.contradictionsDetected fires when edges carry opposing sentiment on the same pair", async () => {
+  test("Decision #8: signals.contradictionsDetected fires when same-relation edges carry opposing sentiment", async () => {
     const ns = `hybrid-contradict-${randomUUID().slice(0, 8)}`;
 
     configureHybridSearchDependenciesForTests({
       graphSearch: async () => ({
         memories: [],
+        // Both edges share relationType=`prefers`. With opposing sentiment
+        // (+0.8, -0.8) on the same entity pair this is a real contradiction.
         edges: [
           {
             id: "e1", sourceEntityName: "A", targetEntityName: "B",
-            relationType: "uses", fact: "A uses B", sentiment: 0.8, confidence: 0.9,
+            relationType: "prefers", fact: "A prefers B", sentiment: 0.8, confidence: 0.9,
             episodes: [], createdAt: new Date(), namespace: ns,
           },
           {
             id: "e2", sourceEntityName: "A", targetEntityName: "B",
-            relationType: "rejects", fact: "A rejects B", sentiment: -0.8, confidence: 0.9,
+            relationType: "prefers", fact: "A no longer prefers B", sentiment: -0.8, confidence: 0.9,
             episodes: [], createdAt: new Date(), namespace: ns,
           },
         ],
@@ -391,5 +393,37 @@ describe("hybridSearch file results", () => {
 
     expect(result.signals.contradictionsDetected).toBe(true);
     expect(result.guidance).toContain("Contradictions detected");
+  });
+
+  test("Decision #8: different relationTypes on the same pair are NOT contradictions (avoids false positives)", async () => {
+    const ns = `hybrid-no-contradict-${randomUUID().slice(0, 8)}`;
+
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async () => ({
+        memories: [],
+        // Different relationType — `uses` vs `rejects` describe orthogonal
+        // facets, not opposing claims. The detector must not flag these or
+        // MCP consumers will prompt users to forgetEdge legitimate history.
+        edges: [
+          {
+            id: "e1", sourceEntityName: "A", targetEntityName: "B",
+            relationType: "uses", fact: "A uses B", sentiment: 0.8, confidence: 0.9,
+            episodes: [], createdAt: new Date(), namespace: ns,
+          },
+          {
+            id: "e2", sourceEntityName: "A", targetEntityName: "B",
+            relationType: "rejects", fact: "A rejects B for X", sentiment: -0.8, confidence: 0.9,
+            episodes: [], createdAt: new Date(), namespace: ns,
+          },
+        ],
+        entities: [],
+        intent: "general",
+        guidance: "",
+      }),
+    });
+
+    const result = await hybridSearch("A B", ns, 10);
+
+    expect(result.signals.contradictionsDetected).toBe(false);
   });
 });
