@@ -126,7 +126,7 @@ cc-retro (`~/Projects/cc-retro`) auto-syncs findings to KB via `kb add --ns retr
 ### Storage Backend
 
 Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implementations:
-- **LadybugProvider** (default) — Embedded graph DB at `.ladybug/`, uses `lbug` package
+- **LadybugProvider** (default) — Embedded graph DB at `~/.kb/ladybug/` (override with `LADYBUG_DATA_PATH`), uses `lbug` package
 - **Neo4jProvider** (optional) — Remote Neo4j, activated by `NEO4J_URI` env var
 
 `createGraphProvider()` picks the backend automatically based on environment.

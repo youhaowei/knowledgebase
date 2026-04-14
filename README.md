@@ -92,7 +92,7 @@ All env vars are optional. Defaults shown make the project work offline.
 | Variable | Default | Purpose |
 |---|---|---|
 | `KB_MEMORY_PATH` | `~/.kb/memories` | Memory filesystem root (Spec Decision #1). |
-| `LADYBUG_DATA_PATH` | `./.ladybug` | Graph index location. `kb --env <name>` overrides both this and `KB_MEMORY_PATH`. |
+| `LADYBUG_DATA_PATH` | `~/.kb/ladybug` | Graph index location. `kb --env <name>` swaps to repo-local `./.ladybug-<name>` alongside `./.kb-<name>/memories`. |
 | `EXTRACTION_MODEL` | `gemma4:e4b` | Ollama model for entity/edge extraction. |
 | `EMBEDDING_MODEL` | `built-in` | `built-in` (Snowflake Arctic xs, 384-dim, in-process) or `ollama` (2560-dim, requires Ollama). |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL. |
@@ -116,7 +116,7 @@ See `.env.example` for a copy-paste template.
 
 ## Storage Backends
 
-- **LadybugDB** (default) — embedded graph DB at `.ladybug/`, no setup required.
+- **LadybugDB** (default) — embedded graph DB at `~/.kb/ladybug/`, no setup required.
 - **Neo4j** (opt-in) — remote Neo4j 5.x with vector indexes, activated by `NEO4J_URI`.
 
 Both implementations satisfy the full `GraphProvider` interface (`src/lib/graph-provider.ts`); pick by setting environment variables, not flags.

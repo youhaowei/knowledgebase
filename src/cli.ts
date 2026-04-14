@@ -7,6 +7,11 @@
  * Interactive: bun run kb (no args or -i)
  */
 
+// Static package.json import for --version — kept at module scope so the
+// flag short-circuit below doesn't have to pay a dynamic-import round trip.
+// Review pass 7 finding #12.
+import pkg from "../package.json" with { type: "json" };
+
 export {};
 
 // --- Arg parsing (before any imports that trigger Graph init) ---
@@ -46,6 +51,26 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 const initialArgs = parseArgs(process.argv.slice(2));
 const envName = initialArgs.flags["--env"];
+
+// --- Fast-path short-circuits (run BEFORE dynamic imports) ---
+//
+// Review pass 7 finding #12: `--help` / `-h` / `--version` / `-v` need to
+// exit before loading operations.ts, analytics.ts, hybrid-search.ts — which
+// transitively pull the extractor, embedder, ladybug types, and zod. Without
+// this, `kb --version` paid hundreds of ms of cold-start for a 10-byte
+// answer, and threatened the <100ms goal for `kb add` too.
+//
+// `showHelp` is a hoisted function declaration further down in this file;
+// it reads only a template literal, so it's safe to call before the env
+// block and dynamic imports run.
+if (initialArgs.flags["--help"] === "true" || initialArgs.flags["-h"] === "true") {
+  showHelp();
+  process.exit(0);
+}
+if (initialArgs.flags["--version"] === "true" || initialArgs.flags["-v"] === "true") {
+  console.log((pkg as { version?: string }).version ?? "0.0.0");
+  process.exit(0);
+}
 
 // Set env BEFORE importing modules that create Graph singletons.
 // Only fill gaps — if the caller (a test harness, a sandboxed child, a
@@ -382,7 +407,7 @@ Flags:
 
 Environment:
   KB_MEMORY_PATH                Memory directory (default: ~/.kb/memories)
-  LADYBUG_DATA_PATH             LadybugDB data directory (default: ./.ladybug)
+  LADYBUG_DATA_PATH             LadybugDB data directory (default: ~/.kb/ladybug)
   EXTRACTION_MODEL              Ollama extraction model (default: gemma4:e4b)
   EMBEDDING_MODEL               Embedder choice: "built-in" (default) or "ollama"
   OLLAMA_URL                    Ollama server URL (default: http://localhost:11434)
@@ -477,18 +502,9 @@ async function repl() {
 const ctx = ctxFrom(initialArgs);
 
 try {
-  // --help / -h / --version / -v must short-circuit BEFORE the REPL fallback.
-  // Without this, `kb --help` or `kb --version` (no positional command) silently
-  // drops into interactive mode and confuses anyone discovering the CLI.
-  if (initialArgs.flags["--help"] === "true" || initialArgs.flags["-h"] === "true") {
-    showHelp();
-    process.exit(0);
-  }
-  if (initialArgs.flags["--version"] === "true" || initialArgs.flags["-v"] === "true") {
-    const pkg = (await import("../package.json", { with: { type: "json" } })).default as unknown as { version?: string };
-    console.log(pkg.version ?? "0.0.0");
-    process.exit(0);
-  }
+  // Note: --help / -h / --version / -v are handled at top of file before the
+  // dynamic imports (review pass 7 finding #12). Anything reaching here is a
+  // real command or an interactive-mode invocation.
   if (!ctx.positional[0] || initialArgs.flags["-i"] === "true") {
     await repl();
   } else {

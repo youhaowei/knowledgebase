@@ -129,8 +129,13 @@ async function handleMcpRequest(request: Request): Promise<Response> {
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
     enableJsonResponse: true,
+    // Register the session with `inFlight: 1` — the initialization POST is
+    // still in flight when this fires (review pass 7 finding #5). Without
+    // the opening count, a long-running tool call on the creation request
+    // could be evicted by a concurrent new-session POST's prune sweep.
+    // The matching decrement lives in the finally below.
     onsessioninitialized: (sessionId) => {
-      sessions.set(sessionId, { transport, server: mcpServer, lastActivityMs: Date.now(), inFlight: 0 });
+      sessions.set(sessionId, { transport, server: mcpServer, lastActivityMs: Date.now(), inFlight: 1 });
     },
   });
 
@@ -141,7 +146,18 @@ async function handleMcpRequest(request: Request): Promise<Response> {
   };
 
   await mcpServer.connect(transport);
-  return withCors(await transport.handleRequest(request));
+  try {
+    return withCors(await transport.handleRequest(request));
+  } finally {
+    // Matched with the `inFlight: 1` in onsessioninitialized. If the session
+    // was never registered (handshake error before `onsessioninitialized`
+    // fired), there's nothing to decrement.
+    const created = transport.sessionId ? sessions.get(transport.sessionId) : undefined;
+    if (created) {
+      created.inFlight -= 1;
+      created.lastActivityMs = Date.now();
+    }
+  }
 }
 
 export const Route = createFileRoute("/mcp")({
