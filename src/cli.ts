@@ -10,8 +10,12 @@
 // Static package.json import for --version — kept at module scope so the
 // flag short-circuit below doesn't have to pay a dynamic-import round trip.
 // Review pass 7 finding #12.
+//
+// Do NOT add static imports of `@/types`, `./lib/operations`, `./lib/extractor`,
+// `./lib/embedder`, `./lib/hybrid-search`, or any module that pulls zod — those
+// must stay behind the `await import` block below. `test/cli.test.ts` enforces
+// this with a static-import firewall; round 9 caught a Theme-A regression here.
 import pkg from "../package.json" with { type: "json" };
-import { namespaceSchema } from "@/types.js";
 
 export {};
 
@@ -103,10 +107,12 @@ function ctxFrom(args: ParsedArgs, defaults?: Partial<ParsedArgs>): CmdContext {
   // Spec Decision #3: namespaces are hard isolation boundaries. Normalize at
   // every entry point — not just server/functions — so blank/whitespace input
   // from CLI can't create a `"   "` directory on disk that web-side reads
-  // (which DO normalize) will never find. fdb6591 covered the HTTP boundary;
-  // this closes the CLI gap flagged in round 8 as Theme A.
+  // (which DO normalize) will never find. Inlined rather than sharing
+  // `namespaceSchema` from @/types, because that would pull zod into the
+  // `--help` / `--version` fast path (round 9 regression).
   const raw = args.flags["--namespace"] ?? defaults?.flags?.["--namespace"];
-  const ns = namespaceSchema.parse(raw);
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  const ns = trimmed === "" ? "default" : trimmed;
   return {
     positional: args.positional,
     flags: args.flags,

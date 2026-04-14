@@ -88,6 +88,39 @@ describe("CLI arg parsing and help", () => {
     expect(stdout).toMatch(/^\d+\.\d+\.\d+/);
   });
 
+  // Round 9 Theme A regression catch: Spec US-1 (<100ms CLI) requires that the
+  // `--help` / `--version` short-circuit runs BEFORE any static import that
+  // pulls zod / operations / extractor / embedder. Exit-code + stdout checks
+  // above do NOT catch a static import creep — a slow implementation that
+  // pays zod init before printing help satisfies them identically. This
+  // static-import firewall scans cli.ts source up to the `await import(` block
+  // and fails if any forbidden module is imported at module scope.
+  test("US-1 fast path: cli.ts static-import section contains no heavy modules", async () => {
+    const { readFileSync } = await import("fs");
+    const source = readFileSync(join(import.meta.dir, "..", "src", "cli.ts"), "utf-8");
+    const dynamicImportStart = source.indexOf("await import(");
+    expect(dynamicImportStart).toBeGreaterThan(-1);
+    const staticSection = source.slice(0, dynamicImportStart);
+    // Match `import ... from "<module>"` via matchAll. Comments in the source
+    // that mention module names don't match because they lack the `import`
+    // keyword — no comment-stripping step required.
+    const importRe = /\bimport\b[^;]*?\bfrom\s+["']([^"']+)["']/g;
+    const staticImports = Array.from(staticSection.matchAll(importRe), (match) => match[1]!);
+    const forbiddenExact = new Set(["zod", "@/types", "@/types.js"]);
+    const forbiddenSuffixes = [
+      "/operations", "/operations.js",
+      "/extractor", "/extractor.js",
+      "/embedder", "/embedder.js",
+      "/hybrid-search", "/hybrid-search.js",
+    ];
+    for (const spec of staticImports) {
+      expect({ spec, forbidden: forbiddenExact.has(spec) }).toEqual({ spec, forbidden: false });
+      for (const suffix of forbiddenSuffixes) {
+        expect({ spec, suffix, hit: spec.endsWith(suffix) }).toEqual({ spec, suffix, hit: false });
+      }
+    }
+  });
+
   test("errors on unknown command", async () => {
     const { stderr, exitCode } = await run("unknown-cmd");
     expect(exitCode).not.toBe(0);
