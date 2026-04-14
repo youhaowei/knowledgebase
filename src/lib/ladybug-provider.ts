@@ -150,16 +150,16 @@ export class LadybugProvider implements GraphProvider {
   }
 
   private escapeFtsQuery(query: string): string {
-    // LadybugDB FTS has strict syntax - remove problematic characters
+    // Strict allowlist instead of blacklist sanitization. Earlier versions
+    // stripped a small set of operators ('"\&|!()) but missed colons,
+    // newlines, unicode quote variants, and any future LadybugDB FTS syntax
+    // additions. Allow alphanumerics, common whitespace, and a few safe
+    // punctuation marks; everything else becomes a space so a benign query
+    // like "what's new?" still returns "what s new" tokens.
     return query
-      .replace(/'/g, "")
-      .replace(/"/g, "")
-      .replace(/\\/g, "")
-      .replace(/&/g, " ")
-      .replace(/\|/g, " ")
-      .replace(/!/g, " ")
-      .replace(/\(/g, " ")
-      .replace(/\)/g, " ");
+      .replace(/[^A-Za-z0-9_\-\s.,?]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   private async tryQuery(query: string): Promise<void> {
@@ -642,10 +642,12 @@ export class LadybugProvider implements GraphProvider {
   ): Promise<Memory[]> {
     const overfetchLimit = limit * 3;
     const conditions: string[] = ["node.deletedAt = ''"];
+    const params: Record<string, unknown> = {};
     if (filter?.namespace === null) {
       conditions.push("node.namespace = ''");
     } else if (filter?.namespace !== undefined) {
-      conditions.push(`node.namespace = '${filter.namespace}'`);
+      conditions.push("node.namespace = $namespace");
+      params.namespace = filter.namespace;
     }
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
@@ -653,7 +655,7 @@ export class LadybugProvider implements GraphProvider {
     const activeDim = getActiveDimension();
     const dimInfo = activeDim ? this.dimensionRegistry.get(activeDim) : undefined;
     const indexName = dimInfo?.memoryIndex ?? "memory_vec_idx";
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `CALL QUERY_VECTOR_INDEX('Memory', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
        ${whereClause}
@@ -661,6 +663,7 @@ export class LadybugProvider implements GraphProvider {
               node.category as category, node.namespace as namespace, node.status as status,
               node.error as error, node.createdAt as createdAt, distance
        ORDER BY distance ASC`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -687,10 +690,12 @@ export class LadybugProvider implements GraphProvider {
   ): Promise<StoredEdge[]> {
     const overfetchLimit = limit * 3;
     const conditions: string[] = ["node.deletedAt = ''"];
+    const params: Record<string, unknown> = { limit };
     if (filter?.namespace === null) {
       conditions.push("node.namespace = ''");
     } else if (filter?.namespace !== undefined) {
-      conditions.push(`node.namespace = '${filter.namespace}'`);
+      conditions.push("node.namespace = $namespace");
+      params.namespace = filter.namespace;
     }
     if (!filter?.includeInvalidated) {
       conditions.push("node.invalidAt = ''");
@@ -701,7 +706,7 @@ export class LadybugProvider implements GraphProvider {
     const activeDim = getActiveDimension();
     const dimInfo = activeDim ? this.dimensionRegistry.get(activeDim) : undefined;
     const indexName = dimInfo?.factIndex ?? "fact_vec_idx";
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `CALL QUERY_VECTOR_INDEX('Fact', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
        ${whereClause}
@@ -713,7 +718,8 @@ export class LadybugProvider implements GraphProvider {
               node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
               node.invalidAt as invalidAt, node.createdAt as createdAt, distance
        ORDER BY distance ASC
-       LIMIT ${limit}`,
+       LIMIT $limit`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -726,10 +732,12 @@ export class LadybugProvider implements GraphProvider {
     filter?: EdgeFilter,
   ): Promise<StoredEdge[]> {
     const conditions: string[] = ["node.deletedAt = ''"];
+    const params: Record<string, unknown> = { limit };
     if (filter?.namespace === null) {
       conditions.push("node.namespace = ''");
     } else if (filter?.namespace !== undefined) {
-      conditions.push(`node.namespace = '${filter.namespace}'`);
+      conditions.push("node.namespace = $namespace");
+      params.namespace = filter.namespace;
     }
     if (!filter?.includeInvalidated) {
       conditions.push("node.invalidAt = ''");
@@ -738,7 +746,7 @@ export class LadybugProvider implements GraphProvider {
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
     const escapedQuery = this.escapeFtsQuery(query);
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `CALL QUERY_FTS_INDEX('Fact', 'fact_fts_idx', '${escapedQuery}', top := ${limit * 3})
        WITH node, score
        ${whereClause}
@@ -750,7 +758,8 @@ export class LadybugProvider implements GraphProvider {
               node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
               node.invalidAt as invalidAt, node.createdAt as createdAt, score
        ORDER BY score DESC
-       LIMIT ${limit}`,
+       LIMIT $limit`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -1243,31 +1252,36 @@ export class LadybugProvider implements GraphProvider {
     const memConditions = ["m.deletedAt = ''"];
     const entityConditions = ["e.deletedAt = ''"];
     const edgeConditions = ["source.deletedAt = ''", "target.deletedAt = ''"];
+    const params: Record<string, unknown> = {};
 
     if (namespace) {
-      memConditions.push(`m.namespace = '${namespace}'`);
-      entityConditions.push(`e.namespace = '${namespace}'`);
-      edgeConditions.push(`source.namespace = '${namespace}'`);
+      memConditions.push("m.namespace = $namespace");
+      entityConditions.push("e.namespace = $namespace");
+      edgeConditions.push("source.namespace = $namespace");
+      params.namespace = namespace;
     }
 
     const memWhere = `WHERE ${memConditions.join(" AND ")}`;
     const entityWhere = `WHERE ${entityConditions.join(" AND ")}`;
     const edgeWhere = `WHERE ${edgeConditions.join(" AND ")}`;
 
-    const memResult = await this.conn.query(
+    const memResult = await this.executeQuery(
       `MATCH (m:Memory) ${memWhere} RETURN count(m) as count`,
+      params,
     );
     const memRows = await memResult.getAll();
     const memories = Number(memRows[0]?.count ?? 0);
 
-    const entityResult = await this.conn.query(
+    const entityResult = await this.executeQuery(
       `MATCH (e:Entity) ${entityWhere} RETURN count(e) as count`,
+      params,
     );
     const entityRows = await entityResult.getAll();
     const entities = Number(entityRows[0]?.count ?? 0);
 
-    const edgeResult = await this.conn.query(
+    const edgeResult = await this.executeQuery(
       `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity) ${edgeWhere} RETURN count(r) as count`,
+      params,
     );
     const edgeRows = await edgeResult.getAll();
     const edges = Number(edgeRows[0]?.count ?? 0);
@@ -1300,13 +1314,18 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async getGraphData(namespace?: string): Promise<GraphData> {
-    const nsFilter = namespace ? `AND e.namespace = '${namespace}'` : "";
-    const entityResult = await this.conn.query(
+    const params: Record<string, unknown> = {};
+    const entityNsFilter = namespace ? "AND e.namespace = $namespace" : "";
+    const relNsFilter = namespace ? "AND s.namespace = $namespace" : "";
+    if (namespace) params.namespace = namespace;
+
+    const entityResult = await this.executeQuery(
       `MATCH (e:Entity)
-       WHERE e.deletedAt = '' ${nsFilter}
+       WHERE e.deletedAt = '' ${entityNsFilter}
        RETURN e.uuid as id, e.name as name, e.type as type,
               e.namespace as namespace, e.description as description, e.summary as summary
        ORDER BY e.name`,
+      params,
     );
     const entityRows = await entityResult.getAll();
     const nodes = entityRows.map((r) => ({
@@ -1320,14 +1339,15 @@ export class LadybugProvider implements GraphProvider {
 
     const nodeNames = new Set(nodes.map((n) => n.name));
 
-    const relResult = await this.conn.query(
+    const relResult = await this.executeQuery(
       `MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
-       WHERE (r.invalidAt IS NULL OR r.invalidAt = '') ${nsFilter.replace("e.", "s.")}
+       WHERE (r.invalidAt IS NULL OR r.invalidAt = '') ${relNsFilter}
        RETURN s.name as source, t.name as target,
               r.relationType as relationType, r.fact as fact,
               r.sentiment as sentiment, r.confidence as confidence,
               r.id as edgeId
        ORDER BY s.name, t.name`,
+      params,
     );
     const relRows = await relResult.getAll();
     const links = relRows

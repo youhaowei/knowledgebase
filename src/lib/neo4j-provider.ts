@@ -1107,8 +1107,12 @@ export class Neo4jProvider implements GraphProvider {
         params.uuid = filter.uuid;
       }
       if (filter.name) {
-        conditions.push("e.name =~ $namePattern");
-        params.namePattern = `(?i).*${filter.name}.*`;
+        // Literal substring match (parity with LadybugProvider) — the previous
+        // `=~ '(?i).*${name}.*'` regex match was a regex-injection / ReDoS
+        // vector and produced backend-dependent semantics for names with
+        // metachars (`.`, `+`, `?`, `[`).
+        conditions.push("toLower(e.name) CONTAINS toLower($name)");
+        params.name = filter.name;
       }
       if (filter.namespace === null) {
         conditions.push("e.namespace IS NULL");
@@ -1261,8 +1265,9 @@ export class Neo4jProvider implements GraphProvider {
         params.id = filter.id;
       }
       if (filter.name) {
-        conditions.push("m.name =~ $namePattern");
-        params.namePattern = `(?i).*${filter.name}.*`;
+        // Literal substring match for parity with LadybugProvider (no regex DoS).
+        conditions.push("toLower(m.name) CONTAINS toLower($name)");
+        params.name = filter.name;
       }
       if (filter.namespace === null) {
         conditions.push("m.namespace IS NULL");
