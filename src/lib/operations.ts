@@ -15,7 +15,7 @@ import { Queue } from "./queue.js";
 import { embedWithDimension, isZeroEmbedding } from "./embedder.js";
 import { randomUUID } from "crypto";
 import { join } from "path";
-import { utimesSync } from "fs";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "fs";
 import type { Memory, StoredEntity, StoredEdge, Intent } from "../types.js";
 import type { GraphData } from "./graph-provider.js";
 import { classifyIntent, boostEdgesByIntent } from "./intents.js";
@@ -245,6 +245,59 @@ async function addMemoryLocked(
   });
 }
 
+/**
+ * Thrown by `withGraphRequired` when a graph-dependent write can't run because
+ * the provider is unavailable. Writes have no safe filesystem fallback (edge
+ * merges, duplicate cleanup, re-extraction all mutate the graph); callers
+ * handle this error to render an actionable UI banner instead of crashing.
+ */
+export class ProviderUnavailableError extends Error {
+  constructor(public operation: string, public cause: unknown) {
+    super(`Graph provider unavailable for ${operation}: ${String(cause)}`);
+    this.name = "ProviderUnavailableError";
+  }
+}
+
+/**
+ * Run a graph-dependent read with an explicit fallback for degraded mode.
+ * Callers provide the fallback value (or a thunk) — the shape is caller-owned
+ * so each API can surface `{ degraded: true, ...fs-derived data }` or similar.
+ *
+ * Review pass 7 finding #3: `server/functions.ts` browse APIs were calling
+ * `getProvider()` with no try/catch, so a down graph crashed the web UI.
+ * Ladybug / server/functions both route through this helper now; ops-layer
+ * callers still open-code the pattern pending a follow-up consolidation.
+ */
+export async function withGraphFallback<T>(
+  operation: string,
+  fn: (gp: GraphProvider) => Promise<T>,
+  fallback: T | (() => T | Promise<T>),
+): Promise<T> {
+  try {
+    const gp = await getProvider();
+    return await fn(gp);
+  } catch (err) {
+    console.error(`[kb] ${operation}: graph unavailable, degrading —`, err);
+    return typeof fallback === "function"
+      ? await (fallback as () => T | Promise<T>)()
+      : fallback;
+  }
+}
+
+/** Same shape as `withGraphFallback`, but writes throw `ProviderUnavailableError`. */
+export async function withGraphRequired<T>(
+  operation: string,
+  fn: (gp: GraphProvider) => Promise<T>,
+): Promise<T> {
+  let gp: GraphProvider;
+  try {
+    gp = await getProvider();
+  } catch (err) {
+    throw new ProviderUnavailableError(operation, err);
+  }
+  return fn(gp);
+}
+
 /** Shared provider singleton. Exported for modules that need direct provider access. */
 export async function getProvider() {
   // Inside the cooldown window, fail fast with the same shape the original
@@ -349,6 +402,104 @@ async function queueUnindexedFilesForNamespace(
   }
 
   return queued;
+}
+
+/**
+ * Apply-then-truncate drain of `{ns}/_tombstones.jsonl` and
+ * `{ns}/_forget_edges.jsonl`, consuming intent records the CLI wrote during
+ * degraded mode (Spec Decision #11). The reconciler runs this after indexing
+ * fresh files so forgotten content stops showing up in graph-backed views.
+ *
+ * Review pass 7 finding #10: without this drain, `kb forget` tombstoned the
+ * file but the graph entry never got cleaned up — `getEntity`, `listEdges`,
+ * `getGraphData` would keep rendering ghost data indefinitely. Honest
+ * tombstone messaging ("will apply on next sweep") was meaningless because
+ * the sweep never drained.
+ *
+ * Holds the per-namespace lock for the duration of each namespace's drain so
+ * we can safely `writeFileSync(path, "")` after apply — no concurrent writer
+ * can append between our read and truncate.
+ */
+export async function drainTombstones(): Promise<{ memoriesForgotten: number; edgesForgotten: number }> {
+  let gp: GraphProvider;
+  try {
+    gp = await getProvider();
+  } catch (err) {
+    // Graph unavailable — drain is a no-op this cycle. Records stay in the
+    // logs and the next sweep re-tries. No state is lost.
+    console.error("[kb] Tombstone drain skipped: graph unavailable —", err);
+    return { memoriesForgotten: 0, edgesForgotten: 0 };
+  }
+
+  let memoriesForgotten = 0;
+  let edgesForgotten = 0;
+  for (const ns of listNamespaceDirs()) {
+    await withNamespaceLock(ns, async () => {
+      memoriesForgotten += await drainMemoryTombstones(gp, ns);
+      edgesForgotten += await drainEdgeTombstones(gp, ns);
+    });
+  }
+  return { memoriesForgotten, edgesForgotten };
+}
+
+async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Promise<number> {
+  const logPath = join(resolveNamespacePath(namespace), "_tombstones.jsonl");
+  if (!existsSync(logPath)) return 0;
+  const content = readFileSync(logPath, "utf8");
+  if (!content.trim()) return 0;
+
+  let applied = 0;
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const rec = JSON.parse(trimmed) as { id?: string; name?: string; reason?: string };
+      // `gp.forget(name, namespace)` is the documented soft-delete entry on
+      // the provider. Records without a name (schema drift, manual edit) are
+      // skipped with a log — truncating them at the end still clears the log,
+      // but losing a malformed record beats keeping it forever.
+      if (rec.name) {
+        await gp.forget(rec.name, namespace);
+        applied++;
+      } else {
+        console.error(`[kb] Tombstone record missing 'name', skipping:`, trimmed);
+      }
+    } catch (err) {
+      console.error(`[kb] Failed to apply tombstone:`, trimmed, err);
+    }
+  }
+
+  // Truncate after apply. The namespace lock held by drainTombstones
+  // guarantees no writer appended between our read and here.
+  writeFileSync(logPath, "");
+  return applied;
+}
+
+async function drainEdgeTombstones(gp: GraphProvider, namespace: string): Promise<number> {
+  const logPath = join(resolveNamespacePath(namespace), "_forget_edges.jsonl");
+  if (!existsSync(logPath)) return 0;
+  const content = readFileSync(logPath, "utf8");
+  if (!content.trim()) return 0;
+
+  let applied = 0;
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const rec = JSON.parse(trimmed) as { edgeId?: string; reason?: string };
+      if (rec.edgeId) {
+        await gp.forgetEdge(rec.edgeId, rec.reason ?? "tombstone-drain", namespace);
+        applied++;
+      } else {
+        console.error(`[kb] Edge-forget record missing 'edgeId', skipping:`, trimmed);
+      }
+    } catch (err) {
+      console.error(`[kb] Failed to apply edge forget:`, trimmed, err);
+    }
+  }
+
+  writeFileSync(logPath, "");
+  return applied;
 }
 
 export async function processUnindexedMemories(

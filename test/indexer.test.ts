@@ -27,6 +27,9 @@ describe("Decision #6: ensureServerIndexerStarted — single reconciliation loop
         sweeps += 1;
         return 0;
       },
+      // Review pass 7 finding #10 added a tombstone drain to the sweep; tests
+      // mock it to a no-op so they don't depend on a real graph provider.
+      drainTombstones: async () => ({ memoriesForgotten: 0, edgesForgotten: 0 }),
       setInterval: (() => {
         intervals += 1;
         return fakeTimer;
@@ -55,6 +58,7 @@ describe("Decision #6: ensureServerIndexerStarted — single reconciliation loop
         });
         return 0;
       },
+      drainTombstones: async () => ({ memoriesForgotten: 0, edgesForgotten: 0 }),
       setInterval: ((callback: TimerHandler) => {
         intervalCallback = callback as () => void;
         return fakeTimer;
@@ -75,5 +79,26 @@ describe("Decision #6: ensureServerIndexerStarted — single reconciliation loop
     await Bun.sleep(0);
 
     expect(sweeps).toBe(2);
+  });
+
+  test("Review pass 7 #10: sweep drains tombstones after unindexed processing", async () => {
+    let drains = 0;
+
+    configureIndexerDependenciesForTests({
+      processUnindexedMemories: async () => 0,
+      drainTombstones: async () => {
+        drains += 1;
+        // Returning non-zero exercises the "drained N" log path in runSweep.
+        return { memoriesForgotten: 2, edgesForgotten: 1 };
+      },
+      setInterval: (() => ({ unref() {} } as ReturnType<typeof setInterval>)) as typeof setInterval,
+    });
+
+    ensureServerIndexerStarted();
+    // Let the boot-time sweep resolve (process + drain).
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+
+    expect(drains).toBe(1);
   });
 });

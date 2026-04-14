@@ -1,4 +1,4 @@
-import { processUnindexedMemories } from "../lib/operations.js";
+import { drainTombstones, processUnindexedMemories } from "../lib/operations.js";
 
 const RECONCILIATION_INTERVAL_MS = 60_000;
 
@@ -7,6 +7,7 @@ const KEY = Symbol.for("kb:indexer");
 type IndexerState = { started: boolean; timer: ReturnType<typeof setInterval> | null; sweep: Promise<void> | null };
 const defaultIndexerDependencies = {
   processUnindexedMemories,
+  drainTombstones,
   setInterval: globalThis.setInterval,
   clearInterval: globalThis.clearInterval,
 };
@@ -33,6 +34,21 @@ async function runSweep(): Promise<void> {
       const queued = await indexerDependencies.processUnindexedMemories();
       if (queued > 0) {
         console.error(`[kb] Catch-up queued ${queued} unindexed memories`);
+      }
+
+      // Drain _tombstones.jsonl / _forget_edges.jsonl per Spec Decision #11.
+      // Review pass 7 finding #10: without this, CLI `forget` / `forgetEdge`
+      // wrote tombstones that the reconciler never consumed, so deleted
+      // memories kept appearing in graph-backed views indefinitely.
+      try {
+        const { memoriesForgotten, edgesForgotten } = await indexerDependencies.drainTombstones();
+        if (memoriesForgotten > 0 || edgesForgotten > 0) {
+          console.error(`[kb] Drained tombstones: ${memoriesForgotten} memories, ${edgesForgotten} edges`);
+        }
+      } catch (error) {
+        // Drain failure should not abort the unindexed-queue logic that ran
+        // first — the two are independent state-reconciliation paths.
+        console.error("[kb] Tombstone drain failed:", error);
       }
     } catch (error) {
       console.error("[kb] Catch-up sweep failed:", error);
@@ -75,6 +91,8 @@ export function configureIndexerDependenciesForTests(
 ): void {
   indexerDependencies.processUnindexedMemories = overrides.processUnindexedMemories
     ?? defaultIndexerDependencies.processUnindexedMemories;
+  indexerDependencies.drainTombstones = overrides.drainTombstones
+    ?? defaultIndexerDependencies.drainTombstones;
   indexerDependencies.setInterval = overrides.setInterval
     ?? defaultIndexerDependencies.setInterval;
   indexerDependencies.clearInterval = overrides.clearInterval
