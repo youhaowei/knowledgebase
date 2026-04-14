@@ -10,7 +10,7 @@ import {
   writeFileSync,
   utimesSync,
 } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 
@@ -617,6 +617,17 @@ describe("resolveNamespacePath", () => {
   test("accepts valid namespace names", () => {
     const path = resolveNamespacePath("default");
     expect(path).toContain("default");
+  });
+
+  test("falls back to the default root when KB_MEMORY_PATH is blank", () => {
+    const previous = process.env.KB_MEMORY_PATH;
+    process.env.KB_MEMORY_PATH = "   ";
+    try {
+      expect(resolveNamespacePath("default")).toBe(join(homedir(), ".kb", "memories", "default"));
+    } finally {
+      if (previous === undefined) delete process.env.KB_MEMORY_PATH;
+      else process.env.KB_MEMORY_PATH = previous;
+    }
   });
 });
 

@@ -14,6 +14,7 @@ import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 import { ensureServerIndexerStarted } from "./indexer.js";
 import { withNamespaceLock, listMemoryFiles, listNamespaceDirs, readMemoryFile } from "../lib/fs-memory.js";
+import { namespaceSchema, optionalNamespaceSchema } from "../types.js";
 import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity, Memory } from "../types.js";
 
 if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
@@ -25,7 +26,7 @@ if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
 // ============================================================================
 
 const namespaceFilterSchema = z.object({
-  namespace: z.string().optional(),
+  namespace: optionalNamespaceSchema,
 });
 
 export const getGraphData = createServerFn()
@@ -67,7 +68,7 @@ export const listNamespaces = createServerFn().handler(async () => {
 const searchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().max(100).default(10),
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
 });
 
 export const searchMemories = createServerFn()
@@ -113,7 +114,7 @@ export const searchMemories = createServerFn()
 
 const getMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
 });
 
 export const getMemory = createServerFn()
@@ -181,7 +182,7 @@ export const getQueueStatus = createServerFn().handler(async () => {
 const addMemorySchema = z.object({
   text: z.string().min(1, "Text is required"),
   name: z.string().optional(),
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
   origin: z.enum(["manual", "retro", "mcp", "import"]).default("manual"),
   tags: z.array(z.string()).default([]),
 });
@@ -201,7 +202,7 @@ export const addMemory = createServerFn({ method: "POST" })
 
 const forgetMemorySchema = z.object({
   name: z.string().min(1, "Name is required"),
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
 });
 
 export const forgetMemory = createServerFn({ method: "POST" })
@@ -222,7 +223,7 @@ export const forgetMemory = createServerFn({ method: "POST" })
 const forgetEdgeSchema = z.object({
   edgeId: z.string().min(1, "Edge ID is required"),
   reason: z.string().min(1, "Reason is required for audit trail"),
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
 });
 
 export const forgetEdge = createServerFn({ method: "POST" })
@@ -516,7 +517,7 @@ const askLLMSchema = z.object({
   // also defaults to "default" internally, but relying on that default at
   // both layers made it easy to miss that this endpoint never considered
   // non-default namespaces.
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
 });
 
 export const askLLM = createServerFn()
@@ -565,7 +566,7 @@ Instructions:
 const listMemoriesSchema = z.object({
   offset: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(100).default(30),
-  namespace: z.string().optional(),
+  namespace: optionalNamespaceSchema,
   category: z.enum(["preference", "event", "pattern", "general"]).optional(),
   sortBy: z.enum(["createdAt", "name"]).default("createdAt"),
   sortDir: z.enum(["asc", "desc"]).default("desc"),
@@ -669,7 +670,7 @@ export const listMemories = createServerFn()
 const listEntitiesSchema = z.object({
   offset: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(100).default(30),
-  namespace: z.string().optional(),
+  namespace: optionalNamespaceSchema,
   type: z.enum(["person", "organization", "project", "technology", "concept"]).optional(),
   sortBy: z.enum(["createdAt", "name"]).default("name"),
   sortDir: z.enum(["asc", "desc"]).default("asc"),
@@ -710,7 +711,7 @@ export const listEntities = createServerFn()
 const listEdgesSchema = z.object({
   offset: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(100).default(30),
-  namespace: z.string().optional(),
+  namespace: optionalNamespaceSchema,
   relationType: z.string().optional(),
   includeInvalidated: z.boolean().default(false),
   sortBy: z.enum(["createdAt", "name"]).default("createdAt"),
@@ -750,7 +751,7 @@ export const listEdges = createServerFn()
 
 const getEntitySchema = z.object({
   name: z.string().min(1, "Name is required"),
-  namespace: z.string().optional(),
+  namespace: optionalNamespaceSchema,
 });
 
 export const getEntity = createServerFn()
@@ -803,7 +804,7 @@ export const getEntity = createServerFn()
 const streamingSearchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),
-  namespace: z.string().default("default"),
+  namespace: namespaceSchema,
 });
 
 export const streamingSearch = createServerFn()

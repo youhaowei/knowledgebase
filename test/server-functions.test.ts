@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { writeMemoryFile, type MemoryFrontmatter } from "../src/lib/fs-memory.js";
+import { namespaceSchema, optionalNamespaceSchema } from "../src/types.js";
 
 // Isolate this file's KB root / ladybug path / analytics DB from sibling test
 // files that share the bun process and set env at module scope (same pattern
@@ -332,5 +333,28 @@ describe("listMemories degraded fallback", () => {
     expect(page.items).toHaveLength(1);
     expect(page.items[0]?.id).toBe(ids[1]);
     expect(page.items.every((item) => item.category === "general")).toBe(true);
+  });
+});
+
+describe("centralized namespace parsing", () => {
+  test("maps blank scoped namespace inputs to default", () => {
+    expect(namespaceSchema.parse("")).toBe("default");
+    expect(namespaceSchema.parse("  default  ")).toBe("default");
+  });
+
+  test("maps blank optional namespace inputs to undefined for all-namespace routes", () => {
+    expect(optionalNamespaceSchema.parse("")).toBeUndefined();
+    expect(optionalNamespaceSchema.parse("  ")).toBeUndefined();
+    expect(optionalNamespaceSchema.parse(" work ")).toBe("work");
+  });
+
+  test("server functions import the centralized namespace schemas", () => {
+    const functionsSrc = readFileSync(
+      join(import.meta.dir, "..", "src", "server", "functions.ts"),
+      "utf-8",
+    );
+    expect(functionsSrc).toContain("import { namespaceSchema, optionalNamespaceSchema } from \"../types.js\";");
+    expect(functionsSrc).toContain("namespace: namespaceSchema");
+    expect(functionsSrc).toContain("namespace: optionalNamespaceSchema");
   });
 });

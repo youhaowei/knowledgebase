@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+function normalizeNamespaceInput(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+export const namespaceSchema = z.preprocess(
+  normalizeNamespaceInput,
+  z.string().default("default"),
+);
+
+export const optionalNamespaceSchema = z.preprocess(
+  normalizeNamespaceInput,
+  z.string().optional(),
+);
+
 // =============================================================================
 // ENTITY TYPES
 // =============================================================================
