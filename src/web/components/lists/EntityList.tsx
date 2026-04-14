@@ -21,7 +21,7 @@ interface ListEntitiesParams {
   sortDir: "asc" | "desc";
 }
 
-type EntityListResponse = { items: StoredEntity[]; total: number };
+type EntityListResponse = { items: StoredEntity[]; total: number; hasMore?: boolean };
 
 const TYPE_COLORS: Record<string, "primary" | "info" | "secondary" | "warning" | "danger"> = {
   person: "primary",

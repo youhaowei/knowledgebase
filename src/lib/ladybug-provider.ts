@@ -944,6 +944,47 @@ export class LadybugProvider implements GraphProvider {
     return { deletedMemory, deletedEntity };
   }
 
+  async forgetMemoryById(id: string, namespace = "default"): Promise<boolean> {
+    const now = new Date().toISOString();
+    const memResult = await this.executeQuery(
+      `MATCH (m:Memory {id: $id, namespace: $namespace, deletedAt: ''})
+       SET m.deletedAt = $now
+       RETURN count(m) as deleted`,
+      { id, namespace, now },
+    );
+    const memRows = await memResult.getAll();
+    const deletedMemory = ((memRows[0]?.deleted as number) ?? 0) > 0;
+    if (!deletedMemory) return false;
+
+    // Facts may be supported by multiple episodes. Remove just this memory's
+    // episode; only tombstone the fact when no support remains.
+    const factResult = await this.executeQuery(
+      `MATCH (f:Fact {deletedAt: ''})
+       WHERE $memoryId IN f.episodes
+       RETURN f.id as id, f.episodes as episodes`,
+      { memoryId: id },
+    );
+    const factRows = await factResult.getAll();
+    for (const row of factRows) {
+      const episodes = ((row.episodes as string[]) ?? []).filter((episodeId) => episodeId !== id);
+      if (episodes.length > 0) {
+        await this.executeQuery(
+          `MATCH (f:Fact {id: $factId, deletedAt: ''})
+           SET f.episodes = $episodes`,
+          { factId: row.id, episodes },
+        );
+      } else {
+        await this.executeQuery(
+          `MATCH (f:Fact {id: $factId, deletedAt: ''})
+           SET f.deletedAt = $now`,
+          { factId: row.id, now },
+        );
+      }
+    }
+
+    return true;
+  }
+
   async forgetEdge(
     edgeId: string,
     reason: string,

@@ -2,6 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { randomUUID } from "crypto";
+import { writeMemoryFile, type MemoryFrontmatter } from "../src/lib/fs-memory.js";
 
 // Isolate this file's KB root / ladybug path / analytics DB from sibling test
 // files that share the bun process and set env at module scope (same pattern
@@ -15,6 +17,19 @@ process.env.LADYBUG_DATA_PATH = join(tempDir, "ladybug");
 process.env.KB_DISABLE_SERVER_INDEXER = "true";
 
 const ops = await import("../src/lib/operations.js");
+const { listMemoriesDegradedFallback } = await import("../src/server/functions.js");
+
+function makeFrontmatter(overrides: Partial<MemoryFrontmatter> = {}): MemoryFrontmatter {
+  return {
+    id: randomUUID(),
+    name: "Test Memory",
+    origin: "manual",
+    namespace: "default",
+    tags: [],
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
 
 /**
  * Force `getProvider()` to fail by injecting a dependency that always rejects.
@@ -26,6 +41,15 @@ function forceProviderFailure(): void {
     createGraphProvider: async () => {
       throw new Error("simulated graph outage");
     },
+  });
+  ops.clearProviderFailureCooldownForTests();
+}
+
+function useHealthyProvider(namespaces: string[] = ["default"]): void {
+  ops.configureOperationDependenciesForTests({
+    createGraphProvider: async () => ({
+      listNamespaces: async () => namespaces,
+    }) as Awaited<ReturnType<typeof ops.getProvider>>,
   });
   ops.clearProviderFailureCooldownForTests();
 }
@@ -80,13 +104,14 @@ afterAll(() => {
 describe("withGraphFallback / withGraphRequired (review finding #3)", () => {
   describe("withGraphFallback", () => {
     test("returns fn result when provider is healthy", async () => {
-      // Default provider (Ladybug in tempdir) inits fine.
+      useHealthyProvider(["default", "work"]);
       const result = await ops.withGraphFallback(
         "probe",
         async (gp) => ({ ok: true, nsList: await gp.listNamespaces() }),
         { ok: false, nsList: [] as string[] },
       );
       expect(result.ok).toBe(true);
+      expect(result.nsList).toEqual(["default", "work"]);
     });
 
     test("returns static fallback when provider init throws", async () => {
@@ -117,6 +142,7 @@ describe("withGraphFallback / withGraphRequired (review finding #3)", () => {
     });
 
     test("fallback thunk is NOT invoked on healthy provider (no wasted work)", async () => {
+      useHealthyProvider();
       let called = 0;
       const result = await ops.withGraphFallback(
         "probe-no-thunk",
@@ -131,6 +157,7 @@ describe("withGraphFallback / withGraphRequired (review finding #3)", () => {
     });
 
     test("fn exceptions after successful provider init are not caught as degraded", async () => {
+      useHealthyProvider();
       // Provider is healthy; the fn itself throws. `withGraphFallback` wraps
       // provider errors, not business logic errors — a bug inside the fn
       // should surface as a thrown error, not silently fall back.
@@ -153,8 +180,9 @@ describe("withGraphFallback / withGraphRequired (review finding #3)", () => {
 
   describe("withGraphRequired", () => {
     test("runs fn when provider is healthy", async () => {
+      useHealthyProvider(["default", "work"]);
       const namespaces = await ops.withGraphRequired("probe", (gp) => gp.listNamespaces());
-      expect(Array.isArray(namespaces)).toBe(true);
+      expect(namespaces).toEqual(["default", "work"]);
     });
 
     test("throws ProviderUnavailableError on provider failure", async () => {
@@ -234,5 +262,75 @@ describe("withGraphFallback / withGraphRequired (review finding #3)", () => {
       const block = end === -1 ? tail : tail.slice(0, end);
       expect(block).toContain("withGraphRequired");
     });
+  });
+});
+
+describe("listMemories degraded fallback", () => {
+  test("Goal #3: unscoped fallback reads memories from every namespace on disk", () => {
+    const defaultId = randomUUID();
+    const workId = randomUUID();
+    writeMemoryFile(defaultId, "Default body", makeFrontmatter({
+      id: defaultId,
+      name: "Alpha",
+      namespace: "default",
+      createdAt: "2026-04-10T00:00:00.000Z",
+    }));
+    writeMemoryFile(workId, "Work body", makeFrontmatter({
+      id: workId,
+      name: "Beta",
+      namespace: "work",
+      createdAt: "2026-04-11T00:00:00.000Z",
+    }));
+
+    const result = listMemoriesDegradedFallback({
+      offset: 0,
+      limit: 10,
+      sortBy: "createdAt",
+      sortDir: "desc",
+    });
+
+    expect(result.degraded).toBe(true);
+    expect(result.total).toBe(2);
+    expect(result.items.map((item) => item.namespace).sort()).toEqual(["default", "work"]);
+    expect(result.items.map((item) => item.id).sort()).toEqual([defaultId, workId].sort());
+  });
+
+  test("behaviour contract: category filtering happens before pagination and total counts filtered rows", () => {
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    writeMemoryFile(ids[0], "Alpha", makeFrontmatter({
+      id: ids[0],
+      name: "Newest non-match",
+      namespace: "filtered",
+      category: "event",
+      createdAt: "2026-04-12T00:00:00.000Z",
+    }));
+    writeMemoryFile(ids[1], "Beta", makeFrontmatter({
+      id: ids[1],
+      name: "First match",
+      namespace: "filtered",
+      category: "general",
+      createdAt: "2026-04-11T00:00:00.000Z",
+    }));
+    writeMemoryFile(ids[2], "Gamma", makeFrontmatter({
+      id: ids[2],
+      name: "Second match",
+      namespace: "filtered",
+      category: "general",
+      createdAt: "2026-04-10T00:00:00.000Z",
+    }));
+
+    const page = listMemoriesDegradedFallback({
+      namespace: "filtered",
+      category: "general",
+      offset: 0,
+      limit: 1,
+      sortBy: "createdAt",
+      sortDir: "desc",
+    });
+
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.id).toBe(ids[1]);
+    expect(page.items.every((item) => item.category === "general")).toBe(true);
   });
 });

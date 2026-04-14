@@ -1,7 +1,13 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+
+interface ListFetchResult<T> {
+  items: T[];
+  total: number;
+  hasMore?: boolean;
+}
 
 interface UseListDataOptions<T> {
-  fetchFn: (params: { offset: number; limit: number }) => Promise<{ items: T[]; total: number }>;
+  fetchFn: (params: { offset: number; limit: number }) => Promise<ListFetchResult<T>>;
   pageSize?: number;
 }
 
@@ -34,17 +40,26 @@ export function useListData<T>({ fetchFn, pageSize = 30 }: UseListDataOptions<T>
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [serverHasMore, setServerHasMore] = useState<boolean | undefined>(undefined);
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async (currentOffset: number, append: boolean) => {
+    const requestId = ++requestIdRef.current;
     setIsLoading(true);
     try {
       const result = await fetchFn({ offset: currentOffset, limit: pageSize });
+      if (requestId !== requestIdRef.current) return;
       setItems((prev) => append ? [...prev, ...result.items] : result.items);
       setTotal(result.total);
+      setServerHasMore(result.hasMore);
     } catch (err) {
-      console.error("Failed to load list data:", err);
+      if (requestId === requestIdRef.current) {
+        console.error("Failed to load list data:", err);
+      }
     } finally {
-      setIsLoading(false);
+      if (requestId === requestIdRef.current) {
+        setIsLoading(false);
+      }
     }
   }, [fetchFn, pageSize]);
 
@@ -52,6 +67,7 @@ export function useListData<T>({ fetchFn, pageSize = 30 }: UseListDataOptions<T>
   useEffect(() => {
     setOffset(0);
     setItems([]);
+    setServerHasMore(undefined);
     load(0, false);
   }, [load]);
 
@@ -63,10 +79,11 @@ export function useListData<T>({ fetchFn, pageSize = 30 }: UseListDataOptions<T>
 
   const refresh = useCallback(() => {
     setOffset(0);
+    setServerHasMore(undefined);
     load(0, false);
   }, [load]);
 
-  const hasMore = items.length < total;
+  const hasMore = serverHasMore ?? items.length < total;
 
   return { items, total, isLoading, hasMore, loadMore, refresh };
 }

@@ -864,6 +864,60 @@ export class Neo4jProvider implements GraphProvider {
     }
   }
 
+  async forgetMemoryById(id: string, namespace = "default"): Promise<boolean> {
+    const session = this.driver.session();
+    try {
+      let deletedMemory = false;
+
+      await session.executeWrite(async (tx) => {
+        const memResult = await tx.run(
+          `
+          MATCH (m:Memory {id: $id, namespace: $namespace})
+          DETACH DELETE m
+          RETURN count(m) as deleted
+          `,
+          { id, namespace },
+        );
+        deletedMemory = (memResult.records[0]?.get("deleted") ?? 0) > 0;
+        if (!deletedMemory) return;
+
+        const relResult = await tx.run(
+          `
+          MATCH (:Entity)-[r:RELATES_TO]->(:Entity)
+          WHERE $memoryId IN r.episodes
+          RETURN r.id as id, r.episodes as episodes
+          `,
+          { memoryId: id },
+        );
+
+        for (const record of relResult.records) {
+          const episodes = ((record.get("episodes") as string[]) ?? []).filter((episodeId) => episodeId !== id);
+          if (episodes.length > 0) {
+            await tx.run(
+              `
+              MATCH (:Entity)-[r:RELATES_TO {id: $id}]->(:Entity)
+              SET r.episodes = $episodes
+              `,
+              { id: record.get("id"), episodes },
+            );
+          } else {
+            await tx.run(
+              `
+              MATCH (:Entity)-[r:RELATES_TO {id: $id}]->(:Entity)
+              DELETE r
+              `,
+              { id: record.get("id") },
+            );
+          }
+        }
+      });
+
+      return deletedMemory;
+    } finally {
+      await session.close();
+    }
+  }
+
   async forgetEdge(
     edgeId: string,
     reason: string,

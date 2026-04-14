@@ -22,7 +22,7 @@ describe("useListData — review pass 7 finding #4", () => {
     "utf-8",
   );
 
-  test("does not use the ref-capture pattern that swallowed filter changes", () => {
+  test("does not use the fetchRef ref-capture pattern that swallowed filter changes", () => {
     // The previous impl did:
     //   const fetchRef = useRef(fetchFn);
     //   fetchRef.current = fetchFn;
@@ -30,7 +30,6 @@ describe("useListData — review pass 7 finding #4", () => {
     // which meant the `load` identity was stable across filter changes and
     // the reload effect never re-fired. If either pattern returns, callers
     // will silently ship stale data.
-    expect(src).not.toContain("useRef");
     expect(src).not.toContain("fetchRef");
   });
 
@@ -50,6 +49,18 @@ describe("useListData — review pass 7 finding #4", () => {
     // the load deps or loadMore/refresh callbacks (which carry additional
     // deps).
     expect(src).toContain("}, [load]);");
+  });
+
+  test("suppresses stale async responses after a later request starts", () => {
+    expect(src).toContain("const requestIdRef = useRef(0);");
+    expect(src).toContain("const requestId = ++requestIdRef.current;");
+    expect(src).toContain("if (requestId !== requestIdRef.current) return;");
+    expect(src).toContain("if (requestId === requestIdRef.current) {");
+  });
+
+  test("uses server-provided hasMore when the backend overfetches filtered pages", () => {
+    expect(src).toContain("setServerHasMore(result.hasMore);");
+    expect(src).toContain("const hasMore = serverHasMore ?? items.length < total;");
   });
 });
 

@@ -22,7 +22,7 @@ interface ListEdgesParams {
   sortDir: "asc" | "desc";
 }
 
-type EdgeListResponse = { items: StoredEdge[]; total: number };
+type EdgeListResponse = { items: StoredEdge[]; total: number; hasMore?: boolean };
 
 function sentimentColor(s: number): "success" | "danger" | "secondary" {
   if (s > 0.3) return "success";

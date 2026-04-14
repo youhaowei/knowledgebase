@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -65,6 +65,7 @@ function makeProvider(overrides: Record<string, unknown> = {}) {
     fullTextSearchEdges: async () => [],
     get: async () => ({ edges: [] }),
     forget: async () => ({ deletedMemory: false, deletedEntity: false }),
+    forgetMemoryById: async () => false,
     forgetEdge: async () => ({}),
     storeMemoryOnly: async () => {},
     updateMemoryStatus: async () => {},
@@ -465,5 +466,133 @@ describe("operations write-path invariants", () => {
     expect(record.edgeId).toBe("edge-abc-123");
     expect(record.reason).toBe("superseded by newer fact");
     expect(typeof record.timestamp).toBe("string");
+  });
+
+  test("Decision #11: drainTombstones preserves failed memory tombstones and replays exact ids", async () => {
+    createTempEnvironment();
+
+    const namespace = "default";
+    const appliedId = randomUUID();
+    const failedId = randomUUID();
+    writeMemoryFile(appliedId, "body", makeFrontmatter({
+      id: appliedId,
+      name: "Applied",
+      namespace,
+    }));
+
+    const replayedIds: string[] = [];
+    provider = makeProvider({
+      forget: async () => {
+        throw new Error("legacy name replay should not run for id tombstones");
+      },
+      forgetMemoryById: async (id: string) => {
+        replayedIds.push(id);
+        if (id === failedId) {
+          throw new Error("transient provider failure");
+        }
+        return true;
+      },
+    });
+
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_tombstones.jsonl");
+    writeFileSync(jsonlPath, [
+      JSON.stringify({ id: appliedId, name: "Applied", reason: "cleanup" }),
+      JSON.stringify({ id: failedId, name: "Failed", reason: "cleanup" }),
+    ].join("\n") + "\n");
+
+    const ops = await loadOperations();
+    const result = await ops.drainTombstones();
+
+    expect(result).toEqual({ memoriesForgotten: 1, edgesForgotten: 0 });
+    expect(replayedIds).toEqual([appliedId, failedId]);
+    const remaining = readFileSync(jsonlPath, "utf-8").trim().split("\n");
+    expect(remaining).toHaveLength(1);
+    expect(JSON.parse(remaining[0])).toMatchObject({ id: failedId, name: "Failed" });
+  });
+
+  test("Decision #11: drainTombstones preserves failed edge replays for the next sweep", async () => {
+    createTempEnvironment();
+
+    const namespace = "default";
+    const sentinelId = randomUUID();
+    writeMemoryFile(sentinelId, "body", makeFrontmatter({
+      id: sentinelId,
+      name: "Sentinel",
+      namespace,
+    }));
+
+    const replayedEdges: string[] = [];
+    provider = makeProvider({
+      forgetEdge: async (edgeId: string) => {
+        replayedEdges.push(edgeId);
+        if (edgeId === "edge-fail") {
+          throw new Error("transient edge failure");
+        }
+        return { invalidated: true };
+      },
+    });
+
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_forget_edges.jsonl");
+    writeFileSync(jsonlPath, [
+      JSON.stringify({ edgeId: "edge-ok", reason: "cleanup" }),
+      JSON.stringify({ edgeId: "edge-fail", reason: "cleanup" }),
+    ].join("\n") + "\n");
+
+    const ops = await loadOperations();
+    const result = await ops.drainTombstones();
+
+    expect(result).toEqual({ memoriesForgotten: 0, edgesForgotten: 1 });
+    expect(replayedEdges).toEqual(["edge-ok", "edge-fail"]);
+    const remaining = readFileSync(jsonlPath, "utf-8").trim().split("\n");
+    expect(remaining).toHaveLength(1);
+    expect(JSON.parse(remaining[0])).toMatchObject({ edgeId: "edge-fail", reason: "cleanup" });
+  });
+
+  test("Decision #11: forgetEdgeViaGraph does not queue a replay record after successful invalidation", async () => {
+    createTempEnvironment();
+
+    const namespace = "default";
+    provider = makeProvider({
+      forgetEdge: async () => ({ invalidated: true }),
+    });
+
+    const ops = await loadOperations();
+    const result = await ops.forgetEdgeViaGraph("edge-live", "superseded", namespace);
+
+    expect(result).toEqual({
+      edgeId: "edge-live",
+      reason: "superseded",
+      namespace,
+      appliedToGraph: true,
+    });
+
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_forget_edges.jsonl");
+    expect(existsSync(jsonlPath)).toBe(false);
+  });
+
+  test("Decision #11: forgetEdgeViaGraph queues a replay record when graph invalidation fails", async () => {
+    createTempEnvironment();
+
+    const namespace = "default";
+    provider = makeProvider({
+      forgetEdge: async () => {
+        throw new Error("graph unavailable");
+      },
+    });
+
+    const ops = await loadOperations();
+    const result = await ops.forgetEdgeViaGraph("edge-deferred", "superseded", namespace);
+
+    expect(result).toEqual({
+      edgeId: "edge-deferred",
+      reason: "superseded",
+      namespace,
+      appliedToGraph: false,
+    });
+
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_forget_edges.jsonl");
+    expect(existsSync(jsonlPath)).toBe(true);
+    const record = JSON.parse(readFileSync(jsonlPath, "utf-8").trim());
+    expect(record).toMatchObject({ edgeId: "edge-deferred", reason: "superseded" });
   });
 });

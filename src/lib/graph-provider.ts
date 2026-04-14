@@ -115,6 +115,14 @@ export interface GraphProvider {
 
   forget(name: string, namespace: string): Promise<ForgetResult>;
 
+  /**
+   * Exact-memory delete used by the reconciler when replaying tombstones from
+   * the filesystem. Unlike `forget(name, namespace)`, this must only touch the
+   * targeted memory row so a replacement memory with the same name is not
+   * removed on replay.
+   */
+  forgetMemoryById(id: string, namespace: string): Promise<boolean>;
+
   forgetEdge(
     edgeId: string,
     reason: string,

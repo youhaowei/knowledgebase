@@ -449,16 +449,20 @@ async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Prom
   if (!content.trim()) return 0;
 
   let applied = 0;
+  const remaining: string[] = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       const rec = JSON.parse(trimmed) as { id?: string; name?: string; reason?: string };
-      // `gp.forget(name, namespace)` is the documented soft-delete entry on
-      // the provider. Records without a name (schema drift, manual edit) are
-      // skipped with a log — truncating them at the end still clears the log,
-      // but losing a malformed record beats keeping it forever.
-      if (rec.name) {
+      // New tombstones include `id`; replay must target that exact memory so a
+      // replacement row reusing the same name is not deleted on the next sweep.
+      // Old logs may only carry `name`, so keep the legacy fallback for them.
+      if (rec.id) {
+        if (await gp.forgetMemoryById(rec.id, namespace)) {
+          applied++;
+        }
+      } else if (rec.name) {
         await gp.forget(rec.name, namespace);
         applied++;
       } else {
@@ -466,12 +470,13 @@ async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Prom
       }
     } catch (err) {
       console.error(`[kb] Failed to apply tombstone:`, trimmed, err);
+      remaining.push(trimmed);
     }
   }
 
-  // Truncate after apply. The namespace lock held by drainTombstones
-  // guarantees no writer appended between our read and here.
-  writeFileSync(logPath, "");
+  // Rewrite only failed replay records. The namespace lock held by
+  // drainTombstones guarantees no writer appended between our read and here.
+  writeFileSync(logPath, remaining.length > 0 ? `${remaining.join("\n")}\n` : "");
   return applied;
 }
 
@@ -482,6 +487,7 @@ async function drainEdgeTombstones(gp: GraphProvider, namespace: string): Promis
   if (!content.trim()) return 0;
 
   let applied = 0;
+  const remaining: string[] = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -495,10 +501,11 @@ async function drainEdgeTombstones(gp: GraphProvider, namespace: string): Promis
       }
     } catch (err) {
       console.error(`[kb] Failed to apply edge forget:`, trimmed, err);
+      remaining.push(trimmed);
     }
   }
 
-  writeFileSync(logPath, "");
+  writeFileSync(logPath, remaining.length > 0 ? `${remaining.join("\n")}\n` : "");
   return applied;
 }
 
@@ -692,15 +699,15 @@ export async function forgetEdge(edgeId: string, reason: string, namespace = "de
  */
 export async function forgetEdgeViaGraph(edgeId: string, reason: string, namespace = "default") {
   return tracked("forgetEdgeViaGraph", { namespace }, async () => {
-    await withNamespaceLock(namespace, async () => {
-      recordForgetEdge(edgeId, reason, namespace);
-    });
     let appliedToGraph = false;
     try {
       const gp = await getProvider();
       await gp.forgetEdge(edgeId, reason, namespace);
       appliedToGraph = true;
     } catch (err) {
+      await withNamespaceLock(namespace, async () => {
+        recordForgetEdge(edgeId, reason, namespace);
+      });
       console.error(`[kb] forgetEdgeViaGraph: graph unavailable, JSONL recorded for reconciler replay: ${err instanceof Error ? err.message : err}`);
     }
     return { edgeId, reason, namespace, appliedToGraph };

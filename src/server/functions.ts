@@ -13,7 +13,7 @@ import { hybridSearch } from "../lib/hybrid-search.js";
 import { analyticsContext } from "../lib/analytics.js";
 import { groupDuplicateEntities } from "../lib/entity-matcher.js";
 import { ensureServerIndexerStarted } from "./indexer.js";
-import { withNamespaceLock, listMemoryFiles, readMemoryFile } from "../lib/fs-memory.js";
+import { withNamespaceLock, listMemoryFiles, listNamespaceDirs, readMemoryFile } from "../lib/fs-memory.js";
 import type { MemoryFilter, EntityFilter, EdgeFilter, StoredEntity, Memory } from "../types.js";
 
 if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
@@ -571,6 +571,78 @@ const listMemoriesSchema = z.object({
   sortDir: z.enum(["asc", "desc"]).default("desc"),
 });
 
+type ListMemoriesInput = z.infer<typeof listMemoriesSchema>;
+type ListMemoriesResponse = {
+  items: Memory[];
+  indexed: number;
+  total: number;
+  degraded: boolean;
+};
+
+function sortMemories(items: Memory[], sortBy: ListMemoriesInput["sortBy"], sortDir: ListMemoriesInput["sortDir"]): Memory[] {
+  return [...items].sort((a, b) => {
+    const cmp = sortBy === "name"
+      ? a.name.localeCompare(b.name)
+      : a.createdAt.getTime() - b.createdAt.getTime();
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+}
+
+function readDegradedMemory(path: string, category?: ListMemoriesInput["category"]): Memory | null {
+  try {
+    const { frontmatter, text } = readMemoryFile(path);
+    if (category && frontmatter.category !== category) return null;
+    return {
+      id: frontmatter.id,
+      name: frontmatter.name,
+      text,
+      abstract: frontmatter.abstract ?? "",
+      summary: frontmatter.summary ?? "",
+      category: frontmatter.category,
+      namespace: frontmatter.namespace,
+      status: frontmatter.indexedAt ? "completed" : "pending",
+      schemaVersion: frontmatter.schemaVersion ?? "0.0.0",
+      versionedAt: frontmatter.versionedAt,
+      createdAt: new Date(frontmatter.createdAt),
+    };
+  } catch (err) {
+    console.error(`[kb] listMemories degraded: failed to read ${path}`, err);
+    return null;
+  }
+}
+
+function readDegradedNamespaceMemories(namespace: string, category?: ListMemoriesInput["category"]): { items: Memory[]; indexed: number } {
+  try {
+    const files = listMemoryFiles(namespace);
+    const items = files
+      .map((entry) => readDegradedMemory(entry.path, category))
+      .filter((item): item is Memory => item !== null);
+    return {
+      items,
+      indexed: files.filter((file) => file.indexed).length,
+    };
+  } catch {
+    return { items: [], indexed: 0 };
+  }
+}
+
+export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemoriesResponse {
+  const namespaces = data.namespace ? [data.namespace] : listNamespaceDirs();
+  const allItems: Memory[] = [];
+  let indexed = 0;
+
+  for (const ns of namespaces) {
+    const namespaceResult = readDegradedNamespaceMemories(ns, data.category);
+    indexed += namespaceResult.indexed;
+    allItems.push(...namespaceResult.items);
+  }
+
+  const sorted = sortMemories(allItems, data.sortBy, data.sortDir);
+  const total = sorted.length;
+  const items = sorted.slice(data.offset, data.offset + data.limit);
+  return { items, indexed, total, degraded: true };
+}
+
 export const listMemories = createServerFn()
   .inputValidator((data: unknown) => listMemoriesSchema.parse(data ?? {}))
   .handler(async ({ data }) =>
@@ -590,61 +662,7 @@ export const listMemories = createServerFn()
         const stats = await ops.stats(data.namespace || undefined);
         return { items, indexed: stats.indexed, total: stats.memories, degraded: false };
       },
-      () => {
-        // Filesystem fallback — files are the source of truth (PRD Goal #3).
-        // `listMemoryFiles` returns entries via `_index.md` fast path, already
-        // ordered by createdAt desc. We read each visible page's frontmatter +
-        // body so the UI gets real content, not empty stubs.
-        const ns = data.namespace || "default";
-        let files;
-        try {
-          files = listMemoryFiles(ns);
-        } catch {
-          // Namespace dir missing (e.g., no files ever written) — empty list.
-          return { items: [], indexed: 0, total: 0, degraded: true };
-        }
-
-        // Apply requested sort. Category filter has no cheap filesystem
-        // equivalent (would need to read all frontmatters); we surface it best-
-        // effort by reading per visible entry and filtering post-hoc.
-        let sorted = files;
-        if (data.sortBy === "name") {
-          sorted = [...files].sort((a, b) =>
-            data.sortDir === "asc"
-              ? a.name.localeCompare(b.name)
-              : b.name.localeCompare(a.name),
-          );
-        } else if (data.sortDir === "asc") {
-          // Default `_index.md` order is createdAt desc; reverse for asc.
-          sorted = [...files].reverse();
-        }
-
-        const paged = sorted.slice(data.offset, data.offset + data.limit);
-        const items: Memory[] = [];
-        for (const entry of paged) {
-          try {
-            const { frontmatter, text } = readMemoryFile(entry.path);
-            if (data.category && frontmatter.category !== data.category) continue;
-            items.push({
-              id: frontmatter.id,
-              name: frontmatter.name,
-              text,
-              abstract: frontmatter.abstract ?? "",
-              summary: frontmatter.summary ?? "",
-              category: frontmatter.category,
-              namespace: frontmatter.namespace,
-              status: frontmatter.indexedAt ? "completed" : "pending",
-              schemaVersion: frontmatter.schemaVersion ?? "0.0.0",
-              versionedAt: frontmatter.versionedAt,
-              createdAt: new Date(frontmatter.createdAt),
-            });
-          } catch (err) {
-            console.error(`[kb] listMemories degraded: failed to read ${entry.path}`, err);
-          }
-        }
-        const indexed = files.filter((f) => f.indexed).length;
-        return { items, indexed, total: files.length, degraded: true };
-      },
+      () => listMemoriesDegradedFallback(data),
     )
   );
 
