@@ -114,14 +114,13 @@ function filterActive<T extends { name: string }>(memories: T[]): T[] {
 }
 
 /**
- * Paginate through all memories in a namespace. Continues fetching until the
- * provider returns fewer rows than `pageSize` (signal that the stable-sorted
- * stream is exhausted). Sorts by `createdAt` ascending so pages are stable
- * across concurrent writers — a row inserted mid-export with a newer createdAt
- * lands in the tail, not somewhere we've already scanned past.
- *
- * Per Spec Phase 1 Migration contract (pagination is mandatory): single-page
- * reads silently truncate namespaces that exceed the ceiling.
+ * Paginate through all memories in a namespace. Uses cursor-based pagination
+ * on `(createdAt, id)` rather than `offset / SKIP`. Review pass 7 finding #14:
+ * offset-based pagination silently skipped rows when another process inserted
+ * a memory mid-migration at a position before the current cursor — the next
+ * page's `SKIP N` then jumped past one live row. Cursor semantics are stable
+ * under concurrent inserts AND deletes: each page starts strictly after the
+ * last row seen, ordered by createdAt asc with id as tiebreak.
  */
 async function paginateMemories(
   gp: Awaited<ReturnType<typeof createGraphProvider>>,
@@ -129,17 +128,25 @@ async function paginateMemories(
 ): Promise<MigrateMemory[]> {
   const pageSize = 500;
   const all: MigrateMemory[] = [];
-  let offset = 0;
+  let cursorCreatedAt: Date | undefined;
+  let cursorId: string | undefined;
   while (true) {
     const page = await gp.findMemories(
-      { namespace },
+      { namespace, cursorCreatedAt, cursorId },
       pageSize,
-      { offset, sortBy: "createdAt", sortDir: "asc" },
+      { sortBy: "createdAt", sortDir: "asc" },
     );
+    if (page.length === 0) break;
     const active = filterActive(page);
     all.push(...active);
+    // Advance the cursor to the last row of the returned page — regardless of
+    // whether it passed `filterActive` (the cursor tracks query position, not
+    // filtered-out rows, otherwise a trailing rollup record would pin the
+    // cursor forever).
+    const last = page[page.length - 1]!;
+    cursorCreatedAt = last.createdAt;
+    cursorId = last.id;
     if (page.length < pageSize) break;
-    offset += page.length;
   }
   return all;
 }

@@ -172,6 +172,15 @@ export interface MemoryFilter {
   name?: string; // CONTAINS match (case-insensitive)
   namespace?: string | null;
   category?: MemoryCategory;
+  /**
+   * Cursor bound for stable pagination: returns memories with
+   * `createdAt > cursorCreatedAt`, or `createdAt == cursorCreatedAt AND id > cursorId`
+   * when both are supplied. Avoids the offset-shift skip that fires when
+   * rows are inserted or deleted mid-scan (review pass 7 finding #14).
+   * Ordering is enforced by the caller's PaginationParams.
+   */
+  cursorCreatedAt?: Date;
+  cursorId?: string;
 }
 
 export interface PaginationParams {

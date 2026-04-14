@@ -1280,6 +1280,19 @@ export class Neo4jProvider implements GraphProvider {
         conditions.push("m.category = $category");
         params.category = filter.category;
       }
+      if (filter.cursorCreatedAt !== undefined) {
+        // Cursor-based pagination — see LadybugProvider.findMemories. Review
+        // pass 7 #14. TODO(TASK-517): moot once Neo4jProvider is dropped.
+        const iso = filter.cursorCreatedAt.toISOString();
+        params.cursorCreatedAt = iso;
+        const dir = pagination?.sortDir === "asc" ? ">" : "<";
+        if (filter.cursorId !== undefined) {
+          params.cursorId = filter.cursorId;
+          conditions.push(`(m.createdAt ${dir} datetime($cursorCreatedAt) OR (m.createdAt = datetime($cursorCreatedAt) AND m.id ${dir} $cursorId))`);
+        } else {
+          conditions.push(`m.createdAt ${dir} datetime($cursorCreatedAt)`);
+        }
+      }
 
       const sortProp = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
       const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";

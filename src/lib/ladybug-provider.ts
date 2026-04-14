@@ -35,6 +35,18 @@ type MutableEntity = Entity & {
   summary?: string;
 };
 
+/**
+ * Coerce a pagination integer from MCP/HTTP to a safe non-negative int.
+ * LadybugDB interpolates LIMIT/SKIP directly (no bound params) so NaN /
+ * Infinity / non-integer input would either produce invalid Cypher or
+ * trigger a runaway scan (review pass 7 finding #7). Matches the pattern
+ * already used in getPendingMemories.
+ */
+function safePagInt(v: unknown, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+  return Math.max(0, Math.trunc(v));
+}
+
 export class LadybugProvider implements GraphProvider {
   private db: Database;
   private conn!: Connection;
@@ -149,13 +161,28 @@ export class LadybugProvider implements GraphProvider {
     console.error(`[ladybug] Auto-created indexes for ${dim}-dim embeddings`);
   }
 
+  /**
+   * Sanitize a user-supplied FTS query for safe interpolation into
+   * `CALL QUERY_FTS_INDEX('Fact', 'fact_fts_idx', '<escaped>', ...)`.
+   *
+   * **Load-bearing invariant** (review pass 7 finding #9): the output of
+   * this function is the ONLY defense against Cypher injection in the FTS
+   * path — LadybugDB does not currently accept bound parameters inside
+   * `CALL QUERY_FTS_INDEX(...)`. Any character that can terminate a
+   * single-quoted Cypher string literal must be stripped here, full stop.
+   * A strict allowlist (alphanumerics, whitespace, `.,?_-`) is the
+   * enforcement mechanism; see `test/provider.test.ts` injection fixtures
+   * for the regression contract.
+   *
+   * If you loosen the allowlist, add a corresponding fixture that proves
+   * the new characters cannot escape the quoted string. Do not add
+   * characters by "it looked safe" — the burden is on the change.
+   *
+   * Earlier versions used a blacklist (`'"\&|!()`) which missed colons,
+   * newlines, unicode quote variants, and every future LadybugDB FTS
+   * syntax extension. Allowlist + test = durable contract.
+   */
   private escapeFtsQuery(query: string): string {
-    // Strict allowlist instead of blacklist sanitization. Earlier versions
-    // stripped a small set of operators ('"\&|!()) but missed colons,
-    // newlines, unicode quote variants, and any future LadybugDB FTS syntax
-    // additions. Allow alphanumerics, common whitespace, and a few safe
-    // punctuation marks; everything else becomes a space so a benign query
-    // like "what's new?" still returns "what s new" tokens.
     return query
       .replace(/[^A-Za-z0-9_\-\s.,?]/g, " ")
       .replace(/\s+/g, " ")
@@ -1113,8 +1140,12 @@ export class LadybugProvider implements GraphProvider {
     if (filter.scope) { conditions.push(`e.scope = $scope`); params.scope = filter.scope; }
     if (filter.type) { conditions.push(`e.type = $type`); params.type = filter.type; }
 
-    const effectiveLimit = pagination?.limit ?? limit;
-    const offset = pagination?.offset ?? 0;
+    // LadybugDB doesn't bind LIMIT/SKIP as params — these are interpolated.
+    // Guard against NaN / Infinity / non-integer from MCP or HTTP callers
+    // (review pass 7 finding #7; matches the pattern already used in
+    // getPendingMemories).
+    const safeLimit = safePagInt(pagination?.limit ?? limit, 100);
+    const safeOffset = safePagInt(pagination?.offset ?? 0, 0);
     const sortCol = "e.name";
     const sortDir = "ASC";
     // Tiebreak on uuid for stable pagination across rows with duplicate names.
@@ -1122,7 +1153,7 @@ export class LadybugProvider implements GraphProvider {
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
     const result = await this.executeQuery(
-      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir}${tiebreak} SKIP ${offset} LIMIT ${effectiveLimit}`,
+      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir}${tiebreak} SKIP ${safeOffset} LIMIT ${safeLimit}`,
       params,
     );
 
@@ -1169,8 +1200,9 @@ export class LadybugProvider implements GraphProvider {
     }
     if (!filter.includeInvalidated) conditions.push("r.invalidAt = ''");
 
-    const effectiveLimit = pagination?.limit ?? limit;
-    const offset = pagination?.offset ?? 0;
+    // See findEntities: LadybugDB does not bind LIMIT/SKIP as params.
+    const safeLimit = safePagInt(pagination?.limit ?? limit, 100);
+    const safeOffset = safePagInt(pagination?.offset ?? 0, 0);
     const sortCol = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
     // Tiebreak on r.id for stable pagination across rows with duplicate
@@ -1187,8 +1219,8 @@ export class LadybugProvider implements GraphProvider {
               r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
               r.invalidAt as invalidAt, r.createdAt as createdAt
        ORDER BY ${sortCol} ${sortDir}${tiebreak}
-       SKIP ${offset}
-       LIMIT ${effectiveLimit}`,
+       SKIP ${safeOffset}
+       LIMIT ${safeLimit}`,
       params,
     );
 
@@ -1209,9 +1241,24 @@ export class LadybugProvider implements GraphProvider {
       params.namespace = filter.namespace;
     }
     if (filter.category) { conditions.push(`m.category = $category`); params.category = filter.category; }
+    if (filter.cursorCreatedAt !== undefined) {
+      // Cursor-based pagination: `createdAt > $cursor` OR (tied createdAt AND
+      // `id > $cursorId`). Parity with the PaginationParams sort direction —
+      // the cursor comparator flips for descending scans. Review pass 7 #14.
+      const iso = filter.cursorCreatedAt.toISOString();
+      params.cursorCreatedAt = iso;
+      const dir = pagination?.sortDir === "asc" ? ">" : "<";
+      if (filter.cursorId !== undefined) {
+        params.cursorId = filter.cursorId;
+        conditions.push(`(m.createdAt ${dir} $cursorCreatedAt OR (m.createdAt = $cursorCreatedAt AND m.id ${dir} $cursorId))`);
+      } else {
+        conditions.push(`m.createdAt ${dir} $cursorCreatedAt`);
+      }
+    }
 
-    const effectiveLimit = pagination?.limit ?? limit;
-    const offset = pagination?.offset ?? 0;
+    // See findEntities: LadybugDB does not bind LIMIT/SKIP as params.
+    const safeLimit = safePagInt(pagination?.limit ?? limit, 100);
+    const safeOffset = safePagInt(pagination?.offset ?? 0, 0);
     const sortCol = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
     // Always tiebreak on m.id — without it, rows sharing createdAt (or name)
@@ -1226,8 +1273,8 @@ export class LadybugProvider implements GraphProvider {
               m.category as category, m.namespace as namespace, m.status as status,
               m.error as error, m.createdAt as createdAt
        ORDER BY ${sortCol} ${sortDir}${tiebreak}
-       SKIP ${offset}
-       LIMIT ${effectiveLimit}`,
+       SKIP ${safeOffset}
+       LIMIT ${safeLimit}`,
       params,
     );
 
