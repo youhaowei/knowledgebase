@@ -83,9 +83,24 @@ describe("useListData callers memoize fetchFn with filter inputs", () => {
       // `);` in the useCallback block.
       const start = src.indexOf("const fetchFn = useCallback(");
       expect(start).toBeGreaterThan(-1);
-      const tail = src.slice(start);
-      const closeIdx = tail.indexOf(");");
-      const block = tail.slice(0, closeIdx);
+      // Walk paren depth from the opening `(` of `useCallback(` so the end
+      // anchor is the matching close — not just the first `);` (which the
+      // previous impl returned, silently truncating the block when the
+      // callback body contained any nested `);` like `foo();`).
+      const openParen = src.indexOf("(", start);
+      expect(openParen).toBeGreaterThan(-1);
+      let depth = 1;
+      let closeParen = -1;
+      for (let i = openParen + 1; i < src.length; i++) {
+        const ch = src[i];
+        if (ch === "(") depth++;
+        else if (ch === ")") {
+          depth--;
+          if (depth === 0) { closeParen = i; break; }
+        }
+      }
+      expect(closeParen).toBeGreaterThan(openParen);
+      const block = src.slice(openParen, closeParen + 1);
       const depsOpen = block.lastIndexOf("[");
       const depsClose = block.lastIndexOf("]");
       expect(depsOpen).toBeGreaterThan(-1);

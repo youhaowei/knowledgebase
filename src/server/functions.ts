@@ -162,17 +162,30 @@ export const getMemory = createServerFn()
   }));
 
 export const getHealth = createServerFn().handler(async () => {
-  const pending = await ops.getQueueStatus();
+  // Principle #3: health/queue probes must never 500 on a degraded graph —
+  // they are the liveness signal that monitoring polls to detect outages.
+  // Filesystem writes stay live; only the queue counter is inaccessible.
+  let queuePending = 0;
+  let degraded = false;
+  try {
+    queuePending = await ops.getQueueStatus();
+  } catch {
+    degraded = true;
+  }
   return {
-    status: "ok",
+    status: degraded ? "degraded" : "ok",
     timestamp: new Date().toISOString(),
-    queuePending: pending,
+    queuePending,
+    degraded,
   };
 });
 
 export const getQueueStatus = createServerFn().handler(async () => {
-  const pending = await ops.getQueueStatus();
-  return { pending };
+  try {
+    return { pending: await ops.getQueueStatus(), degraded: false };
+  } catch {
+    return { pending: 0, degraded: true };
+  }
 });
 
 // ============================================================================
