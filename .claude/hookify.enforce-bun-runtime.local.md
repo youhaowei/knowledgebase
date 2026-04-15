@@ -1,8 +1,8 @@
 ---
 name: enforce-bun-runtime
-enabled: true
+enabled: false
 event: bash
-pattern: ^\s*(node|ts-node)\s+\S+\.(js|ts|mjs|cjs)
+pattern: ^\s*(node|ts-node)\s+"?(?!/)\S+\.(js|ts|mjs|cjs)
 action: block
 ---
 

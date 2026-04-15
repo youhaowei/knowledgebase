@@ -28,6 +28,25 @@ import { rrfFuse } from "./search-utils.js";
 import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
 import { normalizeEntityName } from "./entity-matcher.js";
 
+type MutableEntity = Entity & {
+  uuid?: string;
+  namespace?: string;
+  scope?: "project" | "global";
+  summary?: string;
+};
+
+/**
+ * Coerce a pagination integer from MCP/HTTP to a safe non-negative int.
+ * LadybugDB interpolates LIMIT/SKIP directly (no bound params) so NaN /
+ * Infinity / non-integer input would either produce invalid Cypher or
+ * trigger a runaway scan (review pass 7 finding #7). Matches the pattern
+ * already used in getPendingMemories.
+ */
+function safePagInt(v: unknown, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+  return Math.max(0, Math.trunc(v));
+}
+
 export class LadybugProvider implements GraphProvider {
   private db: Database;
   private conn!: Connection;
@@ -44,7 +63,7 @@ export class LadybugProvider implements GraphProvider {
     } catch (err) {
       if (String(err).includes("wal_record") || String(err).includes("KU_UNREACHABLE")) {
         console.error(`[kb] Corrupted WAL detected, removing ${walPath} and retrying...`);
-        try { unlinkSync(walPath); } catch {}
+        this.removeWalFile(walPath);
         this.db = new Database(this.dataPath);
       } else {
         throw err;
@@ -91,6 +110,16 @@ export class LadybugProvider implements GraphProvider {
     return `[${new Array(dim).fill(0).join(",")}]`;
   }
 
+  private removeWalFile(walPath: string): void {
+    try {
+      unlinkSync(walPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
   /** Get dimension info from registry, throw if unknown */
   private getDimInfo(dim: number) {
     const info = this.dimensionRegistry.get(dim);
@@ -132,17 +161,32 @@ export class LadybugProvider implements GraphProvider {
     console.error(`[ladybug] Auto-created indexes for ${dim}-dim embeddings`);
   }
 
+  /**
+   * Sanitize a user-supplied FTS query for safe interpolation into
+   * `CALL QUERY_FTS_INDEX('Fact', 'fact_fts_idx', '<escaped>', ...)`.
+   *
+   * **Load-bearing invariant** (review pass 7 finding #9): the output of
+   * this function is the ONLY defense against Cypher injection in the FTS
+   * path — LadybugDB does not currently accept bound parameters inside
+   * `CALL QUERY_FTS_INDEX(...)`. Any character that can terminate a
+   * single-quoted Cypher string literal must be stripped here, full stop.
+   * A strict allowlist (alphanumerics, whitespace, `.,?_-`) is the
+   * enforcement mechanism; see `test/provider.test.ts` injection fixtures
+   * for the regression contract.
+   *
+   * If you loosen the allowlist, add a corresponding fixture that proves
+   * the new characters cannot escape the quoted string. Do not add
+   * characters by "it looked safe" — the burden is on the change.
+   *
+   * Earlier versions used a blacklist (`'"\&|!()`) which missed colons,
+   * newlines, unicode quote variants, and every future LadybugDB FTS
+   * syntax extension. Allowlist + test = durable contract.
+   */
   private escapeFtsQuery(query: string): string {
-    // LadybugDB FTS has strict syntax - remove problematic characters
     return query
-      .replace(/'/g, "")
-      .replace(/"/g, "")
-      .replace(/\\/g, "")
-      .replace(/&/g, " ")
-      .replace(/\|/g, " ")
-      .replace(/!/g, " ")
-      .replace(/\(/g, " ")
-      .replace(/\)/g, " ");
+      .replace(/[^A-Za-z0-9_\-\s.,?]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   private async tryQuery(query: string): Promise<void> {
@@ -403,8 +447,8 @@ export class LadybugProvider implements GraphProvider {
   private async storeEdge(
     edge: ExtractedEdge,
     embeddings: EmbeddingMap,
-    sourceEntity: Entity,
-    targetEntity: Entity,
+    sourceEntity: MutableEntity,
+    targetEntity: MutableEntity,
     memoryId: string,
     memoryNamespace: string,
   ): Promise<void> {
@@ -412,14 +456,10 @@ export class LadybugProvider implements GraphProvider {
     const targetUuid = targetEntity.uuid!;
     const edgeId = randomUUID();
     const now = new Date().toISOString();
-    const sourceEntityWithScope = sourceEntity as Entity & {
-      namespace?: string;
-      scope?: string;
-    };
     const sourceNamespace =
-      sourceEntityWithScope.scope === "global"
+      sourceEntity.scope === "global"
         ? ""
-        : (sourceEntityWithScope.namespace ?? memoryNamespace);
+        : (sourceEntity.namespace ?? memoryNamespace);
 
     const existingEdge = await this.executeQuery(
       `MATCH (source:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(target:Entity {uuid: $targetUuid})
@@ -500,18 +540,21 @@ export class LadybugProvider implements GraphProvider {
     namespace: string,
     createdAt: string,
   ): Promise<void> {
-    // Build embedding columns for RELATES_TO (only the primary/first registered dim)
-    // RELATES_TO only has factEmbedding column (2560-dim historically)
-    const firstDim = this.dimensionRegistry.keys().next().value;
-    const firstInfo = firstDim !== undefined ? this.dimensionRegistry.get(firstDim) : undefined;
-    const relEmbStr = firstDim !== undefined && firstInfo
+    // RELATES_TO has a single fixed-dimension factEmbedding column (2560)
+    // for historical compat — the Fact node mirror carries both 2560 and 384.
+    // We name the dimension explicitly here rather than reading the first
+    // Map.keys() slot, which depended on insertion order from
+    // KNOWN_DIMENSIONS and would silently break if that literal were reordered.
+    const EDGE_EMB_DIM = 2560;
+    const edgeInfo = this.dimensionRegistry.get(EDGE_EMB_DIM);
+    const relEmbStr = edgeInfo
       ? (() => {
-          const vec = embeddings.get(firstDim);
+          const vec = embeddings.get(EDGE_EMB_DIM);
           return vec && !isZeroEmbedding(vec)
             ? `[${vec.join(",")}]`
-            : this.zeroEmbeddingStr(firstDim);
+            : this.zeroEmbeddingStr(EDGE_EMB_DIM);
         })()
-      : `[${new Array(2560).fill(0).join(",")}]`;
+      : `[${new Array(EDGE_EMB_DIM).fill(0).join(",")}]`;
 
     await this.executeQuery(
       `MATCH (source:Entity {uuid: $sourceUuid})
@@ -580,22 +623,29 @@ export class LadybugProvider implements GraphProvider {
     embedding: number[],
     query: string,
     limit = 10,
+    namespace?: string,
   ): Promise<SearchResult> {
     const hasEmbedding = embedding.length > 0;
-    const memories = hasEmbedding ? await this.vectorSearch(embedding, limit) : [];
+    const filter = namespace ? { namespace } : undefined;
+    const memories = hasEmbedding ? await this.vectorSearch(embedding, limit, filter) : [];
     const [vectorEdges, ftsEdges] = await Promise.all([
-      hasEmbedding ? this.vectorSearchEdges(embedding, limit) : Promise.resolve([]),
-      this.fullTextSearchEdges(query, limit),
+      hasEmbedding ? this.vectorSearchEdges(embedding, limit, filter) : Promise.resolve([]),
+      this.fullTextSearchEdges(query, limit, filter),
     ]);
     const edges = rrfFuse(vectorEdges, ftsEdges, limit);
 
+    const entityWhere = namespace
+      ? "WHERE LOWER(e.name) CONTAINS LOWER($query) AND e.deletedAt = '' AND e.namespace = $namespace"
+      : "WHERE LOWER(e.name) CONTAINS LOWER($query) AND e.deletedAt = ''";
+    const entityParams: Record<string, unknown> = { query, limit };
+    if (namespace) entityParams.namespace = namespace;
     const entityResult = await this.executeQuery(
       `MATCH (e:Entity)
-       WHERE LOWER(e.name) CONTAINS LOWER($query) AND e.deletedAt = ''
+       ${entityWhere}
        RETURN e.uuid as uuid, e.name as name, e.type as type, e.scope as scope,
               e.description as description, e.summary as summary, e.namespace as namespace
        LIMIT $limit`,
-      { query, limit },
+      entityParams,
     );
 
     const entityRows = await entityResult.getAll();
@@ -606,7 +656,7 @@ export class LadybugProvider implements GraphProvider {
       scope: (r.scope as "project" | "global") ?? "project",
       description: (r.description as string) || undefined,
       summary: (r.summary as string) || undefined,
-      namespace: (r.namespace as string) || undefined,
+      namespace: (r.namespace as string) ?? "",
     }));
 
     return { memories, edges, entities };
@@ -619,10 +669,12 @@ export class LadybugProvider implements GraphProvider {
   ): Promise<Memory[]> {
     const overfetchLimit = limit * 3;
     const conditions: string[] = ["node.deletedAt = ''"];
+    const params: Record<string, unknown> = {};
     if (filter?.namespace === null) {
       conditions.push("node.namespace = ''");
     } else if (filter?.namespace !== undefined) {
-      conditions.push(`node.namespace = '${filter.namespace}'`);
+      conditions.push("node.namespace = $namespace");
+      params.namespace = filter.namespace;
     }
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
@@ -630,7 +682,7 @@ export class LadybugProvider implements GraphProvider {
     const activeDim = getActiveDimension();
     const dimInfo = activeDim ? this.dimensionRegistry.get(activeDim) : undefined;
     const indexName = dimInfo?.memoryIndex ?? "memory_vec_idx";
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `CALL QUERY_VECTOR_INDEX('Memory', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
        ${whereClause}
@@ -638,6 +690,7 @@ export class LadybugProvider implements GraphProvider {
               node.category as category, node.namespace as namespace, node.status as status,
               node.error as error, node.createdAt as createdAt, distance
        ORDER BY distance ASC`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -664,10 +717,12 @@ export class LadybugProvider implements GraphProvider {
   ): Promise<StoredEdge[]> {
     const overfetchLimit = limit * 3;
     const conditions: string[] = ["node.deletedAt = ''"];
+    const params: Record<string, unknown> = { limit };
     if (filter?.namespace === null) {
       conditions.push("node.namespace = ''");
     } else if (filter?.namespace !== undefined) {
-      conditions.push(`node.namespace = '${filter.namespace}'`);
+      conditions.push("node.namespace = $namespace");
+      params.namespace = filter.namespace;
     }
     if (!filter?.includeInvalidated) {
       conditions.push("node.invalidAt = ''");
@@ -678,7 +733,7 @@ export class LadybugProvider implements GraphProvider {
     const activeDim = getActiveDimension();
     const dimInfo = activeDim ? this.dimensionRegistry.get(activeDim) : undefined;
     const indexName = dimInfo?.factIndex ?? "fact_vec_idx";
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `CALL QUERY_VECTOR_INDEX('Fact', '${indexName}', ${embeddingStr}, ${overfetchLimit})
        WITH node, distance
        ${whereClause}
@@ -690,7 +745,8 @@ export class LadybugProvider implements GraphProvider {
               node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
               node.invalidAt as invalidAt, node.createdAt as createdAt, distance
        ORDER BY distance ASC
-       LIMIT ${limit}`,
+       LIMIT $limit`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -703,10 +759,12 @@ export class LadybugProvider implements GraphProvider {
     filter?: EdgeFilter,
   ): Promise<StoredEdge[]> {
     const conditions: string[] = ["node.deletedAt = ''"];
+    const params: Record<string, unknown> = { limit };
     if (filter?.namespace === null) {
       conditions.push("node.namespace = ''");
     } else if (filter?.namespace !== undefined) {
-      conditions.push(`node.namespace = '${filter.namespace}'`);
+      conditions.push("node.namespace = $namespace");
+      params.namespace = filter.namespace;
     }
     if (!filter?.includeInvalidated) {
       conditions.push("node.invalidAt = ''");
@@ -715,7 +773,7 @@ export class LadybugProvider implements GraphProvider {
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
 
     const escapedQuery = this.escapeFtsQuery(query);
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `CALL QUERY_FTS_INDEX('Fact', 'fact_fts_idx', '${escapedQuery}', top := ${limit * 3})
        WITH node, score
        ${whereClause}
@@ -727,7 +785,8 @@ export class LadybugProvider implements GraphProvider {
               node.episodes as episodes, node.namespace as namespace, node.validAt as validAt,
               node.invalidAt as invalidAt, node.createdAt as createdAt, score
        ORDER BY score DESC
-       LIMIT ${limit}`,
+       LIMIT $limit`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -779,7 +838,7 @@ export class LadybugProvider implements GraphProvider {
             scope: (entityRows[0].scope as "project" | "global") ?? "project",
             description: (entityRows[0].description as string) || undefined,
             summary: (entityRows[0].summary as string) || undefined,
-            namespace: (entityRows[0].namespace as string) || undefined,
+            namespace: (entityRows[0].namespace as string) ?? "",
           }
         : undefined;
 
@@ -883,6 +942,78 @@ export class LadybugProvider implements GraphProvider {
     }
 
     return { deletedMemory, deletedEntity };
+  }
+
+  async forgetMemoryById(id: string, namespace = "default"): Promise<boolean> {
+    const now = new Date().toISOString();
+    const memResult = await this.executeQuery(
+      `MATCH (m:Memory {id: $id, namespace: $namespace, deletedAt: ''})
+       SET m.deletedAt = $now
+       RETURN count(m) as deleted`,
+      { id, namespace, now },
+    );
+    const memRows = await memResult.getAll();
+    const deletedMemory = ((memRows[0]?.deleted as number) ?? 0) > 0;
+    if (!deletedMemory) return false;
+
+    // Facts may be supported by multiple episodes. Remove just this memory's
+    // episode; only tombstone the fact when no support remains.
+    const factResult = await this.executeQuery(
+      `MATCH (f:Fact {deletedAt: ''})
+       WHERE $memoryId IN f.episodes
+       RETURN f.id as id, f.episodes as episodes`,
+      { memoryId: id },
+    );
+    const factRows = await factResult.getAll();
+    for (const row of factRows) {
+      const episodes = ((row.episodes as string[]) ?? []).filter((episodeId) => episodeId !== id);
+      if (episodes.length > 0) {
+        await this.executeQuery(
+          `MATCH (f:Fact {id: $factId, deletedAt: ''})
+           SET f.episodes = $episodes`,
+          { factId: row.id, episodes },
+        );
+      } else {
+        await this.executeQuery(
+          `MATCH (f:Fact {id: $factId, deletedAt: ''})
+           SET f.deletedAt = $now`,
+          { factId: row.id, now },
+        );
+      }
+    }
+
+    // Round 8 Theme C: mirror the Fact cleanup on the canonical RELATES_TO
+    // edges. Fact is the FTS mirror; RELATES_TO is what `findEdges` /
+    // graph-viz queries actually traverse. Without this block, deleting a
+    // memory left the Fact mirror consistent but RELATES_TO.episodes still
+    // listed the deleted memory — edges with only this memory as support
+    // kept rendering as active. Neo4j's `forgetMemoryById` already does this;
+    // Ladybug was diverging.
+    const edgeResult = await this.executeQuery(
+      `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
+       WHERE $memoryId IN r.episodes AND r.invalidAt = ''
+       RETURN r.id as id, r.episodes as episodes`,
+      { memoryId: id },
+    );
+    const edgeRows = await edgeResult.getAll();
+    for (const row of edgeRows) {
+      const episodes = ((row.episodes as string[]) ?? []).filter((episodeId) => episodeId !== id);
+      if (episodes.length > 0) {
+        await this.executeQuery(
+          `MATCH (:Entity)-[r:RELATES_TO {id: $edgeId}]->(:Entity)
+           SET r.episodes = $episodes`,
+          { edgeId: row.id, episodes },
+        );
+      } else {
+        await this.executeQuery(
+          `MATCH (:Entity)-[r:RELATES_TO {id: $edgeId}]->(:Entity)
+           SET r.invalidAt = $now`,
+          { edgeId: row.id, now },
+        );
+      }
+    }
+
+    return true;
   }
 
   async forgetEdge(
@@ -1010,18 +1141,22 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async getPendingMemories(namespace?: string, limit = 10): Promise<Memory[]> {
-    let whereClause = "WHERE m.status = 'pending' AND m.deletedAt = ''";
-    if (namespace !== undefined) {
-      whereClause += ` AND m.namespace = '${namespace}'`;
-    }
+    // Parameterized to prevent Cypher injection and match the rest of the
+    // provider's query style. Limit is interpolated because LadybugDB does
+    // not yet support LIMIT bound params — guarded by a numeric coercion.
+    const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 10;
+    const whereClause = namespace !== undefined
+      ? "WHERE m.status = 'pending' AND m.deletedAt = '' AND m.namespace = $namespace"
+      : "WHERE m.status = 'pending' AND m.deletedAt = ''";
 
-    const result = await this.conn.query(
-      `MATCH (m:Memory) ${whereClause} RETURN m ORDER BY m.createdAt ASC LIMIT ${limit}`,
+    const result = await this.executeQuery(
+      `MATCH (m:Memory) ${whereClause} RETURN m ORDER BY m.createdAt ASC LIMIT ${safeLimit}`,
+      namespace !== undefined ? { namespace } : {},
     );
 
     const rows = await result.getAll();
     return rows.map((row) => {
-      const m = row.m;
+      const m = row.m as Record<string, unknown>;
       return {
         id: m.id as string,
         name: m.name as string,
@@ -1061,35 +1196,48 @@ export class LadybugProvider implements GraphProvider {
     limit = 100,
     pagination?: PaginationParams,
   ): Promise<StoredEntity[]> {
+    // User-supplied filter values flow through MCP search and HTTP routes.
+    // String interpolation here would be a Cypher injection vector — every
+    // value-bearing predicate is bound via $params and executeQuery's
+    // prepare/execute path.
     const conditions: string[] = ["e.deletedAt = ''"];
-    if (filter.uuid) conditions.push(`e.uuid = '${filter.uuid}'`);
-    if (filter.name)
-      conditions.push(`LOWER(e.name) CONTAINS LOWER('${filter.name}')`);
+    const params: Record<string, unknown> = {};
+    if (filter.uuid) { conditions.push(`e.uuid = $uuid`); params.uuid = filter.uuid; }
+    if (filter.name) { conditions.push(`LOWER(e.name) CONTAINS LOWER($name)`); params.name = filter.name; }
     if (filter.namespace === null) conditions.push("e.namespace = ''");
-    else if (filter.namespace !== undefined)
-      conditions.push(`e.namespace = '${filter.namespace}'`);
-    if (filter.scope) conditions.push(`e.scope = '${filter.scope}'`);
-    if (filter.type) conditions.push(`e.type = '${filter.type}'`);
+    else if (filter.namespace !== undefined) {
+      conditions.push(`e.namespace = $namespace`);
+      params.namespace = filter.namespace;
+    }
+    if (filter.scope) { conditions.push(`e.scope = $scope`); params.scope = filter.scope; }
+    if (filter.type) { conditions.push(`e.type = $type`); params.type = filter.type; }
 
-    const effectiveLimit = pagination?.limit ?? limit;
-    const offset = pagination?.offset ?? 0;
-    const sortCol = pagination?.sortBy === "name" ? "e.name" : "e.name";
-    const sortDir = pagination?.sortDir === "asc" ? "ASC" : "ASC";
+    // LadybugDB doesn't bind LIMIT/SKIP as params — these are interpolated.
+    // Guard against NaN / Infinity / non-integer from MCP or HTTP callers
+    // (review pass 7 finding #7; matches the pattern already used in
+    // getPendingMemories).
+    const safeLimit = safePagInt(pagination?.limit ?? limit, 100);
+    const safeOffset = safePagInt(pagination?.offset ?? 0, 0);
+    const sortCol = "e.name";
+    const sortDir = "ASC";
+    // Tiebreak on uuid for stable pagination across rows with duplicate names.
+    const tiebreak = `, e.uuid ${sortDir}`;
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
-    const result = await this.conn.query(
-      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir} SKIP ${offset} LIMIT ${effectiveLimit}`,
+    const result = await this.executeQuery(
+      `MATCH (e:Entity) ${whereClause} RETURN e ORDER BY ${sortCol} ${sortDir}${tiebreak} SKIP ${safeOffset} LIMIT ${safeLimit}`,
+      params,
     );
 
     const rows = await result.getAll();
     return rows.map((row) => {
-      const e = row.e;
+      const e = row.e as Record<string, unknown>;
       return {
         uuid: e.uuid as string,
         name: e.name as string,
         type: e.type as StoredEntity["type"],
         description: (e.description as string) || undefined,
-        namespace: (e.namespace as string) || undefined,
+        namespace: (e.namespace as string) ?? "",
         scope: (e.scope as "project" | "global") ?? "project",
         summary: (e.summary as string) || undefined,
       };
@@ -1097,29 +1245,44 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async findEdges(filter: EdgeFilter, limit = 100, pagination?: PaginationParams): Promise<StoredEdge[]> {
+    // See findEntities — every value-bearing predicate is parameterized to
+    // close the Cypher injection vector for MCP/HTTP-supplied filters.
     const conditions: string[] = [
       "source.deletedAt = ''",
       "target.deletedAt = ''",
     ];
-    if (filter.id) conditions.push(`r.id = '${filter.id}'`);
+    const params: Record<string, unknown> = {};
+    if (filter.id) { conditions.push(`r.id = $id`); params.id = filter.id; }
     if (filter.namespace === null) conditions.push("source.namespace = ''");
-    else if (filter.namespace !== undefined)
-      conditions.push(`source.namespace = '${filter.namespace}'`);
-    if (filter.sourceEntityName)
-      conditions.push(`source.name = '${filter.sourceEntityName}'`);
-    if (filter.targetEntityName)
-      conditions.push(`target.name = '${filter.targetEntityName}'`);
-    if (filter.relationType)
-      conditions.push(`r.relationType = '${filter.relationType}'`);
+    else if (filter.namespace !== undefined) {
+      conditions.push(`source.namespace = $namespace`);
+      params.namespace = filter.namespace;
+    }
+    if (filter.sourceEntityName) {
+      conditions.push(`source.name = $sourceEntityName`);
+      params.sourceEntityName = filter.sourceEntityName;
+    }
+    if (filter.targetEntityName) {
+      conditions.push(`target.name = $targetEntityName`);
+      params.targetEntityName = filter.targetEntityName;
+    }
+    if (filter.relationType) {
+      conditions.push(`r.relationType = $relationType`);
+      params.relationType = filter.relationType;
+    }
     if (!filter.includeInvalidated) conditions.push("r.invalidAt = ''");
 
-    const effectiveLimit = pagination?.limit ?? limit;
-    const offset = pagination?.offset ?? 0;
+    // See findEntities: LadybugDB does not bind LIMIT/SKIP as params.
+    const safeLimit = safePagInt(pagination?.limit ?? limit, 100);
+    const safeOffset = safePagInt(pagination?.offset ?? 0, 0);
     const sortCol = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+    // Tiebreak on r.id for stable pagination across rows with duplicate
+    // createdAt or fact text.
+    const tiebreak = `, r.id ${sortDir}`;
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity)
        ${whereClause}
        RETURN r.id as id, source.name as sourceEntityName, target.name as targetEntityName,
@@ -1127,9 +1290,10 @@ export class LadybugProvider implements GraphProvider {
               r.confidence as confidence, r.confidenceReason as confidenceReason,
               r.episodes as episodes, source.namespace as namespace, r.validAt as validAt,
               r.invalidAt as invalidAt, r.createdAt as createdAt
-       ORDER BY ${sortCol} ${sortDir}
-       SKIP ${offset}
-       LIMIT ${effectiveLimit}`,
+       ORDER BY ${sortCol} ${sortDir}${tiebreak}
+       SKIP ${safeOffset}
+       LIMIT ${safeLimit}`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -1137,29 +1301,53 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async findMemories(filter: MemoryFilter, limit = 100, pagination?: PaginationParams): Promise<Memory[]> {
+    // See findEntities — every value-bearing predicate is parameterized to
+    // close the Cypher injection vector for MCP/HTTP-supplied filters.
     const conditions: string[] = ["m.deletedAt = ''"];
-    if (filter.id) conditions.push(`m.id = '${filter.id}'`);
-    if (filter.name)
-      conditions.push(`LOWER(m.name) CONTAINS LOWER('${filter.name}')`);
+    const params: Record<string, unknown> = {};
+    if (filter.id) { conditions.push(`m.id = $id`); params.id = filter.id; }
+    if (filter.name) { conditions.push(`LOWER(m.name) CONTAINS LOWER($name)`); params.name = filter.name; }
     if (filter.namespace === null) conditions.push("m.namespace = ''");
-    else if (filter.namespace !== undefined)
-      conditions.push(`m.namespace = '${filter.namespace}'`);
-    if (filter.category) conditions.push(`m.category = '${filter.category}'`);
+    else if (filter.namespace !== undefined) {
+      conditions.push(`m.namespace = $namespace`);
+      params.namespace = filter.namespace;
+    }
+    if (filter.category) { conditions.push(`m.category = $category`); params.category = filter.category; }
+    if (filter.cursorCreatedAt !== undefined) {
+      // Cursor-based pagination: `createdAt > $cursor` OR (tied createdAt AND
+      // `id > $cursorId`). Parity with the PaginationParams sort direction —
+      // the cursor comparator flips for descending scans. Review pass 7 #14.
+      const iso = filter.cursorCreatedAt.toISOString();
+      params.cursorCreatedAt = iso;
+      const dir = pagination?.sortDir === "asc" ? ">" : "<";
+      if (filter.cursorId !== undefined) {
+        params.cursorId = filter.cursorId;
+        conditions.push(`(m.createdAt ${dir} $cursorCreatedAt OR (m.createdAt = $cursorCreatedAt AND m.id ${dir} $cursorId))`);
+      } else {
+        conditions.push(`m.createdAt ${dir} $cursorCreatedAt`);
+      }
+    }
 
-    const effectiveLimit = pagination?.limit ?? limit;
-    const offset = pagination?.offset ?? 0;
+    // See findEntities: LadybugDB does not bind LIMIT/SKIP as params.
+    const safeLimit = safePagInt(pagination?.limit ?? limit, 100);
+    const safeOffset = safePagInt(pagination?.offset ?? 0, 0);
     const sortCol = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
     const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+    // Always tiebreak on m.id — without it, rows sharing createdAt (or name)
+    // shuffle between pages under offset-based pagination, producing duplicates
+    // and silently skipping rows. The migration spec mandates stable order.
+    const tiebreak = `, m.id ${sortDir}`;
 
     const whereClause = `WHERE ${conditions.join(" AND ")}`;
-    const result = await this.conn.query(
+    const result = await this.executeQuery(
       `MATCH (m:Memory) ${whereClause}
        RETURN m.id as id, m.name as name, m.text as text, m.summary as summary,
               m.category as category, m.namespace as namespace, m.status as status,
               m.error as error, m.createdAt as createdAt
-       ORDER BY ${sortCol} ${sortDir}
-       SKIP ${offset}
-       LIMIT ${effectiveLimit}`,
+       ORDER BY ${sortCol} ${sortDir}${tiebreak}
+       SKIP ${safeOffset}
+       LIMIT ${safeLimit}`,
+      params,
     );
 
     const rows = await result.getAll();
@@ -1183,31 +1371,36 @@ export class LadybugProvider implements GraphProvider {
     const memConditions = ["m.deletedAt = ''"];
     const entityConditions = ["e.deletedAt = ''"];
     const edgeConditions = ["source.deletedAt = ''", "target.deletedAt = ''"];
+    const params: Record<string, unknown> = {};
 
     if (namespace) {
-      memConditions.push(`m.namespace = '${namespace}'`);
-      entityConditions.push(`e.namespace = '${namespace}'`);
-      edgeConditions.push(`source.namespace = '${namespace}'`);
+      memConditions.push("m.namespace = $namespace");
+      entityConditions.push("e.namespace = $namespace");
+      edgeConditions.push("source.namespace = $namespace");
+      params.namespace = namespace;
     }
 
     const memWhere = `WHERE ${memConditions.join(" AND ")}`;
     const entityWhere = `WHERE ${entityConditions.join(" AND ")}`;
     const edgeWhere = `WHERE ${edgeConditions.join(" AND ")}`;
 
-    const memResult = await this.conn.query(
+    const memResult = await this.executeQuery(
       `MATCH (m:Memory) ${memWhere} RETURN count(m) as count`,
+      params,
     );
     const memRows = await memResult.getAll();
     const memories = Number(memRows[0]?.count ?? 0);
 
-    const entityResult = await this.conn.query(
+    const entityResult = await this.executeQuery(
       `MATCH (e:Entity) ${entityWhere} RETURN count(e) as count`,
+      params,
     );
     const entityRows = await entityResult.getAll();
     const entities = Number(entityRows[0]?.count ?? 0);
 
-    const edgeResult = await this.conn.query(
+    const edgeResult = await this.executeQuery(
       `MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity) ${edgeWhere} RETURN count(r) as count`,
+      params,
     );
     const edgeRows = await edgeResult.getAll();
     const edges = Number(edgeRows[0]?.count ?? 0);
@@ -1240,13 +1433,18 @@ export class LadybugProvider implements GraphProvider {
   }
 
   async getGraphData(namespace?: string): Promise<GraphData> {
-    const nsFilter = namespace ? `AND e.namespace = '${namespace}'` : "";
-    const entityResult = await this.conn.query(
+    const params: Record<string, unknown> = {};
+    const entityNsFilter = namespace ? "AND e.namespace = $namespace" : "";
+    const relNsFilter = namespace ? "AND s.namespace = $namespace" : "";
+    if (namespace) params.namespace = namespace;
+
+    const entityResult = await this.executeQuery(
       `MATCH (e:Entity)
-       WHERE e.deletedAt = '' ${nsFilter}
+       WHERE e.deletedAt = '' ${entityNsFilter}
        RETURN e.uuid as id, e.name as name, e.type as type,
               e.namespace as namespace, e.description as description, e.summary as summary
        ORDER BY e.name`,
+      params,
     );
     const entityRows = await entityResult.getAll();
     const nodes = entityRows.map((r) => ({
@@ -1260,14 +1458,15 @@ export class LadybugProvider implements GraphProvider {
 
     const nodeNames = new Set(nodes.map((n) => n.name));
 
-    const relResult = await this.conn.query(
+    const relResult = await this.executeQuery(
       `MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
-       WHERE (r.invalidAt IS NULL OR r.invalidAt = '') ${nsFilter.replace("e.", "s.")}
+       WHERE (r.invalidAt IS NULL OR r.invalidAt = '') ${relNsFilter}
        RETURN s.name as source, t.name as target,
               r.relationType as relationType, r.fact as fact,
               r.sentiment as sentiment, r.confidence as confidence,
               r.id as edgeId
        ORDER BY s.name, t.name`,
+      params,
     );
     const relRows = await relResult.getAll();
     const links = relRows
@@ -1532,6 +1731,112 @@ export class LadybugProvider implements GraphProvider {
     return (await result.getAll()).map((r) => ({ name: r.name as string, type: r.type as string }));
   }
 
+  private factEmbeddingString(value: unknown): string {
+    return Array.isArray(value)
+      ? `[${(value as number[]).join(",")}]`
+      : this.zeroEmbeddingStr(2560);
+  }
+
+  private mergedRelationParams(row: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: row.id as string,
+      relationType: row.relationType as string,
+      fact: row.fact as string,
+      sentiment: row.sentiment ?? 0,
+      confidence: row.confidence ?? 1,
+      confidenceReason: (row.confidenceReason as string) ?? "",
+      episodes: (row.episodes as string[]) ?? [],
+      validAt: (row.validAt as string) ?? "",
+      invalidAt: (row.invalidAt as string) ?? "",
+      namespace: (row.namespace as string) ?? "",
+      createdAt: (row.createdAt as string) ?? "",
+    };
+  }
+
+  private async copyOutgoingMergeEdges(keepUuid: string, dupeUuid: string): Promise<void> {
+    const outResult = await this.executeQuery(
+      `MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->(t:Entity)
+       RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+              r.sentiment as sentiment, r.confidence as confidence,
+              r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
+              r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
+              r.namespace as namespace, r.createdAt as createdAt,
+              t.uuid as targetUuid`,
+      { dupeUuid },
+    );
+
+    for (const row of await outResult.getAll()) {
+      const targetUuid = row.targetUuid as string;
+      const relationType = row.relationType as string;
+      const exists = await this.executeQuery(
+        `MATCH (s:Entity {uuid: $keepUuid})-[r:RELATES_TO]->(t:Entity {uuid: $targetUuid})
+         WHERE r.relationType = $relationType RETURN r.id`,
+        { keepUuid, targetUuid, relationType },
+      );
+      if ((await exists.getAll()).length > 0) continue;
+
+      const embStr = this.factEmbeddingString(row.factEmbedding);
+      await this.executeQuery(
+        `MATCH (s:Entity {uuid: $keepUuid})
+         MATCH (t:Entity {uuid: $targetUuid})
+         CREATE (s)-[:RELATES_TO {
+           id: $id, relationType: $relationType, fact: $fact,
+           sentiment: $sentiment, confidence: $confidence,
+           confidenceReason: $confidenceReason, factEmbedding: ${embStr},
+           episodes: $episodes, validAt: $validAt,
+           invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
+         }]->(t)`,
+        {
+          keepUuid,
+          targetUuid,
+          ...this.mergedRelationParams(row),
+        },
+      );
+    }
+  }
+
+  private async copyIncomingMergeEdges(keepUuid: string, dupeUuid: string): Promise<void> {
+    const inResult = await this.executeQuery(
+      `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: $dupeUuid})
+       RETURN r.id as id, r.relationType as relationType, r.fact as fact,
+              r.sentiment as sentiment, r.confidence as confidence,
+              r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
+              r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
+              r.namespace as namespace, r.createdAt as createdAt,
+              s.uuid as sourceUuid`,
+      { dupeUuid },
+    );
+
+    for (const row of await inResult.getAll()) {
+      const sourceUuid = row.sourceUuid as string;
+      const relationType = row.relationType as string;
+      const exists = await this.executeQuery(
+        `MATCH (s:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(t:Entity {uuid: $keepUuid})
+         WHERE r.relationType = $relationType RETURN r.id`,
+        { sourceUuid, keepUuid, relationType },
+      );
+      if ((await exists.getAll()).length > 0) continue;
+
+      const embStr = this.factEmbeddingString(row.factEmbedding);
+      await this.executeQuery(
+        `MATCH (s:Entity {uuid: $sourceUuid})
+         MATCH (t:Entity {uuid: $keepUuid})
+         CREATE (s)-[:RELATES_TO {
+           id: $id, relationType: $relationType, fact: $fact,
+           sentiment: $sentiment, confidence: $confidence,
+           confidenceReason: $confidenceReason, factEmbedding: ${embStr},
+           episodes: $episodes, validAt: $validAt,
+           invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
+         }]->(t)`,
+        {
+          sourceUuid,
+          keepUuid,
+          ...this.mergedRelationParams(row),
+        },
+      );
+    }
+  }
+
   async mergeEntities(keepUuid: string, dupeUuids: string[]): Promise<{ removed: number }> {
     let removed = 0;
 
@@ -1546,89 +1851,8 @@ export class LadybugProvider implements GraphProvider {
         { dupeUuid, keepUuid },
       );
 
-      // Re-point outgoing RELATES_TO edges
-      const outResult = await this.executeQuery(
-        `MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->(t:Entity)
-         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
-                r.sentiment as sentiment, r.confidence as confidence,
-                r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
-                r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
-                r.namespace as namespace, r.createdAt as createdAt,
-                t.uuid as targetUuid`,
-        { dupeUuid },
-      );
-      for (const row of await outResult.getAll()) {
-        const exists = await this.executeQuery(
-          `MATCH (s:Entity {uuid: $keepUuid})-[r:RELATES_TO]->(t:Entity {uuid: $targetUuid})
-           WHERE r.relationType = $relationType RETURN r.id`,
-          { keepUuid, targetUuid: row.targetUuid as string, relationType: row.relationType as string },
-        );
-        if ((await exists.getAll()).length === 0) {
-          const embStr = Array.isArray(row.factEmbedding) ? `[${(row.factEmbedding as number[]).join(",")}]` : this.zeroEmbeddingStr(2560);
-          await this.executeQuery(
-            `MATCH (s:Entity {uuid: $keepUuid})
-             MATCH (t:Entity {uuid: $targetUuid})
-             CREATE (s)-[:RELATES_TO {
-               id: $id, relationType: $relationType, fact: $fact,
-               sentiment: $sentiment, confidence: $confidence,
-               confidenceReason: $confidenceReason, factEmbedding: ${embStr},
-               episodes: $episodes, validAt: $validAt,
-               invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
-             }]->(t)`,
-            {
-              keepUuid, targetUuid: row.targetUuid as string,
-              id: row.id as string, relationType: row.relationType as string,
-              fact: row.fact as string, sentiment: row.sentiment ?? 0,
-              confidence: row.confidence ?? 1, confidenceReason: (row.confidenceReason as string) ?? "",
-              episodes: (row.episodes as string[]) ?? [],
-              validAt: (row.validAt as string) ?? "", invalidAt: (row.invalidAt as string) ?? "",
-              namespace: (row.namespace as string) ?? "", createdAt: (row.createdAt as string) ?? "",
-            },
-          );
-        }
-      }
-
-      // Re-point incoming RELATES_TO edges
-      const inResult = await this.executeQuery(
-        `MATCH (s:Entity)-[r:RELATES_TO]->(e:Entity {uuid: $dupeUuid})
-         RETURN r.id as id, r.relationType as relationType, r.fact as fact,
-                r.sentiment as sentiment, r.confidence as confidence,
-                r.confidenceReason as confidenceReason, r.factEmbedding as factEmbedding,
-                r.episodes as episodes, r.validAt as validAt, r.invalidAt as invalidAt,
-                r.namespace as namespace, r.createdAt as createdAt,
-                s.uuid as sourceUuid`,
-        { dupeUuid },
-      );
-      for (const row of await inResult.getAll()) {
-        const exists = await this.executeQuery(
-          `MATCH (s:Entity {uuid: $sourceUuid})-[r:RELATES_TO]->(t:Entity {uuid: $keepUuid})
-           WHERE r.relationType = $relationType RETURN r.id`,
-          { sourceUuid: row.sourceUuid as string, keepUuid, relationType: row.relationType as string },
-        );
-        if ((await exists.getAll()).length === 0) {
-          const embStr = Array.isArray(row.factEmbedding) ? `[${(row.factEmbedding as number[]).join(",")}]` : this.zeroEmbeddingStr(2560);
-          await this.executeQuery(
-            `MATCH (s:Entity {uuid: $sourceUuid})
-             MATCH (t:Entity {uuid: $keepUuid})
-             CREATE (s)-[:RELATES_TO {
-               id: $id, relationType: $relationType, fact: $fact,
-               sentiment: $sentiment, confidence: $confidence,
-               confidenceReason: $confidenceReason, factEmbedding: ${embStr},
-               episodes: $episodes, validAt: $validAt,
-               invalidAt: $invalidAt, namespace: $namespace, createdAt: $createdAt
-             }]->(t)`,
-            {
-              sourceUuid: row.sourceUuid as string, keepUuid,
-              id: row.id as string, relationType: row.relationType as string,
-              fact: row.fact as string, sentiment: row.sentiment ?? 0,
-              confidence: row.confidence ?? 1, confidenceReason: (row.confidenceReason as string) ?? "",
-              episodes: (row.episodes as string[]) ?? [],
-              validAt: (row.validAt as string) ?? "", invalidAt: (row.invalidAt as string) ?? "",
-              namespace: (row.namespace as string) ?? "", createdAt: (row.createdAt as string) ?? "",
-            },
-          );
-        }
-      }
+      await this.copyOutgoingMergeEdges(keepUuid, dupeUuid);
+      await this.copyIncomingMergeEdges(keepUuid, dupeUuid);
 
       // Delete old edges and soft-delete duplicate
       await this.executeQuery(`MATCH (e:Entity {uuid: $dupeUuid})-[r:RELATES_TO]->() DELETE r`, { dupeUuid });

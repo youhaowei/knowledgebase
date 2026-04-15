@@ -25,6 +25,13 @@ import { rrfFuse } from "./search-utils.js";
 import { getActiveDimension, isZeroEmbedding } from "./embedder.js";
 import { normalizeEntityName } from "./entity-matcher.js";
 
+type MutableEntity = Entity & {
+  uuid?: string;
+  namespace?: string;
+  scope?: "project" | "global";
+  summary?: string;
+};
+
 export class Neo4jProvider implements GraphProvider {
   private driver: Driver;
 
@@ -248,6 +255,7 @@ export class Neo4jProvider implements GraphProvider {
             m.namespace = $namespace,
             m.status = $status,
             m.error = $error,
+            m.deletedAt = '',
             m.createdAt = datetime($createdAt)${createEmbStr}
           ON MATCH SET
             m.name = $name,
@@ -294,7 +302,8 @@ export class Neo4jProvider implements GraphProvider {
               e.description = $description,
               e.namespace = $namespace,
               e.scope = $scope,
-              e.canonicalName = $canonicalName
+              e.canonicalName = $canonicalName,
+              e.deletedAt = ''
             ON MATCH SET
               e.type = $type,
               e.description = COALESCE($description, e.description)
@@ -324,7 +333,7 @@ export class Neo4jProvider implements GraphProvider {
     tx: ManagedTransaction,
     edge: ExtractedEdge,
     edgeEmbMap: EmbeddingMap,
-    entities: Entity[],
+    entities: MutableEntity[],
     memory: Memory,
   ) {
     const sourceEntity = entities[edge.sourceIndex];
@@ -398,61 +407,27 @@ export class Neo4jProvider implements GraphProvider {
     embedding: number[],
     query: string,
     limit = 10,
+    namespace?: string,
   ): Promise<SearchResult> {
     const session = this.driver.session();
     try {
-      let memories: Memory[] = [];
-      if (embedding.length > 0) {
-        const activeDim = getActiveDimension();
-        const memIndexName = activeDim ? this.getDimInfo(activeDim).memoryIndex : "memory_embedding";
-        const memoryResult = await session.run(
-        `
-        CALL db.index.vector.queryNodes('${memIndexName}', $limit, $embedding)
-        YIELD node, score
-        RETURN node.id as id,
-               node.name as name,
-               node.text as text,
-               node.summary as summary,
-               node.abstract as abstract,
-               node.schemaVersion as schemaVersion,
-               node.versionedAt as versionedAt,
-               node.category as category,
-               node.namespace as namespace,
-               node.status as status,
-               node.error as error,
-               node.createdAt as createdAt,
-               score
-        ORDER BY score DESC
-        `,
-        { embedding, limit: neo4j.int(limit) },
-      );
-
-      memories = memoryResult.records.map((r) => ({
-        id: r.get("id"),
-        name: r.get("name"),
-        text: r.get("text"),
-        summary: r.get("summary"),
-        abstract: r.get("abstract") || "",
-        schemaVersion: r.get("schemaVersion") || "0.0.0",
-        versionedAt: r.get("versionedAt") || undefined,
-        category: r.get("category") ?? undefined,
-        namespace: r.get("namespace"),
-        status: r.get("status") ?? "completed",
-        error: r.get("error") ?? undefined,
-        createdAt: new Date(r.get("createdAt")),
-      }));
-      }
+      const filter = namespace ? { namespace } : undefined;
+      const memories = embedding.length > 0 ? await this.vectorSearch(embedding, limit, filter) : [];
 
       const [vectorEdges, ftsEdges] = await Promise.all([
-        this.vectorSearchEdges(embedding, limit),
-        this.fullTextSearchEdges(query, limit),
+        this.vectorSearchEdges(embedding, limit, filter),
+        this.fullTextSearchEdges(query, limit, filter),
       ]);
       const edges = rrfFuse(vectorEdges, ftsEdges, limit);
 
+      const entityCypher = namespace
+        ? `MATCH (e:Entity) WHERE e.name =~ $pattern AND e.namespace = $namespace`
+        : `MATCH (e:Entity) WHERE e.name =~ $pattern`;
+      const entityParams: Record<string, unknown> = { pattern: `(?i).*${query}.*`, limit: neo4j.int(limit) };
+      if (namespace) entityParams.namespace = namespace;
       const entityResult = await session.run(
         `
-        MATCH (e:Entity)
-        WHERE e.name =~ $pattern
+        ${entityCypher}
         RETURN e.uuid as uuid,
                e.name as name,
                e.type as type,
@@ -462,7 +437,7 @@ export class Neo4jProvider implements GraphProvider {
                e.namespace as namespace
         LIMIT $limit
         `,
-        { pattern: `(?i).*${query}.*`, limit: neo4j.int(limit) },
+        entityParams,
       );
 
       const entities: StoredEntity[] = entityResult.records.map((r) => ({
@@ -760,7 +735,7 @@ export class Neo4jProvider implements GraphProvider {
             scope: entityRecord.get("scope") ?? "project",
             description: entityRecord.get("description") ?? undefined,
             summary: entityRecord.get("summary") ?? undefined,
-            namespace: entityRecord.get("namespace"),
+            namespace: entityRecord.get("namespace") ?? "",
           }
         : undefined;
 
@@ -884,6 +859,60 @@ export class Neo4jProvider implements GraphProvider {
       });
 
       return { deletedMemory, deletedEntity };
+    } finally {
+      await session.close();
+    }
+  }
+
+  async forgetMemoryById(id: string, namespace = "default"): Promise<boolean> {
+    const session = this.driver.session();
+    try {
+      let deletedMemory = false;
+
+      await session.executeWrite(async (tx) => {
+        const memResult = await tx.run(
+          `
+          MATCH (m:Memory {id: $id, namespace: $namespace})
+          DETACH DELETE m
+          RETURN count(m) as deleted
+          `,
+          { id, namespace },
+        );
+        deletedMemory = (memResult.records[0]?.get("deleted") ?? 0) > 0;
+        if (!deletedMemory) return;
+
+        const relResult = await tx.run(
+          `
+          MATCH (:Entity)-[r:RELATES_TO]->(:Entity)
+          WHERE $memoryId IN r.episodes
+          RETURN r.id as id, r.episodes as episodes
+          `,
+          { memoryId: id },
+        );
+
+        for (const record of relResult.records) {
+          const episodes = ((record.get("episodes") as string[]) ?? []).filter((episodeId) => episodeId !== id);
+          if (episodes.length > 0) {
+            await tx.run(
+              `
+              MATCH (:Entity)-[r:RELATES_TO {id: $id}]->(:Entity)
+              SET r.episodes = $episodes
+              `,
+              { id: record.get("id"), episodes },
+            );
+          } else {
+            await tx.run(
+              `
+              MATCH (:Entity)-[r:RELATES_TO {id: $id}]->(:Entity)
+              DELETE r
+              `,
+              { id: record.get("id") },
+            );
+          }
+        }
+      });
+
+      return deletedMemory;
     } finally {
       await session.close();
     }
@@ -1132,8 +1161,12 @@ export class Neo4jProvider implements GraphProvider {
         params.uuid = filter.uuid;
       }
       if (filter.name) {
-        conditions.push("e.name =~ $namePattern");
-        params.namePattern = `(?i).*${filter.name}.*`;
+        // Literal substring match (parity with LadybugProvider) — the previous
+        // `=~ '(?i).*${name}.*'` regex match was a regex-injection / ReDoS
+        // vector and produced backend-dependent semantics for names with
+        // metachars (`.`, `+`, `?`, `[`).
+        conditions.push("toLower(e.name) CONTAINS toLower($name)");
+        params.name = filter.name;
       }
       if (filter.namespace === null) {
         conditions.push("e.namespace IS NULL");
@@ -1150,13 +1183,15 @@ export class Neo4jProvider implements GraphProvider {
         params.type = filter.type;
       }
 
-      const sortProp = pagination?.sortBy === "name" ? "e.name" : "e.name";
-      const sortDir = pagination?.sortDir === "asc" ? "ASC" : "ASC";
+      const sortProp = "e.name";
+      const sortDir = "ASC";
+      // Tiebreak on uuid for stable pagination across rows with duplicate names.
+      const tiebreak = `, e.uuid ${sortDir}`;
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
       const result = await session.run(
-        `MATCH (e:Entity) ${where} RETURN e ORDER BY ${sortProp} ${sortDir} SKIP $skip LIMIT $limit`,
+        `MATCH (e:Entity) ${where} RETURN e ORDER BY ${sortProp} ${sortDir}${tiebreak} SKIP $skip LIMIT $limit`,
         params,
       );
 
@@ -1216,6 +1251,9 @@ export class Neo4jProvider implements GraphProvider {
 
       const sortProp = pagination?.sortBy === "name" ? "r.fact" : "r.createdAt";
       const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+      // Tiebreak on r.id for stable pagination across rows with duplicate
+      // createdAt or fact text.
+      const tiebreak = `, r.id ${sortDir}`;
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1236,7 +1274,7 @@ export class Neo4jProvider implements GraphProvider {
                r.validAt as validAt,
                r.invalidAt as invalidAt,
                r.createdAt as createdAt
-        ORDER BY ${sortProp} ${sortDir}
+        ORDER BY ${sortProp} ${sortDir}${tiebreak}
         SKIP $skip
         LIMIT $limit
         `,
@@ -1281,8 +1319,9 @@ export class Neo4jProvider implements GraphProvider {
         params.id = filter.id;
       }
       if (filter.name) {
-        conditions.push("m.name =~ $namePattern");
-        params.namePattern = `(?i).*${filter.name}.*`;
+        // Literal substring match for parity with LadybugProvider (no regex DoS).
+        conditions.push("toLower(m.name) CONTAINS toLower($name)");
+        params.name = filter.name;
       }
       if (filter.namespace === null) {
         conditions.push("m.namespace IS NULL");
@@ -1295,9 +1334,25 @@ export class Neo4jProvider implements GraphProvider {
         conditions.push("m.category = $category");
         params.category = filter.category;
       }
+      if (filter.cursorCreatedAt !== undefined) {
+        // Cursor-based pagination — see LadybugProvider.findMemories. Review
+        // pass 7 #14. TODO(TASK-517): moot once Neo4jProvider is dropped.
+        const iso = filter.cursorCreatedAt.toISOString();
+        params.cursorCreatedAt = iso;
+        const dir = pagination?.sortDir === "asc" ? ">" : "<";
+        if (filter.cursorId !== undefined) {
+          params.cursorId = filter.cursorId;
+          conditions.push(`(m.createdAt ${dir} datetime($cursorCreatedAt) OR (m.createdAt = datetime($cursorCreatedAt) AND m.id ${dir} $cursorId))`);
+        } else {
+          conditions.push(`m.createdAt ${dir} datetime($cursorCreatedAt)`);
+        }
+      }
 
       const sortProp = pagination?.sortBy === "name" ? "m.name" : "m.createdAt";
       const sortDir = pagination?.sortDir === "asc" ? "ASC" : "DESC";
+      // Tiebreak on m.id for stable pagination across rows sharing createdAt
+      // or name (common for batched migrations / retro sync).
+      const tiebreak = `, m.id ${sortDir}`;
       const where = conditions.length
         ? `WHERE ${conditions.join(" AND ")}`
         : "";
@@ -1316,7 +1371,7 @@ export class Neo4jProvider implements GraphProvider {
                m.status as status,
                m.error as error,
                m.createdAt as createdAt
-        ORDER BY ${sortProp} ${sortDir}
+        ORDER BY ${sortProp} ${sortDir}${tiebreak}
         SKIP $skip
         LIMIT $limit
         `,
@@ -1504,7 +1559,7 @@ export class Neo4jProvider implements GraphProvider {
             name: e.properties.name as string,
             type: e.properties.type as StoredEntity["type"],
             description: e.properties.description ?? undefined,
-            namespace: e.properties.namespace ?? undefined,
+            namespace: e.properties.namespace ?? "",
             scope: (e.properties.scope ?? "project") as "project" | "global",
             summary: e.properties.summary ?? undefined,
           });

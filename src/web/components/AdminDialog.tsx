@@ -3,13 +3,6 @@ import { RefreshCw, Merge, Activity, Check, X } from "lucide-react";
 import { reextractAll, getReextractStatus, findDuplicateCandidates, mergeDuplicateGroup } from "@/server/functions";
 import type { Stats } from "./types";
 
-interface DuplicateCandidate {
-  keep: { uuid: string; name: string };
-  duplicates: Array<{ uuid: string; name: string }>;
-  normalizedName: string;
-  totalEdges: number;
-}
-
 /** All members of a group with a selectable merge target */
 interface MergeGroup {
   members: Array<{ uuid: string; name: string }>;
@@ -39,6 +32,19 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
   const [isScanning, setIsScanning] = useState(false);
   const [mergeProgress, setMergeProgress] = useState<string | null>(null);
 
+  // Escape closes dialog — keyboard-only users have no other dismissal.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, onClose]);
+
   // Poll reextract status
   useEffect(() => {
     if (!open || !reextractStatus?.running) return;
@@ -63,7 +69,7 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
   const handleReextract = useCallback(async () => {
     const result = await reextractAll();
     if (result.started) {
-      setReextractStatus({ running: true, current: 0, total: result.total ?? 0, currentName: "", phase: "starting", success: 0, failed: 0 });
+      setReextractStatus({ running: true, current: 0, total: 0, currentName: "", phase: "starting", success: 0, failed: 0 });
     }
   }, []);
 
@@ -124,6 +130,7 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
     if (!mergeGroups) return;
     setMergeProgress("Merging...");
     let merged = 0;
+    let failed = 0;
     for (const group of mergeGroups) {
       try {
         await mergeDuplicateGroup({
@@ -133,10 +140,14 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
           },
         });
         merged++;
-      } catch { /* continue with next */ }
+      } catch {
+        failed++;
+      }
     }
     setMergeGroups(null);
-    setMergeProgress(`Merged ${merged} groups`);
+    setMergeProgress(
+      failed > 0 ? `Merged ${merged} groups, ${failed} failed` : `Merged ${merged} groups`,
+    );
     onRefresh();
   }, [mergeGroups, onRefresh]);
 
@@ -145,13 +156,13 @@ export function AdminDialog({ open, onClose, stats, onRefresh }: AdminDialogProp
   const progress = reextractStatus?.total ? Math.round((reextractStatus.current / reextractStatus.total) * 100) : 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]" role="dialog" aria-modal="true" aria-labelledby="admin-dialog-title">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
       <div className="relative w-full max-w-md mx-4 rounded-xl bg-deep/98 border border-border shadow-2xl animate-in max-h-[70vh] flex flex-col">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between shrink-0">
-          <h2 className="text-sm font-display font-semibold text-text-primary">Admin</h2>
-          <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-xs">✕</button>
+          <h2 id="admin-dialog-title" className="text-sm font-display font-semibold text-text-primary">Admin</h2>
+          <button onClick={onClose} aria-label="Close" className="text-text-secondary hover:text-text-primary text-xs">✕</button>
         </div>
 
         <div className="px-5 py-4 space-y-4 overflow-y-auto">

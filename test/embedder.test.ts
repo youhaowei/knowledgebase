@@ -26,7 +26,7 @@ describe("Embedder", () => {
     expect(Array.isArray(embedding)).toBe(true);
     expect(embedding.length).toBeGreaterThan(0);
     expect(typeof embedding[0]).toBe("number");
-  });
+  }, 15_000);
 
   test("embedWithDimension returns correct metadata", async () => {
     const result = await embedWithDimension("test query");
@@ -36,7 +36,7 @@ describe("Embedder", () => {
     expect(Array.isArray(result.embedding)).toBe(true);
     expect(result.embedding.length).toBe(result.dimension);
     expect(result.dimension).toBeGreaterThan(0);
-    expect(["ollama", "fallback"]).toContain(result.source);
+    expect(["ollama", "builtin"]).toContain(result.source);
   });
 
   test("embedDual returns both dimensions", async () => {

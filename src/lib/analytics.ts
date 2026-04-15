@@ -11,8 +11,10 @@
  */
 
 import { AsyncLocalStorage } from "async_hooks";
-import { join } from "path";
+import { createRequire } from "module";
+import { join, dirname } from "path";
 import { homedir } from "os";
+import { mkdirSync } from "fs";
 
 export type AnalyticsSource = "mcp" | "cli" | "web";
 type QueryParam = string | number | null;
@@ -39,11 +41,12 @@ const IDX_OP = "CREATE INDEX IF NOT EXISTS idx_events_op ON events(operation)";
 // (Vite's Node.js-based SSR can't resolve bun: protocol at module scan time)
 let Database: typeof import("bun:sqlite").Database | null = null;
 let db: import("bun:sqlite").Database | null = null;
+const requireModule = createRequire(import.meta.url);
 
 function loadSqlite() {
   if (Database) return Database;
   try {
-    Database = require("bun:sqlite").Database;
+    Database = requireModule("bun:sqlite").Database;
     return Database;
   } catch {
     return null;
@@ -61,6 +64,7 @@ function getDb() {
   const Db = loadSqlite();
   if (!Db) return null;
   try {
+    mkdirSync(dirname(getDbPath()), { recursive: true });
     const instance = new Db(getDbPath(), { create: true });
     instance.run("PRAGMA journal_mode=WAL");
     instance.run(TABLE_DDL);

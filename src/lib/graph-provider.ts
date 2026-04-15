@@ -58,6 +58,22 @@ export interface Stats {
   edges: number;
 }
 
+/**
+ * GraphProvider interface contract — shared by LadybugDB (default) and Neo4j.
+ *
+ * Soft-delete sentinel: every writable node MUST set `deletedAt = ''` on
+ * creation and `deletedAt = <ISO timestamp>` on soft-deletion. Read queries
+ * filter on `deletedAt = ''` to exclude deleted rows. Neo4j additionally
+ * tolerates legacy rows with a missing `deletedAt` property by accepting
+ * `(deletedAt IS NULL OR deletedAt = '')`; this is a compat shim, not a
+ * semantic divergence — new writes on both backends set the empty string.
+ * LadybugDB's schema requires the property to be present, so equality check
+ * alone is sufficient there.
+ *
+ * namespace sentinel: `''` (empty string) represents "global scope" — used
+ * by entities that should be visible across namespaces (project-level
+ * constants). User-created memories always have a concrete namespace.
+ */
 export interface GraphProvider {
   init(): Promise<void>;
   close(): Promise<void>;
@@ -74,6 +90,7 @@ export interface GraphProvider {
     embedding: number[],
     query: string,
     limit?: number,
+    namespace?: string,
   ): Promise<SearchResult>;
 
   vectorSearch(
@@ -97,6 +114,14 @@ export interface GraphProvider {
   get(name: string, namespace: string): Promise<GetResult>;
 
   forget(name: string, namespace: string): Promise<ForgetResult>;
+
+  /**
+   * Exact-memory delete used by the reconciler when replaying tombstones from
+   * the filesystem. Unlike `forget(name, namespace)`, this must only touch the
+   * targeted memory row so a replacement memory with the same name is not
+   * removed on replay.
+   */
+  forgetMemoryById(id: string, namespace: string): Promise<boolean>;
 
   forgetEdge(
     edgeId: string,

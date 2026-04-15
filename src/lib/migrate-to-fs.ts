@@ -11,9 +11,8 @@
  */
 
 import { createGraphProvider } from "./graph-provider.js";
-import { writeMemoryFile } from "./fs-memory.js";
-import { existsSync } from "fs";
-import { homedir } from "os";
+import { ensureNamespacePath, generateIndex, resolveNamespacePath, writeMemoryFile } from "./fs-memory.js";
+import { existsSync, utimesSync } from "fs";
 import { join } from "path";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
@@ -30,7 +29,7 @@ function originForNamespace(namespace: string): Origin {
 
 /** Pre-computed path for existence check without creating directories. */
 function expectedFilePath(namespace: string, id: string): string {
-  return join(homedir(), ".kb", "memories", namespace, `${id}.md`);
+  return join(resolveNamespacePath(namespace), `${id}.md`);
 }
 
 /** Detect name collisions across namespaces. */
@@ -58,6 +57,13 @@ function checkNameCollisions(summaries: MemorySummary[]): void {
 
 type MigrateMemory = { id: string; name: string; text?: string; createdAt: Date | string };
 type MigrateCounter = { written: number; skipped: number; failed: number };
+type MigrateDependencies = {
+  createGraphProvider: typeof createGraphProvider;
+};
+
+const defaultMigrateDependencies: MigrateDependencies = {
+  createGraphProvider,
+};
 
 /** Migrate a single memory: skip if exists, preview if dry-run, write otherwise. */
 async function migrateOne(
@@ -72,18 +78,28 @@ async function migrateOne(
   }
   if (dryRun) {
     console.error(`[migrate]   (dry-run) would write: ${m.id} (${label})`);
-    counters.written++;
     return;
   }
 
   const createdAt = m.createdAt instanceof Date ? m.createdAt.toISOString() : String(m.createdAt ?? now);
+  const stampedAt = new Date(now);
   const frontmatter: MemoryFrontmatter = {
     id: m.id, name: m.name || "", origin: originForNamespace(ns),
-    namespace: ns, tags: [], createdAt, indexedAt: now,
+    namespace: ns, tags: [], createdAt, indexedAt: stampedAt.toISOString(),
   };
 
   try {
-    await writeMemoryFile(m.id, m.text ?? "", frontmatter);
+    const writtenPath = writeMemoryFile(m.id, m.text ?? "", frontmatter);
+    // Spec Decision #8: align mtime with the stamped indexedAt so the
+    // `stale = mtime > indexedAt` invariant doesn't fire on every freshly
+    // migrated file. Without this, the post-write mtime is later than `now`
+    // and every migrated memory looks stale on first read. Mirrors the
+    // pattern in operations.persistProcessedMemory.
+    try {
+      utimesSync(writtenPath, stampedAt, stampedAt);
+    } catch (err) {
+      console.error(`[migrate]   WARN failed to align mtime for ${m.id}: ${err}`);
+    }
     console.error(`[migrate]   wrote: ${m.id} (${label})`);
     counters.written++;
   } catch (err) {
@@ -97,39 +113,95 @@ function filterActive<T extends { name: string }>(memories: T[]): T[] {
   return memories.filter((m) => m.name !== "__ns_rollup__");
 }
 
-export async function migrate(dryRun = false): Promise<void> {
+/**
+ * Paginate through all memories in a namespace. Uses cursor-based pagination
+ * on `(createdAt, id)` rather than `offset / SKIP`. Review pass 7 finding #14:
+ * offset-based pagination silently skipped rows when another process inserted
+ * a memory mid-migration at a position before the current cursor — the next
+ * page's `SKIP N` then jumped past one live row. Cursor semantics are stable
+ * under concurrent inserts AND deletes: each page starts strictly after the
+ * last row seen, ordered by createdAt asc with id as tiebreak.
+ */
+async function paginateMemories(
+  gp: Awaited<ReturnType<typeof createGraphProvider>>,
+  namespace: string,
+): Promise<MigrateMemory[]> {
+  const pageSize = 500;
+  const all: MigrateMemory[] = [];
+  let cursorCreatedAt: Date | undefined;
+  let cursorId: string | undefined;
+  while (true) {
+    const page = await gp.findMemories(
+      { namespace, cursorCreatedAt, cursorId },
+      pageSize,
+      { sortBy: "createdAt", sortDir: "asc" },
+    );
+    if (page.length === 0) break;
+    const active = filterActive(page);
+    all.push(...active);
+    // Advance the cursor to the last row of the returned page — regardless of
+    // whether it passed `filterActive` (the cursor tracks query position, not
+    // filtered-out rows, otherwise a trailing rollup record would pin the
+    // cursor forever).
+    const last = page[page.length - 1]!;
+    cursorCreatedAt = last.createdAt;
+    cursorId = last.id;
+    if (page.length < pageSize) break;
+  }
+  return all;
+}
+
+export async function migrate(
+  dryRun = false,
+  deps: MigrateDependencies = defaultMigrateDependencies,
+): Promise<void> {
   console.error(`[migrate] Starting migration${dryRun ? " (dry-run)" : ""}...`);
 
-  const gp = await createGraphProvider();
-  await gp.init();
+  // `createGraphProvider()` returns an initialized provider; calling init()
+  // again ran schema setup twice and risked double-allocating connections.
+  const gp = await deps.createGraphProvider();
 
   const namespaces = await gp.listNamespaces();
   console.error(`[migrate] Found namespaces: ${namespaces.join(", ") || "(none)"}`);
 
-  // Phase 1: Collect + preflight
+  // Phase 1: Collect + preflight (query once, reuse for write phase).
+  // Spec migration contract: paginate with a stable sort key (createdAt asc,
+  // ties broken by id) and continue until the provider returns fewer rows
+  // than the page size. Single-page reads silently truncate namespaces that
+  // exceed any hardcoded ceiling, which masks data loss.
   const allSummaries: MemorySummary[] = [];
+  const memoriesByNs = new Map<string, MigrateMemory[]>();
   for (const ns of namespaces) {
-    const active = filterActive(await gp.findMemories({ namespace: ns }, 10000));
+    const active = await paginateMemories(gp, ns);
+    memoriesByNs.set(ns, active);
     for (const m of active) {
       allSummaries.push({ id: m.id, name: m.name, namespace: ns });
     }
   }
   checkNameCollisions(allSummaries);
 
-  // Phase 2: Write files
+  // Phase 2: Write files (reuse cached query results)
   const now = new Date().toISOString();
   const counters: MigrateCounter = { written: 0, skipped: 0, failed: 0 };
 
   for (const ns of namespaces) {
-    const active = filterActive(await gp.findMemories({ namespace: ns }, 10000));
+    const active = memoriesByNs.get(ns) ?? [];
     console.error(`[migrate] Namespace "${ns}": ${active.length} memories`);
     for (const m of active) {
       await migrateOne(m, ns, dryRun, now, counters);
     }
+    if (!dryRun) {
+      generateIndex(ensureNamespacePath(ns));
+    }
   }
 
   console.error(`[migrate] Done. written=${counters.written}, skipped=${counters.skipped}, failed=${counters.failed}`);
-  if (counters.failed > 0) process.exit(1);
+  if (counters.failed > 0) {
+    // Throw rather than process.exit() — the CLI's outer try/catch translates
+    // this to exit(1) and keeps stdout-contract control at the boundary.
+    // Programmatic callers can catch and inspect counters before the runtime exits.
+    throw new Error(`migrate failed: ${counters.failed} memor${counters.failed === 1 ? "y" : "ies"} errored`);
+  }
 }
 
 // Script entry point

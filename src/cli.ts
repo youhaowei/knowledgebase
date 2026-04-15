@@ -7,6 +7,18 @@
  * Interactive: bun run kb (no args or -i)
  */
 
+// Static package.json import for --version — kept at module scope so the
+// flag short-circuit below doesn't have to pay a dynamic-import round trip.
+// Review pass 7 finding #12.
+//
+// Do NOT add static imports of `@/types`, `./lib/operations`, `./lib/extractor`,
+// `./lib/embedder`, `./lib/hybrid-search`, or any module that pulls zod — those
+// must stay behind the `await import` block below. `test/cli.test.ts` enforces
+// this with a static-import firewall; round 9 caught a Theme-A regression here.
+import pkg from "../package.json" with { type: "json" };
+
+export {};
+
 // --- Arg parsing (before any imports that trigger Graph init) ---
 
 interface ParsedArgs {
@@ -23,10 +35,13 @@ function parseArgs(argv: string[]): ParsedArgs {
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i]!;
-    if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op" || arg === "--origin") {
+    if (arg === "--tag") {
+      const existing = flags["--tag"] ?? "";
+      flags["--tag"] = existing ? `${existing},${argv[++i] ?? ""}` : (argv[++i] ?? "");
+    } else if (arg === "--env" || arg === "--namespace" || arg === "--ns" || arg === "--name" || arg === "--limit" || arg === "--since" || arg === "--op" || arg === "--origin") {
       const key = arg === "--ns" ? "--namespace" : arg;
       flags[key] = argv[++i] ?? "";
-    } else if (arg === "--json" || arg === "-i" || arg === "--dry-run") {
+    } else if (arg === "--json" || arg === "-i" || arg === "--dry-run" || arg === "--help" || arg === "-h" || arg === "--version" || arg === "-v") {
       flags[arg] = "true";
     } else if (arg.startsWith("--")) {
       flags[arg] = argv[++i] ?? "";
@@ -42,9 +57,35 @@ function parseArgs(argv: string[]): ParsedArgs {
 const initialArgs = parseArgs(process.argv.slice(2));
 const envName = initialArgs.flags["--env"];
 
-// Set env BEFORE importing modules that create Graph singletons
+// --- Fast-path short-circuits (run BEFORE dynamic imports) ---
+//
+// Review pass 7 finding #12: `--help` / `-h` / `--version` / `-v` need to
+// exit before loading operations.ts, analytics.ts, hybrid-search.ts — which
+// transitively pull the extractor, embedder, ladybug types, and zod. Without
+// this, `kb --version` paid hundreds of ms of cold-start for a 10-byte
+// answer, and threatened the <100ms goal for `kb add` too.
+//
+// `showHelp` is a hoisted function declaration further down in this file;
+// it reads only a template literal, so it's safe to call before the env
+// block and dynamic imports run.
+if (initialArgs.flags["--help"] === "true" || initialArgs.flags["-h"] === "true") {
+  showHelp();
+  process.exit(0);
+}
+if (initialArgs.flags["--version"] === "true" || initialArgs.flags["-v"] === "true") {
+  console.log((pkg as { version?: string }).version ?? "0.0.0");
+  process.exit(0);
+}
+
+// Set env BEFORE importing modules that create Graph singletons.
+// Only fill gaps — if the caller (a test harness, a sandboxed child, a
+// developer experimenting) already exported KB_MEMORY_PATH or
+// LADYBUG_DATA_PATH, respect it. `--env` is a convenience default, not
+// an override. This preserves the Decision #11 isolation guarantee while
+// letting test runners pin paths to tmpdir for cleanup.
 if (envName) {
-  process.env.LADYBUG_DATA_PATH = `./.ladybug-${envName}`;
+  process.env.LADYBUG_DATA_PATH ??= `./.ladybug-${envName}`;
+  process.env.KB_MEMORY_PATH ??= `./.kb-${envName}/memories`;
 }
 
 // --- Dynamic imports (after env is set) ---
@@ -63,7 +104,15 @@ interface CmdContext {
 }
 
 function ctxFrom(args: ParsedArgs, defaults?: Partial<ParsedArgs>): CmdContext {
-  const ns = args.flags["--namespace"] ?? defaults?.flags?.["--namespace"] ?? "default";
+  // Spec Decision #3: namespaces are hard isolation boundaries. Normalize at
+  // every entry point — not just server/functions — so blank/whitespace input
+  // from CLI can't create a `"   "` directory on disk that web-side reads
+  // (which DO normalize) will never find. Inlined rather than sharing
+  // `namespaceSchema` from @/types, because that would pull zod into the
+  // `--help` / `--version` fast path (round 9 regression).
+  const raw = args.flags["--namespace"] ?? defaults?.flags?.["--namespace"];
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  const ns = trimmed === "" ? "default" : trimmed;
   return {
     positional: args.positional,
     flags: args.flags,
@@ -103,18 +152,20 @@ async function handleAdd(ctx: CmdContext) {
     throw new UsageError(`Invalid --origin: "${originRaw}". Must be one of: ${validOrigins.join(", ")}`);
   }
   const origin = originRaw as import("./lib/fs-memory.js").Origin;
-  const result = await ops.addMemory(text, name, ctx.namespace, origin);
+  const tags = ctx.flags["--tag"]?.split(",").filter(Boolean) ?? [];
+  const result = await ops.addMemory(text, name, ctx.namespace, origin, tags);
   const msg = result.status === "existing"
-    ? `Memory already exists: ${result.id}`
+    ? `Memory already exists: ${result.id}. To update, edit: ${result.path}`
     : `Written ${result.path}`;
   out(ctx, ctx.json ? result : msg);
 }
 
-function formatFileResult(f: { name: string; indexed: boolean; tags: string[]; matchContext?: string }): string {
+function formatFileResult(f: { id: string; name: string; indexed: boolean; tags: string[]; matchContext?: string }): string {
+  const label = f.name || `(unnamed: ${f.id.slice(0, 7)})`;
   const status = f.indexed ? "" : " [unindexed]";
   const tags = f.tags.length ? ` [${f.tags.join(", ")}]` : "";
   const context = f.matchContext ? `\n    ...${f.matchContext.slice(0, 80)}...` : "";
-  return `  ${f.name}${status}${tags}${context}`;
+  return `  ${label}${status}${tags}${context}`;
 }
 
 function formatMemory(m: { id: string; name: string; summary: string; text: string }): string {
@@ -135,6 +186,19 @@ function printSearchResults(result: Awaited<ReturnType<typeof hybridSearch>>) {
 
   const total = result.files.length + result.memories.length + result.edges.length + result.entities.length;
   if (total === 0) console.log("No results found.");
+
+  // Structured signals per Spec Decision #8 — rendered to stderr so stdout
+  // stays machine-readable when piped without --json.
+  const { signals } = result;
+  if (signals.degraded) {
+    console.error("  ⚠ graph unavailable — filesystem results only");
+  }
+  if (signals.unindexedCount > 0) {
+    console.error(`  ⚠ ${signals.unindexedCount} result${signals.unindexedCount === 1 ? "" : "s"} not yet indexed`);
+  }
+  if (signals.staleCount > 0) {
+    console.error(`  ⚠ ${signals.staleCount} result${signals.staleCount === 1 ? "" : "s"} edited since last index`);
+  }
 }
 
 async function handleSearch(ctx: CmdContext) {
@@ -142,7 +206,8 @@ async function handleSearch(ctx: CmdContext) {
   if (!query) throw new UsageError("Usage: kb search <query> [--limit <n>] [--ns <namespace>]");
   const parsed = parseInt(ctx.flags["--limit"] ?? "", 10);
   const limit = Number.isNaN(parsed) ? 10 : parsed;
-  const result = await hybridSearch(query, ctx.namespace, limit);
+  const tags = ctx.flags["--tag"]?.split(",").filter(Boolean);
+  const result = await hybridSearch(query, ctx.namespace, limit, tags);
 
   if (ctx.json) {
     out(ctx, result);
@@ -161,12 +226,20 @@ async function handleGet(ctx: CmdContext) {
     return;
   }
 
-  if (!result.entity) {
-    console.log(`Entity "${name}" not found.`);
+  if (!result.entity && !result.memory) {
+    console.log(`"${name}" not found.`);
     return;
   }
 
-  console.log(`\n${formatEntity(result.entity)}`);
+  if (result.memory) {
+    const m = result.memory;
+    const status = m.status === "pending" ? " [unindexed]" : "";
+    console.log(`\n  Memory: ${m.name || "(unnamed)"}${status}`);
+    console.log(`  ${m.summary || m.text.slice(0, 120)}`);
+  }
+  if (result.entity) {
+    console.log(`\n${formatEntity(result.entity)}`);
+  }
   if (result.edges.length > 0) {
     console.log(`\nEdges (${result.edges.length}):`);
     for (const e of result.edges) {
@@ -175,12 +248,22 @@ async function handleGet(ctx: CmdContext) {
   }
 }
 
+function formatForgetMessage(name: string, result: Awaited<ReturnType<typeof ops.forget>>): string {
+  if (!result.deleted) return `Not found: ${result.reason}`;
+  // Show the recovery path on success — `forget` renames to .md.deleted
+  // (Spec Decision #11) so accidental deletes are recoverable with `mv`.
+  // The graph-side cleanup runs on the Phase 2 reconciler sweep — until it
+  // ships, the entity/edges remain visible in graph-only views.
+  if (!result.tombstonePath) return `Tombstoned "${name}" (graph cleanup pending Phase 2 reconciler)`;
+  const restoredPath = result.tombstonePath.replace(/\.deleted$/, "");
+  return `Tombstoned "${name}" (recover: mv "${result.tombstonePath}" "${restoredPath}"; graph cleanup pending Phase 2 reconciler)`;
+}
+
 async function handleForget(ctx: CmdContext) {
   const name = ctx.positional[1];
   if (!name) throw new UsageError("Usage: kb forget <name> --ns <namespace>");
   const result = await ops.forget(name, ctx.namespace);
-  const msg = result.deleted ? `Deleted "${name}"` : `Not found: ${result.reason}`;
-  out(ctx, ctx.json ? result : msg);
+  out(ctx, ctx.json ? result : formatForgetMessage(name, result));
 }
 
 async function handleForgetEdge(ctx: CmdContext) {
@@ -188,7 +271,10 @@ async function handleForgetEdge(ctx: CmdContext) {
   const reason = ctx.positional[2];
   if (!edgeId || !reason) throw new UsageError('Usage: kb forget-edge <edgeId> "<reason>"');
   const result = await ops.forgetEdge(edgeId, reason, ctx.namespace);
-  const msg = result.invalidatedEdge ? `Invalidated edge ${edgeId}` : `Edge not found: ${edgeId}`;
+  // Honest messaging: CLI writes the JSONL queue (Decision #11) but does not
+  // open the graph DB. The Phase 2 reconciler sweep applies the invalidation
+  // to LadybugDB — until then, the edge stays visible in graph-only views.
+  const msg = `Recorded forget intent for edge ${edgeId} in "${ctx.namespace}" (graph cleanup pending Phase 2 reconciler)`;
   out(ctx, ctx.json ? result : msg);
 }
 
@@ -198,19 +284,41 @@ async function handleStats(ctx: CmdContext) {
     out(ctx, result);
     return;
   }
-  const pending = await ops.getQueueStatus(ctx.namespace);
+  // getQueueStatus still requires a working provider (it reads the in-memory
+  // queue state that lives next to the graph connection). Degrade gracefully
+  // so `kb stats` still prints file counts when the graph is unavailable.
+  let pending = 0;
+  try {
+    pending = await ops.getQueueStatus(ctx.namespace);
+  } catch {
+    // Graph unavailable — queue state is inaccessible too. Omit pending count.
+  }
   console.log(`\nKnowledgebase Stats (namespace: ${ctx.namespace}):`);
   console.log(`  Memories: ${result.memories}`);
-  console.log(`  Entities: ${result.entities}`);
-  console.log(`  Edges:    ${result.edges}`);
+  // Degraded-mode contract: graph counts are null when server is unavailable.
+  console.log(`  Entities: ${result.entities ?? "—"}`);
+  console.log(`  Edges:    ${result.edges ?? "—"}`);
   if (pending > 0) console.log(`  Pending:  ${pending}`);
+  if (result.degraded) {
+    console.error("  (graph unavailable — run the server or check NEO4J_URI / LADYBUG_DATA_PATH)");
+  }
 }
 
 async function handleMigrate(ctx: CmdContext) {
   const dryRun = ctx.flags["--dry-run"] === "true";
   const { migrate } = await import("./lib/migrate-to-fs.js");
   await migrate(dryRun);
-  if (ctx.json) out(ctx, { done: true });
+  if (ctx.json) {
+    out(ctx, { done: true, dryRun });
+  } else {
+    // Without this, a human running `kb migrate` gets a silent exit 0 — the
+    // migrate() function logs progress to stderr but the "result" line goes
+    // nowhere. Confirm completion on stdout so success is visible.
+    const target = process.env.KB_MEMORY_PATH ?? "~/.kb/memories";
+    out(ctx, dryRun
+      ? `Migration dry-run complete. No files written. Target: ${target}`
+      : `Migration complete. Target: ${target}`);
+  }
 }
 
 function parseSinceFlag(sinceFlag: string): string {
@@ -288,10 +396,10 @@ Knowledgebase CLI
 Usage: kb <command> [args] [flags]
 
 Commands:
-  add <text>                    Add a memory (extracts entities + edges)
-  search <query>                Semantic search
+  add <text>                    Save a memory to disk (background indexing)
+  search <query>                Hybrid search (file + semantic)
   get <name>                    Look up entity by name
-  forget <name>                 Remove entity
+  forget <name>                 Tombstone a memory by name (recoverable via mv)
   forget-edge <id> <reason>     Invalidate an edge with reason
   stats                         Show statistics
   analytics                     Usage analytics summary
@@ -302,12 +410,28 @@ Flags:
   --env <name>                  Environment (data isolation, e.g. "test")
   --name <name>                 Name for add command
   --origin <type>               Origin type (manual|retro|mcp|import)
+  --tag <tag>                   Tag for add/search (repeatable: --tag bug --tag ui, or comma-separated: --tag bug,ui)
   --limit <n>                   Result limit for search (default: 10)
-  --json                        Output raw JSON
+  --json                        Output raw JSON (machine-readable contract)
   --since <period>              Analytics time filter (e.g., 7d, 24h, 30m)
   --op <operation>              Analytics operation filter
   --dry-run                     Preview migrate without writing files
   -i                            Interactive mode
+
+Environment:
+  KB_MEMORY_PATH                Memory directory (default: ~/.kb/memories)
+  LADYBUG_DATA_PATH             LadybugDB data directory (default: ~/.kb/ladybug)
+  EXTRACTION_MODEL              Ollama extraction model (default: gemma4:e4b)
+  EMBEDDING_MODEL               Embedder choice: "built-in" (default) or "ollama"
+  OLLAMA_URL                    Ollama server URL (default: http://localhost:11434)
+  NEO4J_URI                     Opt-in Neo4j backend (replaces LadybugDB when set)
+  KB_DISABLE_SERVER_INDEXER     Set to "true" to disable the 60s indexer sweep
+
+Output contract:
+  Default stdout is human-readable prose for terminal use. For piping or
+  scripting, pass --json — every command emits a JSON payload on stdout
+  with the same shape as the MCP response (Spec Decision #8). All
+  diagnostics and progress messages go to stderr regardless of --json.
 
 Interactive: Run 'kb' or 'kb -i' for a REPL.
 `.trim());
@@ -391,6 +515,9 @@ async function repl() {
 const ctx = ctxFrom(initialArgs);
 
 try {
+  // Note: --help / -h / --version / -v are handled at top of file before the
+  // dynamic imports (review pass 7 finding #12). Anything reaching here is a
+  // real command or an interactive-mode invocation.
   if (!ctx.positional[0] || initialArgs.flags["-i"] === "true") {
     await repl();
   } else {

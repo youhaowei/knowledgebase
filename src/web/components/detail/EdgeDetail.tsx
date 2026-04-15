@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Badge } from "@stdui/react";
 import { listEdges, forgetEdge } from "@/server/functions";
+import type { StoredEdge } from "@/types";
 import { SentimentBadge, ConfidenceBadge } from "./SentimentBadge";
 
 interface EdgeDetailProps {
@@ -23,6 +24,8 @@ interface EdgeData {
   createdAt?: Date;
 }
 
+type EdgeListResult = { items: StoredEdge[]; total: number };
+
 export function EdgeDetail({ edgeId, namespace, onInvalidated }: EdgeDetailProps) {
   const [edge, setEdge] = useState<EdgeData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -34,13 +37,14 @@ export function EdgeDetail({ edgeId, namespace, onInvalidated }: EdgeDetailProps
     setEdge(null);
     setError(null);
     // Fetch edges and filter by ID client-side (no ID-specific server function yet)
-    listEdges({ data: { offset: 0, limit: 100, namespace: namespace ?? undefined, includeInvalidated: true } as any })
+    listEdges({ data: { offset: 0, limit: 100, namespace, includeInvalidated: true } })
       .then((allEdges) => {
-        const found = allEdges.items.find((e) => e.id === edgeId);
-        if (found) setEdge(found as any);
+        const typedEdges = allEdges as EdgeListResult;
+        const found = typedEdges.items.find((e) => e.id === edgeId);
+        if (found) setEdge(found as EdgeData);
         else setError("Edge not found");
       })
-      .catch((err) => setError(err.message));
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to load edge"));
   }, [edgeId, namespace]);
 
   const handleInvalidate = async () => {

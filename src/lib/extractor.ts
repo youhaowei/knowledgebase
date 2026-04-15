@@ -12,7 +12,7 @@
 import { Extraction } from "../types.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
-const EXTRACTION_MODEL = process.env.EXTRACTION_MODEL || "qwen3.5";
+const EXTRACTION_MODEL = process.env.EXTRACTION_MODEL || "gemma4:e4b";
 
 // JSON schema for edge-based extraction
 const extractionSchema = {
@@ -108,6 +108,16 @@ interface EntityCatalogEntry {
   type: string;
 }
 
+type MutableRecord = Record<string, unknown>;
+
+const VALID_ENTITY_TYPES = new Set([
+  "person",
+  "organization",
+  "project",
+  "technology",
+  "concept",
+]);
+
 function formatEntityCatalog(entities: EntityCatalogEntry[]): string {
   if (entities.length === 0) return "";
   const grouped = new Map<string, string[]>();
@@ -193,18 +203,57 @@ ${existingEntities?.length ? formatEntityCatalog(existingEntities) : ""}
 
 Return a JSON object matching the schema.`;
 
+const MAX_EXTRACT_RETRIES = 3;
+
 async function extractWithOllama(text: string, existingEntities?: EntityCatalogEntry[]): Promise<Extraction> {
-  const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: EXTRACTION_MODEL,
-      prompt: extractionPrompt(text, existingEntities) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.",
-      stream: false,
-      think: false,
-      options: { temperature: 0.2, num_predict: 4096 },
-    }),
-  });
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= MAX_EXTRACT_RETRIES; attempt++) {
+    try {
+      return await singleOllamaExtraction(text, existingEntities);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // Don't retry timeouts — a stuck model will time out again
+      if (lastError.message.includes("timeout") || lastError.name === "AbortError") {
+        throw lastError;
+      }
+      if (attempt < MAX_EXTRACT_RETRIES) {
+        console.error(`[extractor] attempt ${attempt}/${MAX_EXTRACT_RETRIES} failed: ${lastError.message.slice(0, 80)}. Retrying...`);
+      }
+    }
+  }
+  throw lastError!;
+}
+
+async function singleOllamaExtraction(text: string, existingEntities?: EntityCatalogEntry[]): Promise<Extraction> {
+  // 120s per-request timeout prevents stuck generations (small models can
+  // enter token loops and consume the full num_predict budget).
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120_000);
+
+  let resp: Response;
+  try {
+    resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: EXTRACTION_MODEL,
+        prompt: extractionPrompt(text, existingEntities) + "\n\nRespond with ONLY valid JSON matching the schema. No markdown fencing, no explanation.",
+        format: extractionSchema,  // Schema-constrained: model output must match this structure
+        stream: false,
+        think: false,
+        options: { temperature: 0.2, num_predict: 2048 },
+      }),
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("Ollama extraction timeout (120s)");
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
 
   if (!resp.ok) {
     throw new Error(`Ollama extraction error: ${resp.status} ${await resp.text()}`);
@@ -215,27 +264,165 @@ async function extractWithOllama(text: string, existingEntities?: EntityCatalogE
   if (!data) {
     throw new Error("Extraction failed - could not parse JSON from response");
   }
-  // Coerce invalid entity types to "concept" before Zod validation
-  const validTypes = new Set(["person", "organization", "project", "technology", "concept"]);
-  if (typeof data === "object" && data && "entities" in data && Array.isArray((data as any).entities)) {
-    for (const entity of (data as any).entities) {
-      if (entity.type && !validTypes.has(entity.type)) entity.type = "concept";
-    }
-  }
+  // Coerce model output to schema-compliant shapes before Zod validation.
+  // Small models (gemma4:e4b, etc.) frequently emit semantically-correct but
+  // type-wrong values: "sentiment": "negative" instead of -0.5, sourceIndex as
+  // a string, missing entity.type, etc. We normalize these to their numeric
+  // equivalents so Zod doesn't reject otherwise-valid extractions.
+  coerceExtractionShape(data);
   return Extraction.parse(data);
 }
 
-function parseJsonFromText(text: string): unknown | null {
-  // Try direct parse
-  try { return JSON.parse(text); } catch {}
-  // Try extracting from markdown code block
-  const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenced) try { return JSON.parse(fenced[1]!); } catch {}
-  // Try finding first { to last }
+// Map text sentiment values to the -1..1 numeric range the schema expects.
+// Returns undefined for unknown strings (caller falls back to 0).
+function coerceSentiment(value: unknown): number | undefined {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    // Try numeric string first
+    const asNum = Number(trimmed);
+    if (!isNaN(asNum)) return Math.max(-1, Math.min(1, asNum));
+    const key = trimmed.toLowerCase();
+    const map: Record<string, number> = {
+      "strong positive": 1.0, "strongly positive": 1.0, "preferred": 1.0, "chosen": 1.0, "recommended": 1.0,
+      "positive": 0.5, "good": 0.5, "useful": 0.5, "mildly positive": 0.5,
+      "neutral": 0.0, "factual": 0.0, "": 0.0, "none": 0.0,
+      "negative": -0.5, "issues": -0.5, "deprecated": -0.5, "mildly negative": -0.5,
+      "strong negative": -1.0, "strongly negative": -1.0, "rejected": -1.0, "avoid": -1.0, "problematic": -1.0,
+    };
+    if (key in map) return map[key];
+  }
+  return undefined;
+}
+
+// Map text confidence values to the 0..1 numeric range. Unknown → undefined.
+function coerceConfidence(value: unknown): number | undefined {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const asNum = Number(trimmed);
+    if (!isNaN(asNum)) return Math.max(0, Math.min(1, asNum));
+    const key = trimmed.toLowerCase();
+    const map: Record<string, number> = {
+      "high": 1.0, "explicit": 1.0, "stated": 1.0, "certain": 1.0, "explicitly stated": 1.0,
+      "medium": 0.8, "implied": 0.8, "strong": 0.8, "strongly implied": 0.8,
+      "low": 0.6, "inferred": 0.6, "weak": 0.6, "guessed": 0.6,
+    };
+    if (key in map) return map[key];
+  }
+  return undefined;
+}
+
+// Coerce string-or-number to integer index. Returns undefined on failure.
+function coerceIndex(value: unknown): number | undefined {
+  if (typeof value === "number") return Math.trunc(value);
+  if (typeof value === "string") {
+    const asNum = Number(value.trim());
+    if (!isNaN(asNum)) return Math.trunc(asNum);
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is MutableRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function coerceEntity(entity: MutableRecord): void {
+  if (!entity.type || !VALID_ENTITY_TYPES.has(String(entity.type))) {
+    entity.type = "concept";
+  }
+  if (typeof entity.name !== "string") {
+    entity.name = String(entity.name ?? "");
+  }
+}
+
+function coerceEdge(edge: MutableRecord): boolean {
+  const src = coerceIndex(edge.sourceIndex);
+  const tgt = coerceIndex(edge.targetIndex);
+  if (src === undefined || tgt === undefined) return false;
+
+  edge.sourceIndex = src;
+  edge.targetIndex = tgt;
+  edge.sentiment = coerceSentiment(edge.sentiment) ?? 0;
+  edge.confidence = coerceConfidence(edge.confidence) ?? 1;
+
+  if (typeof edge.relationType !== "string") {
+    edge.relationType = String(edge.relationType ?? "relatesTo");
+  }
+  if (typeof edge.fact !== "string") {
+    edge.fact = String(edge.fact ?? "");
+  }
+  if (edge.confidenceReason !== undefined && typeof edge.confidenceReason !== "string") {
+    edge.confidenceReason = String(edge.confidenceReason);
+  }
+
+  return true;
+}
+
+function coerceEntities(data: MutableRecord): void {
+  if (!Array.isArray(data.entities)) return;
+  for (const entity of data.entities) {
+    if (isRecord(entity)) coerceEntity(entity);
+  }
+}
+
+function coerceEdges(data: MutableRecord): void {
+  if (!Array.isArray(data.edges)) return;
+  data.edges = data.edges.filter((edge) => isRecord(edge) && coerceEdge(edge));
+}
+
+// Walk the extraction payload and repair type mismatches in-place.
+function coerceExtractionShape(data: unknown): void {
+  if (!isRecord(data)) return;
+  coerceEntities(data);
+  coerceEdges(data);
+}
+
+function tryParseJson(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonFence(text: string): string | null {
+  let fenceStart = text.indexOf("```");
+  while (fenceStart !== -1) {
+    const headerEnd = text.indexOf("\n", fenceStart);
+    if (headerEnd === -1) return null;
+
+    const header = text.slice(fenceStart + 3, headerEnd).trim().toLowerCase();
+    const fenceClose = text.indexOf("```", headerEnd + 1);
+    if (fenceClose === -1) return null;
+
+    if (header === "" || header === "json") {
+      return text.slice(headerEnd + 1, fenceClose).trim();
+    }
+    fenceStart = text.indexOf("```", fenceClose + 3);
+  }
+  return null;
+}
+
+function extractJsonObjectSlice(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) try { return JSON.parse(text.slice(start, end + 1)); } catch {}
-  return null;
+  if (start < 0 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+function parseJsonFromText(text: string): unknown | null {
+  return (
+    tryParseJson(text) ??
+    (() => {
+      const fenced = extractJsonFence(text);
+      return fenced ? tryParseJson(fenced) : null;
+    })() ??
+    (() => {
+      const objectSlice = extractJsonObjectSlice(text);
+      return objectSlice ? tryParseJson(objectSlice) : null;
+    })()
+  );
 }
 
 /**
@@ -246,4 +433,4 @@ export async function extract(text: string, existingEntities?: EntityCatalogEntr
   return extractWithOllama(text, existingEntities);
 }
 
-export { extractionSchema, extractionPrompt };
+export { extractionSchema, extractionPrompt, coerceExtractionShape, parseJsonFromText };

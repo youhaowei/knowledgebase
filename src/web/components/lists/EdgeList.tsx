@@ -4,12 +4,25 @@ import { Badge } from "@stdui/react";
 import { useListData } from "@/web/hooks/useListData";
 import { listEdges } from "@/server/functions";
 import type { SelectedItem } from "@/routes/index";
+import type { StoredEdge } from "@/types";
 
 interface EdgeListProps {
   namespace: string | undefined;
   selectedItem: SelectedItem | null;
   onSelect: (item: SelectedItem) => void;
 }
+
+interface ListEdgesParams {
+  offset: number;
+  limit: number;
+  namespace?: string;
+  relationType?: string;
+  includeInvalidated: boolean;
+  sortBy: "createdAt" | "name";
+  sortDir: "asc" | "desc";
+}
+
+type EdgeListResponse = { items: StoredEdge[]; total: number; hasMore?: boolean };
 
 function sentimentColor(s: number): "success" | "danger" | "secondary" {
   if (s > 0.3) return "success";
@@ -28,7 +41,7 @@ export function EdgeList({ namespace, selectedItem, onSelect }: EdgeListProps) {
 
   const fetchFn = useCallback(
     async ({ offset, limit }: { offset: number; limit: number }) => {
-      const params: Record<string, unknown> = {
+      const params: ListEdgesParams = {
         offset,
         limit,
         sortBy: "createdAt",
@@ -36,12 +49,13 @@ export function EdgeList({ namespace, selectedItem, onSelect }: EdgeListProps) {
         includeInvalidated: showInvalidated,
       };
       if (namespace) params.namespace = namespace;
-      return listEdges({ data: params as any });
+      return listEdges({ data: params }) as Promise<EdgeListResponse>;
     },
     [namespace, showInvalidated],
   );
 
   const { items, isLoading, hasMore, loadMore } = useListData({ fetchFn });
+  const isEmpty = items.length === 0;
 
   return (
     <div className="flex flex-col h-full">
@@ -60,29 +74,30 @@ export function EdgeList({ namespace, selectedItem, onSelect }: EdgeListProps) {
 
       {/* List */}
       <div className="flex-1 overflow-y-auto">
-        {isLoading && items.length === 0 ? (
+        {isLoading && isEmpty && (
           <div className="flex items-center justify-center h-32 text-neutral-fg-subtle text-xs">
             Loading facts...
           </div>
-        ) : items.length === 0 ? (
+        )}
+        {!isLoading && isEmpty && (
           <div className="flex flex-col items-center justify-center h-32 text-neutral-fg-subtle text-xs gap-2">
             <Link2 className="h-8 w-8 opacity-30" />
             No facts found
           </div>
-        ) : (
+        )}
+        {!isEmpty && (
           <>
             {items.map((edge) => {
               const isSelected = selectedItem?.type === "edge" && selectedItem?.edgeId === edge.id;
               const isInvalidated = edge.invalidAt != null;
+              const selectionClass = isSelected
+                ? "bg-palette-primary/10 border-l-2 border-l-palette-primary"
+                : "hover:bg-neutral-bg-subtle";
               return (
                 <button
                   key={edge.id}
                   onClick={() => onSelect({ type: "edge", name: edge.fact, edgeId: edge.id, namespace: edge.namespace })}
-                  className={`w-full text-left px-3 py-2.5 border-b border-neutral-border/50 transition-colors ${
-                    isSelected
-                      ? "bg-palette-primary/10 border-l-2 border-l-palette-primary"
-                      : "hover:bg-neutral-bg-subtle"
-                  } ${isInvalidated ? "opacity-50" : ""}`}
+                  className={`w-full text-left px-3 py-2.5 border-b border-neutral-border/50 transition-colors ${selectionClass} ${isInvalidated ? "opacity-50" : ""}`}
                 >
                   <div className="flex items-center gap-1 text-[11px] text-neutral-fg-subtle">
                     <span className="text-neutral-fg font-medium truncate">{edge.sourceEntityName}</span>

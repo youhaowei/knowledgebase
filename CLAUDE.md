@@ -39,16 +39,22 @@ Facts ARE edges between entities with semantic relation types. This enables:
 - Temporal validity: `validAt` / `invalidAt` for time-aware knowledge
 
 ```
-User text → Queue → Claude extraction → Dual embeddings → GraphProvider storage
-                    (entities, edges)    (Ollama 2560-dim    (graph + dual vector
-                                          + fallback 384-dim)  + FTS index)
+CLI/MCP → filesystem (instant) → background indexer → graph DB (derived)
+          ~/.kb/memories/         (server, 60s sweep)   (entities, edges,
+          {namespace}/{uuid}.md                           embeddings, FTS)
 ```
 
-**Embedding Architecture (Dual Indexes):**
-- **Primary**: Ollama qwen3-embedding:4b (2560-dim) — higher quality, requires Ollama
-- **Fallback**: HuggingFace transformers.js Snowflake Arctic (384-dim) — zero-dependency, always available
-- Ingestion writes to both indexes; search routes to whichever embedder is active
-- `db:reembed` backfills both dimensions when Ollama becomes available
+**Filesystem-First Architecture (Instant KB):**
+- **Source of truth**: Markdown files in `~/.kb/memories/{namespace}/` with YAML frontmatter
+- **Derived index**: LadybugDB stores extracted entities, edges, embeddings for semantic search
+- **Sync indicator**: Frontmatter `indexedAt` timestamp — missing means graph not yet populated
+- **Reconciliation**: Server indexer runs 60s sweep to catch dropped file events, re-index modified files, clean up orphaned graph entries
+- **Degraded mode**: Without server, file search (ripgrep + `_index.md`) still returns results
+
+**Embedding:**
+- **Primary**: HuggingFace transformers.js Snowflake Arctic xs (384-dim) — in-process, zero-dependency
+- **Optional**: Ollama qwen3-embedding:4b (2560-dim) — opt-in, higher quality, requires Ollama running
+- See benchmark: built-in 384-dim is sufficient for all retrieval tiers (<5pp below Ollama)
 
 **Core Types:**
 - **Entity** - Named things: "DashFrame", "Zustand", "Redux"
@@ -98,9 +104,13 @@ User text → Queue → Claude extraction → Dual embeddings → GraphProvider 
 
 8. **Both backends are production** — Neo4j was the original backend; LadybugDB is the newer embedded alternative. Both must receive full feature implementations, not stubs.
 
-9. **Dual vector indexes** - Both 2560-dim (Ollama) and 384-dim (fallback) indexes coexist per node type. Ingestion populates both; search routes by active embedder. `getActiveDimension()` gates index selection.
+9. **Dual vector indexes** - Both 2560-dim (Ollama) and 384-dim (built-in) indexes coexist per node type. Ingestion populates both; search routes by active embedder. `getActiveDimension()` gates index selection.
 
-10. **Name-based dedup** - `addMemory()` checks for existing memory with same name+namespace before creating. Returns `{ existing: true }` if found. Used by retro integration to prevent duplicate findings.
+10. **Name-based dedup** - `addMemory()` checks for existing memory with same name+namespace before creating. Returns `{ status: "existing", id }` if found. Used by retro integration to prevent duplicate findings. (Old `existing: true` getter is `@deprecated`.)
+
+11. **Filesystem is source of truth** — Files in `~/.kb/memories/{namespace}/{uuid}.md` are canonical. Graph DB is derived — can always be rebuilt from files via `db:reindex`. CLI never writes to LadybugDB directly (eliminates WAL corruption). Only the long-lived server process writes to the graph.
+
+12. **Extraction model selection** — Default `gemma4:e4b` via Ollama (replaces qwen3.5 per benchmark: better edge facts, 40s vs 57s/finding, 90-95% R@1). Override with `EXTRACTION_MODEL` env var. Phase 3 will add pi-ai for Haiku/Gemini Flash (~1s extraction).
 
 ### Retro Integration
 
@@ -116,7 +126,7 @@ cc-retro (`~/Projects/cc-retro`) auto-syncs findings to KB via `kb add --ns retr
 ### Storage Backend
 
 Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implementations:
-- **LadybugProvider** (default) — Embedded graph DB at `.ladybug/`, uses `lbug` package
+- **LadybugProvider** (default) — Embedded graph DB at `~/.kb/ladybug/` (override with `LADYBUG_DATA_PATH`), uses `lbug` package
 - **Neo4jProvider** (optional) — Remote Neo4j, activated by `NEO4J_URI` env var
 
 `createGraphProvider()` picks the backend automatically based on environment.
@@ -175,7 +185,7 @@ Uses a `GraphProvider` interface (`src/lib/graph-provider.ts`) with two implemen
 - Routes are file-based in `src/routes/` (auto-generates `routeTree.gen.ts`)
 - UI components in `src/web/components/ui/` follow shadcn/ui patterns
 - Design tokens documented in `DESIGN_SYSTEM.md` (neon cyber aesthetic)
-- CLI stdout is for machine-readable output only. All diagnostics/progress → `console.error` (stderr)
+- CLI stdout is human prose by default; `--json` switches to machine-readable. All diagnostics/progress → `console.error` (stderr) regardless.
 
 ## Bun-Specific
 

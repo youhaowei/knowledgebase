@@ -35,10 +35,6 @@ function createTestProvider(): GraphProvider {
   return new LadybugProvider("./.test-ladybug");
 }
 
-function isLadybugMode(): boolean {
-  return !process.env.NEO4J_URI;
-}
-
 describe("GraphProvider", () => {
   let provider: GraphProvider;
   let testNamespace: string;
@@ -1177,6 +1173,74 @@ describe("GraphProvider", () => {
         10,
       );
       expect(Array.isArray(results)).toBe(true);
+    });
+
+    describe("FTS query escaping — review pass 7 finding #9", () => {
+      // The FTS CALL doesn't accept bound params in LadybugDB today, so the
+      // allowlist in `escapeFtsQuery` is the only defense. These tests lock
+      // the contract: regardless of input, the call must (1) not throw,
+      // (2) return an Array, (3) leave the Fact table queryable afterwards —
+      // i.e. no DROP / DELETE injected through a single-quote break.
+
+      test("single-quote in query is neutralized (no Cypher break)", async () => {
+        testNamespace = `test-fts-inj-${randomUUID()}`;
+        const results = await provider.fullTextSearchEdges("alice's cat", 10);
+        expect(Array.isArray(results)).toBe(true);
+      });
+
+      test("DROP-style injection payload does not corrupt the graph", async () => {
+        testNamespace = `test-fts-drop-${randomUUID()}`;
+        const memory: Memory = {
+          id: randomUUID(),
+          name: "Canary",
+          text: "canary survives injection attempts",
+          summary: "canary",
+          namespace: testNamespace,
+          status: "completed",
+          createdAt: new Date(),
+        };
+        const ents: Entity[] = [
+          { uuid: randomUUID(), name: "Alice", type: "person" },
+          { uuid: randomUUID(), name: "canary", type: "concept" },
+        ];
+        const edges: ExtractedEdge[] = [
+          { sourceIndex: 0, targetIndex: 1, relationType: "owns", fact: "Alice owns a canary", sentiment: 0 },
+        ];
+        await provider.store(
+          memory, ents, edges,
+          makeTestEmbeddingMap(900),
+          makeTestEdgeEmbeddingMaps([901]),
+        );
+
+        // Classic attempts. None should escape the single-quoted FTS string.
+        const payloads = [
+          "'); MATCH (f:Fact) DETACH DELETE f; //",
+          "' OR 1=1 //",
+          "canary'; DROP TABLE Fact; --",
+          // Unicode quote variants + newline — the allowlist must drop them.
+          "canary\u2019s\nsecret",
+          "\u201Dinjection\u201D",
+        ];
+        for (const p of payloads) {
+          const r = await provider.fullTextSearchEdges(p, 10);
+          expect(Array.isArray(r)).toBe(true);
+        }
+
+        // Canary must still be searchable — proves the Fact table wasn't
+        // dropped by any of the payloads above.
+        const canary = await provider.fullTextSearchEdges("canary", 10);
+        expect(canary.length).toBeGreaterThanOrEqual(1);
+        expect(canary[0]?.fact.toLowerCase()).toContain("canary");
+      });
+
+      test("empty and whitespace-only queries return an array without throwing", async () => {
+        const empty = await provider.fullTextSearchEdges("", 10);
+        const spaces = await provider.fullTextSearchEdges("     ", 10);
+        const allStripped = await provider.fullTextSearchEdges("'\"\\&|!()", 10);
+        expect(Array.isArray(empty)).toBe(true);
+        expect(Array.isArray(spaces)).toBe(true);
+        expect(Array.isArray(allStripped)).toBe(true);
+      });
     });
   });
 });

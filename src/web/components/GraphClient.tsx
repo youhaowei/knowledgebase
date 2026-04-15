@@ -11,12 +11,11 @@ import type { GraphNode, GraphLink } from "./types";
 interface GraphClientProps {
   nodes: GraphNode[];
   links: GraphLink[];
-  onClusterClick?: (namespace: string) => void;
   onNodeClick?: (node: { name: string; type: string }) => void;
   selectedNodeName?: string;
 }
 
-export function GraphClient({ nodes, links, onClusterClick, onNodeClick, selectedNodeName }: GraphClientProps) {
+export function GraphClient({ nodes, links, onNodeClick, selectedNodeName }: GraphClientProps) {
   const [Graph, setGraph] = useState<React.ComponentType<GraphClientProps> | null>(null);
 
   useEffect(() => {
@@ -33,5 +32,5 @@ export function GraphClient({ nodes, links, onClusterClick, onNodeClick, selecte
     );
   }
 
-  return <Graph nodes={nodes} links={links} onClusterClick={onClusterClick} onNodeClick={onNodeClick} selectedNodeName={selectedNodeName} />;
+  return <Graph nodes={nodes} links={links} onNodeClick={onNodeClick} selectedNodeName={selectedNodeName} />;
 }

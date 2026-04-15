@@ -20,7 +20,6 @@ import type { GraphNode, GraphLink } from "./types";
 interface GraphProps {
   nodes: GraphNode[];
   links: GraphLink[];
-  onClusterClick?: (namespace: string) => void;
   onNodeClick?: (node: { name: string; type: string }) => void;
   selectedNodeName?: string;
 }
@@ -60,7 +59,6 @@ interface ForceNode extends NodeObject {
   importance: number;
   degree: number;
   color: string;
-  clusterId?: number;
 }
 
 // Extended link type for force graph
@@ -75,7 +73,99 @@ interface ForceLink extends LinkObject {
   edgeId: string;
 }
 
-export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeName }: GraphProps) {
+type NodeLabelTier = 1 | 2 | 3;
+
+function toForceNodes(nodes: GraphNode[]): ForceNode[] {
+  return nodes.map((node) => ({
+    id: node.name,
+    name: node.name,
+    type: node.itemType || "entity",
+    importance: node.importance ?? 0.5,
+    degree: node.degree ?? 0,
+    color: TYPE_COLORS[node.itemType || "entity"] || TYPE_COLORS.entity,
+  }));
+}
+
+function toForceLinks(links: GraphLink[], nodeSet: Set<string>): ForceLink[] {
+  return links
+    .filter((link) => {
+      const sourceId = typeof link.source === "string" ? link.source : link.source.name;
+      const targetId = typeof link.target === "string" ? link.target : link.target.name;
+      return nodeSet.has(sourceId) && nodeSet.has(targetId);
+    })
+    .map((link) => ({
+      source: typeof link.source === "string" ? link.source : link.source.name,
+      target: typeof link.target === "string" ? link.target : link.target.name,
+      relationType: link.relationType || link.relation || "",
+      fact: link.fact || "",
+      sentiment: link.sentiment ?? 0,
+      sentimentCategory: getSentimentCategory(link.sentiment ?? 0),
+      strength: link.strength ?? (0.5 + Math.abs(link.sentiment ?? 0) * 0.5),
+      edgeId: link.edgeId || "",
+    }));
+}
+
+interface NodeSizing {
+  size: number;
+  degreeScale: number;
+  zoomCompensation: number;
+}
+
+/**
+ * Computes the render size for a node plus the two scale factors that drive
+ * the rest of the paint pipeline (shadow blur, label offsets). Returns all
+ * three together so `paintNode` doesn't re-derive `degreeScale` and
+ * `zoomCompensation` independently and risk drift when the formulas change.
+ */
+function getNodeSizing(node: ForceNode, globalScale: number): NodeSizing {
+  const isZoomedOut = globalScale < 0.5;
+  const degreeScale = Math.min(node.degree / 8, 1);
+  const baseSize = isZoomedOut
+    ? 3 + degreeScale * 12
+    : 5 + node.importance * 6;
+  const zoomCompensation = Math.max(0.7, Math.min(2.5, 1.2 / globalScale));
+  return { size: baseSize * zoomCompensation, degreeScale, zoomCompensation };
+}
+
+function getLabelTier(node: ForceNode): NodeLabelTier {
+  if (node.degree >= 5 || node.importance > 0.7) return 1;
+  if (node.degree >= 2 || node.importance > 0.3) return 2;
+  return 3;
+}
+
+function shouldShowNodeLabel(tier: NodeLabelTier, globalScale: number): boolean {
+  if (tier === 1) return true;
+  if (tier === 2) return globalScale > 0.3;
+  return globalScale > 0.8;
+}
+
+function getNodeLabelStyle(
+  tier: NodeLabelTier,
+  globalScale: number,
+): { fontSize: number; alpha: number; fontWeight: number } {
+  const baseFontSizes = { 1: 14, 2: 12, 3: 10 } as const;
+  const alphas = { 1: 0.95, 2: 0.8, 3: 0.65 } as const;
+  const fontWeight = tier === 1 ? 700 : 600;
+  const fontSize = baseFontSizes[tier] * Math.max(0.8, Math.min(1.8, 1 / globalScale));
+  return {
+    fontSize,
+    alpha: alphas[tier],
+    fontWeight,
+  };
+}
+
+function renderEmptyState() {
+  return (
+    <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
+      <p>No entities in the graph yet.</p>
+      <p className="font-sans not-italic opacity-50 text-sm mt-3 tracking-wide">
+        Add a memory to extract facts and entities!
+      </p>
+    </div>
+  );
+}
+
+export function Graph({ nodes, links, onNodeClick, selectedNodeName }: GraphProps) {
   const graphRef = useRef<ForceGraphMethods<ForceNode, ForceLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
   const roRef = useRef<ResizeObserver | null>(null);
@@ -110,73 +200,12 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
 
   // Transform data for force graph
   const graphData = useMemo(() => {
-    const forceNodes: ForceNode[] = nodes.map((n) => ({
-      id: n.name, // Use name as ID for linking
-      name: n.name,
-      type: n.itemType || "entity",
-      importance: n.importance ?? 0.5,
-      degree: n.degree ?? 0,
-      color: TYPE_COLORS[n.itemType || "entity"] || TYPE_COLORS.entity,
-    }));
-
+    const forceNodes = toForceNodes(nodes);
     const nodeSet = new Set(forceNodes.map((n) => n.id));
-
-    const forceLinks: ForceLink[] = links
-      .filter((l) => {
-        const sourceId = typeof l.source === "string" ? l.source : l.source.name;
-        const targetId = typeof l.target === "string" ? l.target : l.target.name;
-        return nodeSet.has(sourceId) && nodeSet.has(targetId);
-      })
-      .map((l) => ({
-        source: typeof l.source === "string" ? l.source : l.source.name,
-        target: typeof l.target === "string" ? l.target : l.target.name,
-        relationType: l.relationType || l.relation || "",
-        fact: l.fact || "",
-        sentiment: l.sentiment ?? 0,
-        sentimentCategory: getSentimentCategory(l.sentiment ?? 0),
-        strength: l.strength ?? (0.5 + Math.abs(l.sentiment ?? 0) * 0.5), // Stronger for more opinionated
-        edgeId: l.edgeId || "",
-      }));
-
-    // Build adjacency for connected components
-    const adj = new Map<string, Set<string>>();
-    for (const n of forceNodes) adj.set(n.id, new Set());
-    for (const l of forceLinks) {
-      const s = typeof l.source === "string" ? l.source : (l.source as ForceNode).id;
-      const t = typeof l.target === "string" ? l.target : (l.target as ForceNode).id;
-      adj.get(s)?.add(t);
-      adj.get(t)?.add(s);
-    }
-
-    // Detect connected components (sub-clusters)
-    const visited = new Set<string>();
-    let nextClusterId = 0;
-    const clusterLabels: string[] = [];
-    for (const node of forceNodes) {
-      if (visited.has(node.id)) continue;
-      const component: ForceNode[] = [];
-      const queue = [node.id];
-      while (queue.length) {
-        const id = queue.pop()!;
-        if (visited.has(id)) continue;
-        visited.add(id);
-        const n = forceNodes.find((f) => f.id === id);
-        if (n) { n.clusterId = nextClusterId; component.push(n); }
-        for (const neighbor of adj.get(id) ?? []) {
-          if (!visited.has(neighbor)) queue.push(neighbor);
-        }
-      }
-      const sorted = [...component].sort((a, b) => b.degree - a.degree);
-      clusterLabels.push(sorted[0]?.name ?? `cluster-${nextClusterId}`);
-      nextClusterId++;
-    }
-
-    // Build namespace list for outer hulls
-    const namespaceList = [...new Set(
-      forceNodes.map((n) => nodes.find((orig) => orig.name === n.id)?.namespace ?? "default")
-    )].sort();
-
-    return { nodes: forceNodes, links: forceLinks, clusterLabels, namespaceList };
+    return {
+      nodes: forceNodes,
+      links: toForceLinks(links, nodeSet),
+    };
   }, [nodes, links]);
 
   // Configure forces and fit to view when graph data changes
@@ -197,14 +226,7 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
   // Custom node rendering — adapts to zoom level
   // When zoomed out: high-degree nodes grow, low-degree nodes shrink → visual hierarchy
   const paintNode = useCallback((node: ForceNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const isZoomedOut = globalScale < 0.5;
-    // Base size driven by degree (connections) — hubs are bigger
-    const degreeScale = Math.min(node.degree / 8, 1); // 0-1, saturates at 8 connections
-    const baseSize = isZoomedOut
-      ? 3 + degreeScale * 12  // zoomed out: 3px (isolated) to 15px (hub)
-      : 5 + node.importance * 6; // zoomed in: original sizing
-    const zoomCompensation = Math.max(0.7, Math.min(2.5, 1.2 / globalScale));
-    const size = baseSize * zoomCompensation;
+    const { size, degreeScale, zoomCompensation } = getNodeSizing(node, globalScale);
 
     ctx.save();
     ctx.shadowColor = node.color;
@@ -235,18 +257,14 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
     }
 
     // Tiered labels: high-degree/importance nodes show first, reveal others on zoom
-    const tier = (node.degree >= 5 || node.importance > 0.7) ? 1
-      : (node.degree >= 2 || node.importance > 0.3) ? 2 : 3;
-    const showLabel = tier === 1 || (tier === 2 && globalScale > 0.3) || (tier === 3 && globalScale > 0.8);
+    const tier = getLabelTier(node);
+    const showLabel = shouldShowNodeLabel(tier, globalScale);
     if (showLabel) {
-      // Font scales with zoom compensation — readable at all levels
-      const baseFontSize = tier === 1 ? 14 : tier === 2 ? 12 : 10;
-      const fontSize = baseFontSize * Math.max(0.8, Math.min(1.8, 1 / globalScale));
-      const alpha = tier === 1 ? 0.95 : tier === 2 ? 0.8 : 0.65;
-      ctx.font = `${tier === 1 ? 700 : 600} ${fontSize}px Sans-Serif`;
+      const labelStyle = getNodeLabelStyle(tier, globalScale);
+      ctx.font = `${labelStyle.fontWeight} ${labelStyle.fontSize}px Sans-Serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
-      ctx.fillStyle = `rgba(230, 235, 245, ${alpha})`;
+      ctx.fillStyle = `rgba(230, 235, 245, ${labelStyle.alpha})`;
       ctx.fillText(node.name, node.x!, node.y! + size + 3);
     }
 
@@ -367,16 +385,12 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
   }, [graphData.links]);
 
 
+  const shouldRenderGraph = nodes.length > 0 && dimensions.width > 0 && dimensions.height > 0;
+
   return (
     <div ref={containerCallbackRef} className="w-full h-full">
-      {nodes.length === 0 ? (
-        <div className="w-full h-full flex flex-col items-center justify-center text-text-secondary text-center font-display text-2xl italic">
-          <p>No entities in the graph yet.</p>
-          <p className="font-sans not-italic opacity-50 text-sm mt-3 tracking-wide">
-            Add a memory to extract facts and entities!
-          </p>
-        </div>
-      ) : dimensions.width > 0 && dimensions.height > 0 ? (
+      {nodes.length === 0 && renderEmptyState()}
+      {shouldRenderGraph && (
         <ForceGraph2D
           ref={graphRef}
           graphData={graphData}
@@ -397,7 +411,7 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
           onNodeClick={(node) => {
             const n = node as ForceNode;
             if (onNodeClick && n.name) {
-              onNodeClick({ name: n.name, type: n.itemType || "entity" });
+              onNodeClick({ name: n.name, type: n.type || "entity" });
             }
           }}
           // Physics
@@ -407,7 +421,7 @@ export function Graph({ nodes, links, onClusterClick, onNodeClick, selectedNodeN
           // Styling
           backgroundColor="transparent"
         />
-      ) : null}
+      )}
     </div>
   );
 }

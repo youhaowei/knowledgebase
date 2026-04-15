@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+function normalizeNamespaceInput(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+export const namespaceSchema = z.preprocess(
+  normalizeNamespaceInput,
+  z.string().default("default"),
+);
+
+export const optionalNamespaceSchema = z.preprocess(
+  normalizeNamespaceInput,
+  z.string().optional(),
+);
+
 // =============================================================================
 // ENTITY TYPES
 // =============================================================================
@@ -21,7 +37,9 @@ export const Entity = z.object({
 
 // Stored entity includes namespace and summary
 export const StoredEntity = Entity.extend({
+  uuid: z.string().optional(),
   namespace: z.string().default("default"),
+  scope: z.enum(["project", "global"]).default("project"),
   summary: z.string().optional(), // LLM-generated summary of what we know about this entity
 });
 
@@ -170,6 +188,15 @@ export interface MemoryFilter {
   name?: string; // CONTAINS match (case-insensitive)
   namespace?: string | null;
   category?: MemoryCategory;
+  /**
+   * Cursor bound for stable pagination: returns memories with
+   * `createdAt > cursorCreatedAt`, or `createdAt == cursorCreatedAt AND id > cursorId`
+   * when both are supplied. Avoids the offset-shift skip that fires when
+   * rows are inserted or deleted mid-scan (review pass 7 finding #14).
+   * Ordering is enforced by the caller's PaginationParams.
+   */
+  cursorCreatedAt?: Date;
+  cursorId?: string;
 }
 
 export interface PaginationParams {

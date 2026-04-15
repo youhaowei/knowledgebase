@@ -9,12 +9,17 @@
  * Per-namespace queues to avoid race conditions
  */
 
+import { statSync } from "fs";
+import { join } from "path";
+import matter from "gray-matter";
+import { readFileSync } from "fs";
 import { extract } from "./extractor.js";
 import { embedDual } from "./embedder.js";
 import type { GraphProvider } from "./graph-provider.js";
 import type { Memory, EmbeddingMap } from "../types.js";
 import { track } from "./analytics.js";
 import { summarySchema } from "./versions.js";
+import { resolveNamespacePath, withNamespaceLock, parseFrontmatter, atomicWriteFile, type MemoryFrontmatter } from "./fs-memory.js";
 import {
   semver,
   isoFrom,
@@ -22,13 +27,90 @@ import {
 
 type QueueEntry = {
   memory: Memory;
+  onStored?: (memory: Memory) => Promise<void>;
   resolve: () => void;
   reject: (e: Error) => void;
 };
 
+/**
+ * Returns the file's mtime in ms, or null if the file doesn't exist.
+ * Used for the Decision #8 snapshot-mtime ordering invariant — synthetic
+ * memories from test harnesses without on-disk files return null and skip
+ * the invariant.
+ *
+ * Exported for testing the Decision #8 invariant directly.
+ */
+export function safeMtimeMs(filePath: string): number | null {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns true if the file's mtime differs from the snapshot, or if the file
+ * has disappeared. Returns false when `snapshot` is null (no invariant to check).
+ *
+ * Exported for testing the Decision #8 invariant directly.
+ */
+export function isFileChangedSince(filePath: string, snapshot: number | null): boolean {
+  if (snapshot === null) return false;
+  const current = safeMtimeMs(filePath);
+  return current === null || current !== snapshot;
+}
+
+/**
+ * Reads a memory file for regeneration. Returns null if the file is missing,
+ * unreadable, or has frontmatter that fails Zod validation — callers treat
+ * that as "abandon the regen pass" rather than crashing mid-write-back.
+ */
+async function readFileFromDiskForRegen(
+  filePath: string,
+): Promise<{ frontmatter: MemoryFrontmatter; text: string } | null> {
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    return parseFrontmatter(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomically writes regenerated frontmatter (abstract/summary/schemaVersion/
+ * versionedAt) back to the file, preserving the body verbatim. Unknown user
+ * frontmatter keys survive per Spec Decision #12. Uses tempfile + rename so
+ * a crash mid-write leaves either the old or new content, never partial.
+ */
+function writeRegeneratedFrontmatter(
+  filePath: string,
+  current: { frontmatter: MemoryFrontmatter; text: string },
+  updates: {
+    abstract: string;
+    summary: string;
+    schemaVersion: string;
+    versionedAt: string;
+  },
+): void {
+  const merged = {
+    ...current.frontmatter,
+    abstract: updates.abstract,
+    summary: updates.summary,
+    schemaVersion: updates.schemaVersion,
+    versionedAt: updates.versionedAt,
+  };
+  const content = matter.stringify(current.text, merged as Record<string, unknown>);
+  atomicWriteFile(filePath, content);
+}
+
 export class Queue {
   private entries: Map<string, QueueEntry[]> = new Map();
   private processing: Set<string> = new Set();
+  // Per-namespace guard: at most one fire-and-forget regenerateOneStale
+  // in flight. Without this, a sweep that drains 100 unindexed entries
+  // kicks off 100 concurrent regenerations — each calling extract() +
+  // updateMemorySummary() against the same graph connection.
+  private regeneratingNamespaces: Set<string> = new Set();
   private graph: GraphProvider;
 
   constructor(graph: GraphProvider) {
@@ -39,7 +121,7 @@ export class Queue {
    * Add a memory to the processing queue
    * Returns a promise that resolves when processing completes
    */
-  async add(memory: Memory): Promise<void> {
+  async add(memory: Memory, onStored?: (memory: Memory) => Promise<void>): Promise<void> {
     return new Promise((resolve, reject) => {
       const ns = memory.namespace;
 
@@ -47,7 +129,7 @@ export class Queue {
         this.entries.set(ns, []);
       }
 
-      this.entries.get(ns)!.push({ memory, resolve, reject });
+      this.entries.get(ns)!.push({ memory, onStored, resolve, reject });
 
       // Start processing if not already running for this namespace
       if (!this.processing.has(ns)) {
@@ -67,57 +149,19 @@ export class Queue {
       const entry = queue.shift();
       if (!entry) break;
 
-      const { memory, resolve, reject } = entry;
+      const { memory, onStored, resolve, reject } = entry;
 
       try {
-        const ns = memory.namespace;
-
-        const start = performance.now();
-
-        // 1. Extract (with existing entity catalog for dedup)
-        const entityCatalog = await this.graph.getEntityCatalog(ns);
-        const { entities, edges, abstract, summary, category } = await extract(memory.text, entityCatalog);
-        memory.abstract = abstract;
-        memory.summary = summary;
-        memory.category = category ?? "general";
-        memory.schemaVersion = String(summarySchema.current);
-        memory.versionedAt = new Date().toISOString();
-        const extractMs = Math.round(performance.now() - start);
-
-        // 2. Auto-generate name
-        if (!memory.name || memory.name === "") {
-          const firstLine = summary.slice(0, 50).split("\n")[0];
-          memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
+        const processed = await this.processEntry(memory, onStored);
+        if (processed && !this.regeneratingNamespaces.has(memory.namespace)) {
+          // Self-evolving: regenerate one stale memory per cycle
+          // (fire-and-forget, deduped per namespace).
+          const ns = memory.namespace;
+          this.regeneratingNamespaces.add(ns);
+          this.regenerateOneStale(ns)
+            .catch((err: unknown) => console.error(`[Queue] Self-evolving maintenance error:`, err))
+            .finally(() => this.regeneratingNamespaces.delete(ns));
         }
-
-        // 3. Embed memory + edges
-        const embedStart = performance.now();
-        const memEmb = await embedDual(memory.text);
-        const edgeEmbeddings: EmbeddingMap[] = [];
-        for (const edge of edges) {
-          edgeEmbeddings.push(await embedDual(edge.fact));
-        }
-        const embedMs = Math.round(performance.now() - embedStart);
-
-        // 4. Store
-        const storeStart = performance.now();
-        await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
-        const storeMs = Math.round(performance.now() - storeStart);
-
-        const totalMs = Math.round(performance.now() - start);
-        console.error(`[kb] ${memory.name} → ${entities.length}E ${edges.length}R (${extractMs}ms extract, ${embedMs}ms embed, ${storeMs}ms store = ${totalMs}ms)`);
-
-        track("queue.process", {
-          namespace: ns,
-          duration_ms: totalMs,
-          meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, extractMs, embedMs, storeMs },
-        });
-
-        // 6. Self-evolving: regenerate one stale memory per cycle (fire-and-forget)
-        this.regenerateOneStale(ns).catch((err: unknown) =>
-          console.error(`[Queue] Self-evolving maintenance error:`, err),
-        );
-
         resolve();
       } catch (error) {
         console.error(`[Queue] Error processing memory ${memory.id}:`, error);
@@ -135,8 +179,93 @@ export class Queue {
   }
 
   /**
-   * Self-evolving: find one stale memory in this namespace and regenerate its summary.
-   * Checks version lag, then time-based staleness. Processes at most one per call.
+   * Process a single queued memory. Returns true if the memory was stored,
+   * false if the pass was abandoned (e.g., file changed during extraction).
+   *
+   * Spec Decision #8 ordering invariant: snapshot the file's mtime before
+   * extraction, re-stat before commit. If the file changed, abandon the pass —
+   * do not write stale extraction to the graph or stamp indexedAt on edited content.
+   */
+  private async processEntry(
+    memory: Memory,
+    onStored?: (memory: Memory) => Promise<void>,
+  ): Promise<boolean> {
+    const ns = memory.namespace;
+    const start = performance.now();
+
+    const filePath = join(resolveNamespacePath(ns), `${memory.id}.md`);
+    const snapshotMtime = safeMtimeMs(filePath);
+
+    const entityCatalog = await this.graph.getEntityCatalog(ns);
+    const { entities, edges, abstract, summary, category } = await extract(memory.text, entityCatalog);
+    memory.abstract = abstract;
+    memory.summary = summary;
+    memory.category = category ?? "general";
+    memory.schemaVersion = String(summarySchema.current);
+    memory.versionedAt = new Date().toISOString();
+    const extractMs = Math.round(performance.now() - start);
+
+    if (!memory.name || memory.name === "") {
+      const firstLine = summary.slice(0, 50).split("\n")[0];
+      memory.name = firstLine ? firstLine.trim() : "Untitled Memory";
+    }
+
+    const embedStart = performance.now();
+    const memEmb = await embedDual(memory.text);
+    const edgeEmbeddings: EmbeddingMap[] = [];
+    for (const edge of edges) {
+      edgeEmbeddings.push(await embedDual(edge.fact));
+    }
+    const embedMs = Math.round(performance.now() - embedStart);
+
+    // Spec Decision #8: re-stat under the namespace lock and gate {gp.store,
+    // file write-back} on the snapshot. Without the lock, a user edit
+    // between the recheck and onStored stamps `indexedAt` on edited content
+    // while the graph holds extraction from the original body — silently
+    // stale graph that no `stale = mtime > indexedAt` reader can detect.
+    let aborted = false;
+    let storeMs = 0;
+    await withNamespaceLock(ns, async () => {
+      if (isFileChangedSince(filePath, snapshotMtime)) {
+        console.error(`[kb] File changed during indexing ${memory.id} — abandoning pass, retry on next sweep`);
+        track("queue.abandoned", {
+          namespace: ns,
+          meta: { memoryId: memory.id, reason: "mtime-changed" },
+        });
+        aborted = true;
+        return;
+      }
+      const storeStart = performance.now();
+      await this.graph.store(memory, entities, edges, memEmb, edgeEmbeddings);
+      await onStored?.(memory);
+      storeMs = Math.round(performance.now() - storeStart);
+    });
+    if (aborted) return false;
+
+    const totalMs = Math.round(performance.now() - start);
+    console.error(`[kb] ${memory.name} → ${entities.length}E ${edges.length}R (${extractMs}ms extract, ${embedMs}ms embed, ${storeMs}ms store = ${totalMs}ms)`);
+
+    track("queue.process", {
+      namespace: ns,
+      duration_ms: totalMs,
+      meta: { memoryId: memory.id, entityCount: entities.length, edgeCount: edges.length, extractMs, embedMs, storeMs },
+    });
+
+    return true;
+  }
+
+  /**
+   * Self-evolving: find one stale memory in this namespace and regenerate its
+   * summary. Rewrites the source file's frontmatter FIRST (Spec Decision #11:
+   * files are canonical), then the graph. If the file write fails, the graph
+   * is left untouched — a subsequent sweep will retry against a consistent
+   * starting state. Before the file write, we re-read from disk: the in-graph
+   * memory.text may be stale relative to the current file body, and running
+   * extraction on stale text would commit a regenerated summary that describes
+   * content the user already edited away.
+   *
+   * Previously only the graph was updated, which meant db:reindex from files
+   * silently dropped the regeneration — a filesystem-first invariant violation.
    */
   private async regenerateOneStale(namespace: string): Promise<void> {
     const memories = await this.graph.findMemories({ namespace }, 50);
@@ -151,13 +280,61 @@ export class Queue {
 
     if (!staleMemory) return;
 
+    const filePath = join(resolveNamespacePath(namespace), `${staleMemory.id}.md`);
+    const currentFile = await readFileFromDiskForRegen(filePath);
+    if (!currentFile) {
+      // File was deleted or unreadable — nothing to regenerate against.
+      // The stale graph memory will be cleaned up by Phase 2 reconciliation.
+      return;
+    }
+
+    // Spec Decision #8 ordering invariant applies to regen as well as initial
+    // indexing: snapshot mtime before the slow extract, re-stat under the lock
+    // before committing, abandon if the user edited the file in the window.
+    const snapshotMtime = safeMtimeMs(filePath);
+
     console.error(`[Queue] Regenerating stale memory ${staleMemory.id} (${staleMemory.name})...`);
-    const { abstract: newAbstract, summary: newSummary } = await extract(staleMemory.text);
+    const { abstract: newAbstract, summary: newSummary } = await extract(currentFile.text);
+    const schemaVersion = String(summarySchema.current);
+    const versionedAt = new Date().toISOString();
+
+    // Spec Decision #12: the namespace lock serializes the commit window with
+    // CLI writers (add, forget) and other indexer write-backs. The slow
+    // extract() above intentionally runs *outside* the lock so it doesn't
+    // starve other writers. Graph update only runs when the file write-back
+    // actually landed — otherwise db:reindex from files would produce different
+    // content than the graph reports.
+    let committed = false;
+    await withNamespaceLock(namespace, async () => {
+      if (isFileChangedSince(filePath, snapshotMtime)) {
+        console.error(`[Queue] File changed during regen ${staleMemory.id} — abandoning, retry on next sweep`);
+        return;
+      }
+      // Re-read under the lock so the write-back merges against the latest
+      // user-owned frontmatter (identity + any user tags), not a pre-extract
+      // snapshot that may have been superseded.
+      const latest = await readFileFromDiskForRegen(filePath);
+      if (!latest) return;
+      try {
+        writeRegeneratedFrontmatter(filePath, latest, {
+          abstract: newAbstract,
+          summary: newSummary,
+          schemaVersion,
+          versionedAt,
+        });
+        committed = true;
+      } catch (err) {
+        console.error(`[Queue] File write-back failed for ${staleMemory.id}, abandoning regen:`, err);
+      }
+    });
+
+    if (!committed) return;
+
     await this.graph.updateMemorySummary(staleMemory.id, {
       abstract: newAbstract,
       summary: newSummary,
-      schemaVersion: String(summarySchema.current),
-      versionedAt: new Date().toISOString(),
+      schemaVersion,
+      versionedAt,
     });
     track("queue.regenerate", {
       namespace,

@@ -39,6 +39,40 @@ function normalize(value: number, min: number, max: number): number {
   return (value - min) / (max - min);
 }
 
+// Stable content signature — excludes force-graph's in-place mutations (x/y/vx/vy/index)
+// so polling doesn't replace state when data is unchanged. Without this, every poll cycle
+// re-mounts the simulation and loses node positions / drag state.
+function nodeSignature(n: GraphNode): string {
+  return [
+    n.id,
+    n.name,
+    n.namespace ?? "",
+    n.itemType ?? "",
+    n.degree ?? 0,
+    (n.importance ?? 0).toFixed(3),
+  ].join("|");
+}
+
+function linkSignature(l: GraphLink): string {
+  const src = typeof l.source === "string" ? l.source : ((l.source as { id?: string })?.id ?? "");
+  const tgt = typeof l.target === "string" ? l.target : ((l.target as { id?: string })?.id ?? "");
+  return [l.edgeId, src, tgt, l.relationType, l.sentiment].join("|");
+}
+
+function nodesEqual(a: GraphNode[], b: GraphNode[]): boolean {
+  if (a.length !== b.length) return false;
+  const aSig = a.map(nodeSignature).sort().join("\n");
+  const bSig = b.map(nodeSignature).sort().join("\n");
+  return aSig === bSig;
+}
+
+function linksEqual(a: GraphLink[], b: GraphLink[]): boolean {
+  if (a.length !== b.length) return false;
+  const aSig = a.map(linkSignature).sort().join("\n");
+  const bSig = b.map(linkSignature).sort().join("\n");
+  return aSig === bSig;
+}
+
 function processGraphData(graphData: RawGraphData) {
   const connectedNodeNames = new Set<string>();
   const nodeEdgeCount = new Map<string, number>();
@@ -140,16 +174,8 @@ function Home() {
 
       const processed = processGraphData(graphData);
 
-      setNodes((prev) => {
-        const newSerialized = JSON.stringify(processed.itemNodes);
-        return newSerialized === JSON.stringify(prev) ? prev : processed.itemNodes;
-      });
-
-      setLinks((prev) => {
-        const newSerialized = JSON.stringify(processed.validLinks);
-        return newSerialized === JSON.stringify(prev) ? prev : processed.validLinks;
-      });
-
+      setNodes((prev) => (nodesEqual(prev, processed.itemNodes) ? prev : processed.itemNodes));
+      setLinks((prev) => (linksEqual(prev, processed.validLinks) ? prev : processed.validLinks));
       setStats((prev) => {
         const newSerialized = JSON.stringify(statsData);
         return newSerialized === JSON.stringify(prev) ? prev : statsData;
@@ -229,7 +255,6 @@ function Home() {
             <GraphClient
               nodes={nodes}
               links={links}
-              onClusterClick={handleNamespaceChange}
               onNodeClick={(node) => setSelectedItem({ type: "entity", name: node.name })}
               selectedNodeName={_selectedItem?.type === "entity" ? _selectedItem.name : undefined}
             />

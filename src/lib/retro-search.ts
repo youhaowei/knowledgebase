@@ -7,21 +7,21 @@
  * Note: Currently unused — intended for future retro CLI `search-kb` and `patterns` commands.
  */
 
-import { search, getProvider } from "./operations.js";
+import { graphSearch, getProvider } from "./operations.js";
 import type { Memory, StoredEdge } from "../types.js";
 
 const RETRO_NAMESPACE = "retro";
 
 /**
  * Find existing retro findings similar to the given text.
- * Uses the shared operations.search() which combines vector + FTS via RRF.
+ * Uses graphSearch which combines vector + FTS via RRF.
  * Useful for dedup before inserting a new finding.
  */
 export async function findSimilarFindings(
   text: string,
   limit = 5,
 ): Promise<Memory[]> {
-  const result = await search(text, RETRO_NAMESPACE, limit);
+  const result = await graphSearch(text, RETRO_NAMESPACE, limit);
   return result.memories;
 }
 
