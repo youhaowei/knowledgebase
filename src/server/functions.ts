@@ -608,7 +608,7 @@ function sortMemories(items: Memory[], sortBy: ListMemoriesInput["sortBy"], sort
   return [...items].sort((a, b) => {
     const cmp = sortBy === "name"
       ? a.name.localeCompare(b.name)
-      : a.createdAt.getTime() - b.createdAt.getTime();
+      : a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id);
     return sortDir === "asc" ? cmp : -cmp;
   });
 }
@@ -646,15 +646,16 @@ function readDegradedMemory(path: string, category?: ListMemoriesInput["category
 /**
  * Single-namespace degraded list.
  *
- * Round 8 Theme F: d770e65 regressed this to O(total memories) body reads +
- * full `Memory` object construction per page request. Restore the
- * pre-regression pattern where the paged slice is the only set of bodies
- * we materialize — where we can.
+ * Round 8 Theme F: d770e65 regressed this to full `Memory` object
+ * construction for every file. Keep full object construction limited to the
+ * page slice; candidate reads still validate frontmatter where correctness
+ * depends on file truth rather than `_index.md` metadata.
  *
  * Sort dispatch:
- * - `sortBy: "name"` — `listMemoryFiles` metadata carries name, and the
- *   `_index.md` fast path makes this free. Sort metadata, paginate, then
- *   read bodies only for the page slice.
+ * - `sortBy: "name"` — `listMemoryFiles` metadata carries name, but `_index.md`
+ *   can outlive later user edits that make a file unparseable. Read and
+ *   validate candidates before counting, so parse failures cannot inflate
+ *   `total`.
  * - `sortBy: "createdAt"` — `_index.md` does NOT carry createdAt, and the
  *   slow path (index missing / stale) returns files in `readdirSync`
  *   (filename ≈ UUID) order. We cannot trust `listMemoryFiles` ordering
@@ -675,40 +676,29 @@ function listDegradedNamespace(namespace: string, input: ListMemoriesInput): { i
   } catch {
     return { items: [], indexed: 0, total: 0 };
   }
-  const indexed = files.filter((f) => f.indexed).length;
-
-  if (input.sortBy === "name" && !input.category) {
-    // Fast path: metadata-only sort + paginate, bodies only for slice.
-    const ordered = [...files].sort((a, b) =>
-      input.sortDir === "asc" ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name),
-    );
-    const paged = ordered.slice(input.offset, input.offset + input.limit);
-    const items: Memory[] = [];
-    for (const entry of paged) {
-      const m = readDegradedMemory(entry.path);
-      if (m) items.push(m);
-    }
-    return { items, indexed, total: files.length };
-  }
 
   // createdAt sort, or category filter: scan frontmatter for all files,
   // sort by frontmatter.createdAt (trustworthy regardless of index state),
   // then only construct `Memory` objects for the paged slice.
   const reads: ReadMemoryResult[] = [];
+  const validIds = new Set<string>();
   for (const f of files) {
     try {
       const read = readMemoryFile(f.path);
+      validIds.add(f.id);
       if (input.category && read.frontmatter.category !== input.category) continue;
       reads.push(read);
     } catch (err) {
       console.error(`[kb] listMemories degraded: failed to read ${f.path}`, err);
     }
   }
+  const indexed = files.filter((f) => f.indexed && validIds.has(f.id)).length;
 
   reads.sort((a, b) => {
     const cmp = input.sortBy === "name"
       ? a.frontmatter.name.localeCompare(b.frontmatter.name)
-      : a.frontmatter.createdAt.localeCompare(b.frontmatter.createdAt);
+      : a.frontmatter.createdAt.localeCompare(b.frontmatter.createdAt)
+        || a.frontmatter.id.localeCompare(b.frontmatter.id);
     return input.sortDir === "asc" ? cmp : -cmp;
   });
 
@@ -720,7 +710,7 @@ function listDegradedNamespace(namespace: string, input: ListMemoriesInput): { i
 export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemoriesResponse {
   const namespaces = data.namespace ? [data.namespace] : listNamespaceDirs();
 
-  // Hot path: single namespace. Paginate on metadata, only read paged bodies.
+  // Single namespace can count valid files exactly before paginating.
   if (namespaces.length === 1) {
     const r = listDegradedNamespace(namespaces[0]!, data);
     return { ...r, degraded: true };
@@ -738,10 +728,12 @@ export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemor
     } catch {
       continue;
     }
-    indexed += files.filter((f) => f.indexed).length;
     for (const entry of files) {
       const m = readDegradedMemory(entry.path, data.category);
-      if (m) allItems.push(m);
+      if (m) {
+        allItems.push(m);
+        if (entry.indexed) indexed += 1;
+      }
     }
   }
   const sorted = sortMemories(allItems, data.sortBy, data.sortDir);

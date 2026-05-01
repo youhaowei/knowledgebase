@@ -1,9 +1,14 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
-import { writeMemoryFile, type MemoryFrontmatter } from "../src/lib/fs-memory.js";
+import {
+  generateIndex,
+  resolveNamespacePath,
+  writeMemoryFile,
+  type MemoryFrontmatter,
+} from "../src/lib/fs-memory.js";
 import { namespaceSchema, optionalNamespaceSchema } from "../src/types.js";
 
 // Isolate this file's KB root / ladybug path / analytics DB from sibling test
@@ -294,8 +299,141 @@ describe("listMemories degraded fallback", () => {
 
     expect(result.degraded).toBe(true);
     expect(result.total).toBe(2);
-    expect(result.items.map((item) => item.namespace).sort()).toEqual(["default", "work"]);
-    expect(result.items.map((item) => item.id).sort()).toEqual([defaultId, workId].sort());
+    expect(result.items.map((item) => item.namespace)).toEqual(["work", "default"]);
+    expect(result.items.map((item) => item.id)).toEqual([workId, defaultId]);
+  });
+
+  test("uses id as a deterministic tiebreak for degraded createdAt sorting", () => {
+    const lowId = "00000000-0000-4000-8000-000000000001";
+    const highId = "00000000-0000-4000-8000-000000000002";
+    const createdAt = "2026-04-10T00:00:00.000Z";
+    writeMemoryFile(lowId, "Low id body", makeFrontmatter({
+      id: lowId,
+      name: "Low",
+      namespace: "ties",
+      createdAt,
+    }));
+    writeMemoryFile(highId, "High id body", makeFrontmatter({
+      id: highId,
+      name: "High",
+      namespace: "ties",
+      createdAt,
+    }));
+
+    const result = listMemoriesDegradedFallback({
+      namespace: "ties",
+      offset: 0,
+      limit: 10,
+      sortBy: "createdAt",
+      sortDir: "desc",
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual([highId, lowId]);
+  });
+
+  test("name-sorted degraded totals exclude files that fail frontmatter parsing", () => {
+    const validId = randomUUID();
+    const invalidId = randomUUID();
+    writeMemoryFile(validId, "Valid body", makeFrontmatter({
+      id: validId,
+      name: "Valid",
+      namespace: "corrupt-index",
+      createdAt: "2026-04-10T00:00:00.000Z",
+    }));
+    const invalidPath = writeMemoryFile(invalidId, "Invalid body", makeFrontmatter({
+      id: invalidId,
+      name: "Invalid",
+      namespace: "corrupt-index",
+      createdAt: "2026-04-11T00:00:00.000Z",
+    }));
+    const nsPath = resolveNamespacePath("corrupt-index");
+    generateIndex(nsPath);
+    writeFileSync(invalidPath, [
+      "---",
+      `id: ${invalidId}`,
+      "name: Invalid",
+      "origin: manual",
+      "namespace: corrupt-index",
+      "tags: []",
+      "createdAt: not-a-date",
+      "---",
+      "Invalid body",
+      "",
+    ].join("\n"));
+    const beforeIndex = new Date("2026-01-01T00:00:00.000Z");
+    utimesSync(invalidPath, beforeIndex, beforeIndex);
+
+    const result = listMemoriesDegradedFallback({
+      namespace: "corrupt-index",
+      offset: 0,
+      limit: 10,
+      sortBy: "name",
+      sortDir: "asc",
+    });
+
+    expect(result.total).toBe(1);
+    expect(result.items.map((item) => item.id)).toEqual([validId]);
+  });
+
+  test("unscoped degraded indexed count excludes files that fail frontmatter parsing", () => {
+    const previousMemoryPath = process.env.KB_MEMORY_PATH;
+    const isolatedDir = mkdtempSync(join(tmpdir(), "kb-server-fn-unscoped-"));
+    process.env.KB_MEMORY_PATH = isolatedDir;
+
+    try {
+      const indexedAt = "2026-04-12T00:00:00.000Z";
+      const validId = randomUUID();
+      const invalidId = randomUUID();
+      writeMemoryFile(validId, "Valid body", makeFrontmatter({
+        id: validId,
+        name: "Valid",
+        namespace: "cross-valid",
+        createdAt: "2026-04-10T00:00:00.000Z",
+        indexedAt,
+      }));
+      const invalidPath = writeMemoryFile(invalidId, "Invalid body", makeFrontmatter({
+        id: invalidId,
+        name: "Invalid",
+        namespace: "cross-invalid",
+        createdAt: "2026-04-11T00:00:00.000Z",
+        indexedAt,
+      }));
+      generateIndex(resolveNamespacePath("cross-valid"));
+      generateIndex(resolveNamespacePath("cross-invalid"));
+      writeFileSync(invalidPath, [
+        "---",
+        `id: ${invalidId}`,
+        "name: Invalid",
+        "origin: manual",
+        "namespace: cross-invalid",
+        "tags: []",
+        "createdAt: not-a-date",
+        `indexedAt: "${indexedAt}"`,
+        "---",
+        "Invalid body",
+        "",
+      ].join("\n"));
+      const beforeIndex = new Date("2026-01-01T00:00:00.000Z");
+      utimesSync(invalidPath, beforeIndex, beforeIndex);
+
+      const result = listMemoriesDegradedFallback({
+        offset: 0,
+        limit: 10,
+        sortBy: "createdAt",
+        sortDir: "desc",
+      });
+
+      expect(result.total).toBe(1);
+      expect(result.indexed).toBe(1);
+      expect(result.items.map((item) => item.id)).toEqual([validId]);
+    } finally {
+      if (previousMemoryPath === undefined) {
+        delete process.env.KB_MEMORY_PATH;
+      } else {
+        process.env.KB_MEMORY_PATH = previousMemoryPath;
+      }
+      rmSync(isolatedDir, { recursive: true, force: true });
+    }
   });
 
   test("behaviour contract: category filtering happens before pagination and total counts filtered rows", () => {
