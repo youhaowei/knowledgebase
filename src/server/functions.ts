@@ -710,7 +710,7 @@ function listDegradedNamespace(namespace: string, input: ListMemoriesInput): { i
 export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemoriesResponse {
   const namespaces = data.namespace ? [data.namespace] : listNamespaceDirs();
 
-  // Hot path: single namespace. Paginate on metadata, only read paged bodies.
+  // Single namespace can count valid files exactly before paginating.
   if (namespaces.length === 1) {
     const r = listDegradedNamespace(namespaces[0]!, data);
     return { ...r, degraded: true };
@@ -728,10 +728,12 @@ export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemor
     } catch {
       continue;
     }
-    indexed += files.filter((f) => f.indexed).length;
     for (const entry of files) {
       const m = readDegradedMemory(entry.path, data.category);
-      if (m) allItems.push(m);
+      if (m) {
+        allItems.push(m);
+        if (entry.indexed) indexed += 1;
+      }
     }
   }
   const sorted = sortMemories(allItems, data.sortBy, data.sortDir);

@@ -375,6 +375,67 @@ describe("listMemories degraded fallback", () => {
     expect(result.items.map((item) => item.id)).toEqual([validId]);
   });
 
+  test("unscoped degraded indexed count excludes files that fail frontmatter parsing", () => {
+    const previousMemoryPath = process.env.KB_MEMORY_PATH;
+    const isolatedDir = mkdtempSync(join(tmpdir(), "kb-server-fn-unscoped-"));
+    process.env.KB_MEMORY_PATH = isolatedDir;
+
+    try {
+      const indexedAt = "2026-04-12T00:00:00.000Z";
+      const validId = randomUUID();
+      const invalidId = randomUUID();
+      writeMemoryFile(validId, "Valid body", makeFrontmatter({
+        id: validId,
+        name: "Valid",
+        namespace: "cross-valid",
+        createdAt: "2026-04-10T00:00:00.000Z",
+        indexedAt,
+      }));
+      const invalidPath = writeMemoryFile(invalidId, "Invalid body", makeFrontmatter({
+        id: invalidId,
+        name: "Invalid",
+        namespace: "cross-invalid",
+        createdAt: "2026-04-11T00:00:00.000Z",
+        indexedAt,
+      }));
+      generateIndex(resolveNamespacePath("cross-valid"));
+      generateIndex(resolveNamespacePath("cross-invalid"));
+      writeFileSync(invalidPath, [
+        "---",
+        `id: ${invalidId}`,
+        "name: Invalid",
+        "origin: manual",
+        "namespace: cross-invalid",
+        "tags: []",
+        "createdAt: not-a-date",
+        `indexedAt: "${indexedAt}"`,
+        "---",
+        "Invalid body",
+        "",
+      ].join("\n"));
+      const beforeIndex = new Date("2026-01-01T00:00:00.000Z");
+      utimesSync(invalidPath, beforeIndex, beforeIndex);
+
+      const result = listMemoriesDegradedFallback({
+        offset: 0,
+        limit: 10,
+        sortBy: "createdAt",
+        sortDir: "desc",
+      });
+
+      expect(result.total).toBe(1);
+      expect(result.indexed).toBe(1);
+      expect(result.items.map((item) => item.id)).toEqual([validId]);
+    } finally {
+      if (previousMemoryPath === undefined) {
+        delete process.env.KB_MEMORY_PATH;
+      } else {
+        process.env.KB_MEMORY_PATH = previousMemoryPath;
+      }
+      rmSync(isolatedDir, { recursive: true, force: true });
+    }
+  });
+
   test("behaviour contract: category filtering happens before pagination and total counts filtered rows", () => {
     const ids = [randomUUID(), randomUUID(), randomUUID()];
     writeMemoryFile(ids[0], "Alpha", makeFrontmatter({
