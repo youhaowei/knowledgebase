@@ -632,17 +632,6 @@ function memoryFromRead(read: ReadMemoryResult): Memory {
   };
 }
 
-function readDegradedMemory(path: string, category?: ListMemoriesInput["category"]): Memory | null {
-  try {
-    const read = readMemoryFile(path);
-    if (category && read.frontmatter.category !== category) return null;
-    return memoryFromRead(read);
-  } catch (err) {
-    console.error(`[kb] listMemories degraded: failed to read ${path}`, err);
-    return null;
-  }
-}
-
 /**
  * Single-namespace degraded list.
  *
@@ -677,9 +666,12 @@ function listDegradedNamespace(namespace: string, input: ListMemoriesInput): { i
     return { items: [], indexed: 0, total: 0 };
   }
 
-  // createdAt sort, or category filter: scan frontmatter for all files,
-  // sort by frontmatter.createdAt (trustworthy regardless of index state),
-  // then only construct `Memory` objects for the paged slice.
+  // Degraded mode always scans frontmatter for every file: the index can't
+  // be trusted for createdAt ordering and the category filter needs
+  // frontmatter, so there is no fast path. Sort by frontmatter (trustworthy
+  // regardless of index state), then construct `Memory` only for the paged
+  // slice. `validIds` is every parseable file — category-independent, so
+  // `indexed` below counts indexed files regardless of the category filter.
   const reads: ReadMemoryResult[] = [];
   const validIds = new Set<string>();
   for (const f of files) {
@@ -728,13 +720,25 @@ export function listMemoriesDegradedFallback(data: ListMemoriesInput): ListMemor
     } catch {
       continue;
     }
+    // Mirror listDegradedNamespace: build `validIds` from every *parseable*
+    // file, then apply the category filter only to the returned items. The
+    // `indexed` count must stay category-independent — tying it to a
+    // category match would under-report, so an all-namespace call would
+    // disagree with the sum of per-namespace calls (breaks UI progress).
+    const validIds = new Set<string>();
     for (const entry of files) {
-      const m = readDegradedMemory(entry.path, data.category);
-      if (m) {
-        allItems.push(m);
-        if (entry.indexed) indexed += 1;
+      let read;
+      try {
+        read = readMemoryFile(entry.path);
+      } catch (err) {
+        console.error(`[kb] listMemories degraded: failed to read ${entry.path}`, err);
+        continue;
       }
+      validIds.add(entry.id);
+      if (data.category && read.frontmatter.category !== data.category) continue;
+      allItems.push(memoryFromRead(read));
     }
+    indexed += files.filter((f) => f.indexed && validIds.has(f.id)).length;
   }
   const sorted = sortMemories(allItems, data.sortBy, data.sortDir);
   return {

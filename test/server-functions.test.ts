@@ -474,6 +474,59 @@ describe("listMemories degraded fallback", () => {
     expect(page.items[0]?.id).toBe(ids[1]);
     expect(page.items.every((item) => item.category === "general")).toBe(true);
   });
+
+  test("cross-namespace degraded indexed count is category-independent", () => {
+    // An unscoped call with a category filter must still count every indexed
+    // file across namespaces — not just files matching the category — so the
+    // total equals the sum of per-namespace calls (UI progress indicators).
+    const previousMemoryPath = process.env.KB_MEMORY_PATH;
+    const isolatedDir = mkdtempSync(join(tmpdir(), "kb-server-fn-xns-cat-"));
+    process.env.KB_MEMORY_PATH = isolatedDir;
+
+    try {
+      const indexedAt = "2026-04-12T00:00:00.000Z";
+      const generalId = randomUUID();
+      const eventId = randomUUID();
+      writeMemoryFile(generalId, "General body", makeFrontmatter({
+        id: generalId,
+        name: "General",
+        namespace: "xns-general",
+        category: "general",
+        createdAt: "2026-04-10T00:00:00.000Z",
+        indexedAt,
+      }));
+      writeMemoryFile(eventId, "Event body", makeFrontmatter({
+        id: eventId,
+        name: "Event",
+        namespace: "xns-event",
+        category: "event",
+        createdAt: "2026-04-11T00:00:00.000Z",
+        indexedAt,
+      }));
+      generateIndex(resolveNamespacePath("xns-general"));
+      generateIndex(resolveNamespacePath("xns-event"));
+
+      const result = listMemoriesDegradedFallback({
+        offset: 0,
+        limit: 10,
+        category: "general",
+        sortBy: "createdAt",
+        sortDir: "desc",
+      });
+
+      // total/items are category-filtered; indexed counts both indexed files.
+      expect(result.total).toBe(1);
+      expect(result.items.map((item) => item.id)).toEqual([generalId]);
+      expect(result.indexed).toBe(2);
+    } finally {
+      if (previousMemoryPath === undefined) {
+        delete process.env.KB_MEMORY_PATH;
+      } else {
+        process.env.KB_MEMORY_PATH = previousMemoryPath;
+      }
+      rmSync(isolatedDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("centralized namespace parsing", () => {
