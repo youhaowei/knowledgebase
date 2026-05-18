@@ -33,8 +33,10 @@ import {
   ensureNamespacePath,
   resolveNamespacePath,
   deleteMemoryFile,
+  tombstoneMemoryFile,
   withNamespaceLock,
   configureFsMemoryTimingForTests,
+  configureFsMemoryTombstoneTimingForTests,
   resetFsMemoryTimingForTests,
   MemoryFrontmatter,
 } from "../src/lib/fs-memory";
@@ -597,6 +599,48 @@ describe("deleteMemoryFile", () => {
     const result = deleteMemoryFile("react hooks", ns);
     expect(result).not.toBeNull();
     expect(result!.id).toBe(id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tombstoneMemoryFile
+// ---------------------------------------------------------------------------
+
+describe("tombstoneMemoryFile", () => {
+  test("Decision #11: persists tombstone intent before renaming the memory file", () => {
+    const ns = `tombstone-order-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    const name = "Crash Window";
+    const originalPath = writeMemoryFile(id, "body", makeFrontmatter({ id, namespace: ns, name }));
+    const jsonlPath = join(resolveNamespacePath(ns), "_tombstones.jsonl");
+
+    configureFsMemoryTombstoneTimingForTests({
+      afterIntentPersisted: () => {
+        expect(existsSync(jsonlPath)).toBe(true);
+        const record = JSON.parse(readFileSync(jsonlPath, "utf-8").trim());
+        expect(record).toMatchObject({ id, name, reason: "manual purge" });
+        expect(existsSync(originalPath)).toBe(true);
+        expect(existsSync(`${originalPath}.deleted`)).toBe(false);
+        throw new Error("simulate crash before rename");
+      },
+    });
+
+    expect(() => tombstoneMemoryFile(name, ns, "manual purge")).toThrow("simulate crash before rename");
+  });
+
+  test("Decision #11: renames file after tombstone intent is durable", () => {
+    const ns = `tombstone-happy-${randomUUID().slice(0, 8)}`;
+    const id = randomUUID();
+    const name = "Recoverable";
+    const originalPath = writeMemoryFile(id, "body", makeFrontmatter({ id, namespace: ns, name }));
+
+    const result = tombstoneMemoryFile(name, ns, "forget");
+
+    expect(result).toMatchObject({ id, path: originalPath, tombstonePath: `${originalPath}.deleted` });
+    expect(existsSync(originalPath)).toBe(false);
+    expect(readFileSync(`${originalPath}.deleted`, "utf-8")).toContain("body");
+    const record = JSON.parse(readFileSync(join(resolveNamespacePath(ns), "_tombstones.jsonl"), "utf-8").trim());
+    expect(record).toMatchObject({ id, name, reason: "forget" });
   });
 });
 

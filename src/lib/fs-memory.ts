@@ -9,7 +9,7 @@
 
 import { z } from "zod";
 import { homedir } from "os";
-import { join, resolve, sep, basename } from "path";
+import { join, resolve, sep, basename, dirname } from "path";
 import {
   mkdirSync,
   renameSync,
@@ -22,6 +22,8 @@ import {
   unlinkSync,
   statSync,
   openSync,
+  writeSync,
+  fsyncSync,
   closeSync,
   utimesSync,
 } from "fs";
@@ -346,10 +348,19 @@ export function configureFsMemoryTimingForTests(overrides: Partial<typeof defaul
   if (overrides.staleLockAgeMs !== undefined) lockTimings.staleLockAgeMs = overrides.staleLockAgeMs;
 }
 
+const tombstoneTimings: { afterIntentPersisted?: () => void } = {};
+
+export function configureFsMemoryTombstoneTimingForTests(
+  overrides: { afterIntentPersisted?: () => void },
+): void {
+  tombstoneTimings.afterIntentPersisted = overrides.afterIntentPersisted;
+}
+
 export function resetFsMemoryTimingForTests(): void {
   lockTimings.timeoutMs = defaultLockTimings.timeoutMs;
   lockTimings.retryMs = defaultLockTimings.retryMs;
   lockTimings.staleLockAgeMs = defaultLockTimings.staleLockAgeMs;
+  tombstoneTimings.afterIntentPersisted = undefined;
 }
 
 /**
@@ -503,14 +514,6 @@ export function tombstoneMemoryFile(
   const match = entries.find((e) => normalizeNameForLookup(e.name) === nameLower);
   if (!match) return null;
 
-  const tombstonePath = `${match.path}.deleted`;
-  try {
-    renameSync(match.path, tombstonePath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-
   const nsPath = resolveNamespacePath(namespace);
   const jsonlPath = join(nsPath, "_tombstones.jsonl");
   const record = JSON.stringify({
@@ -519,18 +522,42 @@ export function tombstoneMemoryFile(
     reason,
     timestamp: new Date().toISOString(),
   }) + "\n";
+
+  appendDurableJsonlRecord(jsonlPath, record);
+  tombstoneTimings.afterIntentPersisted?.();
+
+  const tombstonePath = `${match.path}.deleted`;
   try {
-    // O_APPEND is atomic for single writes under PIPE_BUF on POSIX, so this
-    // is crash-safer than read-concat-write and avoids dropping concurrent
-    // records if a caller skips the namespace lock.
-    appendFileSync(jsonlPath, record);
+    renameSync(match.path, tombstonePath);
   } catch (err) {
-    // Best-effort: if the log write fails after the rename, the file is still
-    // tombstoned (searches won't return it). Reconciler will catch up via directory scan.
-    console.error(`[fs-memory] Failed to append to _tombstones.jsonl:`, err);
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
 
   return { id: match.id, path: match.path, tombstonePath };
+}
+
+function appendDurableJsonlRecord(jsonlPath: string, record: string): void {
+  const fd = openSync(jsonlPath, "a");
+  try {
+    // O_APPEND is atomic for single writes under PIPE_BUF on POSIX. fsync
+    // makes Decision #11's graph-cleanup intent durable before the live file
+    // is renamed away.
+    writeSync(fd, record);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  syncDirectoryEntry(dirname(jsonlPath));
+}
+
+function syncDirectoryEntry(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
