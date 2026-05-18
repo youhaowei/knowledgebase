@@ -9,7 +9,7 @@
 
 import { z } from "zod";
 import { homedir } from "os";
-import { join, resolve, sep, basename } from "path";
+import { join, resolve, sep, basename, dirname } from "path";
 import {
   mkdirSync,
   renameSync,
@@ -22,6 +22,8 @@ import {
   unlinkSync,
   statSync,
   openSync,
+  writeSync,
+  fsyncSync,
   closeSync,
   utimesSync,
 } from "fs";
@@ -346,10 +348,22 @@ export function configureFsMemoryTimingForTests(overrides: Partial<typeof defaul
   if (overrides.staleLockAgeMs !== undefined) lockTimings.staleLockAgeMs = overrides.staleLockAgeMs;
 }
 
+// Test-only injection seam: a hook fired after the tombstone intent is
+// persisted but before the file rename, so tests can assert the ordering by
+// simulating a crash in that window. Undefined (no-op) in production.
+const tombstoneTimings: { afterIntentPersisted?: () => void } = {};
+
+export function configureFsMemoryTombstoneTimingForTests(
+  overrides: { afterIntentPersisted?: () => void },
+): void {
+  tombstoneTimings.afterIntentPersisted = overrides.afterIntentPersisted;
+}
+
 export function resetFsMemoryTimingForTests(): void {
   lockTimings.timeoutMs = defaultLockTimings.timeoutMs;
   lockTimings.retryMs = defaultLockTimings.retryMs;
   lockTimings.staleLockAgeMs = defaultLockTimings.staleLockAgeMs;
+  tombstoneTimings.afterIntentPersisted = undefined;
 }
 
 /**
@@ -375,15 +389,22 @@ export function listNamespaceDirs(): string[] {
 /**
  * Normalizes tags to kebab-case lowercase.
  * "My Tag", "MY_TAG", "my tag" → "my-tag"
+ *
+ * Colons are preserved as the field/value separator for namespaced tags
+ * (`status:backlog`, `type:feature`). They are part of the documented tag
+ * model, so stripping them would collapse `status:backlog` into the
+ * boundary-less `statusbacklog` and break `--tag` filters. The same
+ * normalizer runs on store and on query, so both sides agree on the form.
  */
 export function normalizeTags(tags: string[]): string[] {
   return tags.map((tag) =>
     tag
       .toLowerCase()
-      .replace(/[\s_]+/g, "-")      // spaces and underscores → hyphens
-      .replace(/[^a-z0-9-]/g, "")  // strip non-alphanumeric (except hyphens)
-      .replace(/-+/g, "-")          // collapse multiple hyphens
-      .replace(/(?:^-)|(?:-$)/g, ""), // strip leading/trailing hyphens
+      .replace(/[\s_]+/g, "-")        // spaces and underscores → hyphens
+      .replace(/[^a-z0-9:-]/g, "")    // strip non-alphanumeric (keep hyphens, colons)
+      .replace(/-+/g, "-")            // collapse multiple hyphens
+      .replace(/-?:-?/g, ":")         // tidy hyphens hugging a colon ("status: backlog" → "status:backlog")
+      .replace(/(?:^[-:])|(?:[-:]$)/g, ""), // strip leading/trailing hyphens and colons
   ).filter(Boolean);
 }
 
@@ -503,14 +524,6 @@ export function tombstoneMemoryFile(
   const match = entries.find((e) => normalizeNameForLookup(e.name) === nameLower);
   if (!match) return null;
 
-  const tombstonePath = `${match.path}.deleted`;
-  try {
-    renameSync(match.path, tombstonePath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-
   const nsPath = resolveNamespacePath(namespace);
   const jsonlPath = join(nsPath, "_tombstones.jsonl");
   const record = JSON.stringify({
@@ -519,18 +532,82 @@ export function tombstoneMemoryFile(
     reason,
     timestamp: new Date().toISOString(),
   }) + "\n";
+
+  appendDurableJsonlRecord(jsonlPath, record);
+  tombstoneTimings.afterIntentPersisted?.();
+
+  const tombstonePath = `${match.path}.deleted`;
   try {
-    // O_APPEND is atomic for single writes under PIPE_BUF on POSIX, so this
-    // is crash-safer than read-concat-write and avoids dropping concurrent
-    // records if a caller skips the namespace lock.
-    appendFileSync(jsonlPath, record);
+    renameSync(match.path, tombstonePath);
   } catch (err) {
-    // Best-effort: if the log write fails after the rename, the file is still
-    // tombstoned (searches won't return it). Reconciler will catch up via directory scan.
-    console.error(`[fs-memory] Failed to append to _tombstones.jsonl:`, err);
+    // Concurrent deletion between listMemoryFiles and rename: the intent
+    // record is already durable, so the reconciler still cleans up the graph
+    // row (idempotent). Returning null reports "not found" to the caller —
+    // an acceptable asymmetry; the intent is not lost.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
   }
 
   return { id: match.id, path: match.path, tombstonePath };
+}
+
+/**
+ * Idempotently completes a tombstone: if `{id}.md` is still live, rename it to
+ * `{id}.md.deleted`. Returns true if it performed the rename, false if the
+ * file was already tombstoned or gone.
+ *
+ * `tombstoneMemoryFile` persists the `_tombstones.jsonl` intent record *before*
+ * renaming the file. A crash in that window leaves the intent recorded but the
+ * file live and still `indexedAt` — the tombstone drain would then delete the
+ * graph row while the file ghosts (never re-indexed by the unindexed sweep).
+ * The drain calls this so the file is brought in line with the intent before
+ * the graph row is forgotten. Idempotent: safe to call on an already-tombstoned
+ * or already-removed memory.
+ */
+export function ensureMemoryFileTombstoned(namespace: string, id: string): boolean {
+  // `id` comes from a `_tombstones.jsonl` record, which can be hand-edited.
+  // Reject anything that isn't a plain memory id before interpolating it into
+  // a path — a value with separators would escape the namespace root and
+  // rename unrelated files.
+  assertValidMemoryId(id);
+  const livePath = join(resolveNamespacePath(namespace), `${id}.md`);
+  if (!existsSync(livePath)) return false;
+  try {
+    renameSync(livePath, `${livePath}.deleted`);
+  } catch (err) {
+    // Check-then-act race: a concurrent drainer or `forget` may have moved the
+    // file between existsSync and here. It is already tombstoned — a no-op,
+    // per this function's documented idempotency.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+  return true;
+}
+
+function appendDurableJsonlRecord(jsonlPath: string, record: string): void {
+  const fd = openSync(jsonlPath, "a");
+  try {
+    // O_APPEND is atomic for single writes under PIPE_BUF on POSIX. fsync
+    // makes Decision #11's graph-cleanup intent durable before the live file
+    // is renamed away.
+    writeSync(fd, record);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  syncDirectoryEntry(dirname(jsonlPath));
+}
+
+// Fsync a directory so a newly-appended file's entry survives a crash.
+// POSIX-only: opening a directory for fsync works on macOS/Linux but throws
+// EISDIR on Windows. The project targets Bun on macOS/Linux, so this is fine.
+function syncDirectoryEntry(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -554,6 +631,11 @@ export function recordForgetEdge(
   // O_APPEND is atomic for single writes under PIPE_BUF on POSIX. Prior
   // read-concat-write silently lost concurrent records when called outside a
   // namespace lock — appendFileSync is both correct and lock-free-safe.
+  //
+  // Unlike tombstoneMemoryFile, this is best-effort (no fsync): edge-forget
+  // has no paired file rename, so there is no torn-state window where a lost
+  // record would leave the filesystem inconsistent. A crash simply drops the
+  // intent; the user re-runs forgetEdge.
   appendFileSync(jsonlPath, record);
 }
 
@@ -875,10 +957,6 @@ function readIndexCounts(lines: string[]): { total: number; unindexed: number } 
   };
 }
 
-/**
- * O(1) append: adds one table row to an existing _index.md without regenerating.
- * Creates _index.md with a minimal header if it doesn't exist yet.
- */
 /**
  * Updates a single existing row in `_index.md` by memory id. Falls back to a
  * full `generateIndex` regeneration if the row isn't found (e.g., on first

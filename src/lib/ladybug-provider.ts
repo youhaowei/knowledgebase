@@ -2,7 +2,7 @@ import { Database, Connection } from "lbug";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { mkdirSync, unlinkSync } from "fs";
+import { mkdirSync, renameSync, existsSync } from "fs";
 import type {
   Memory,
   Entity,
@@ -47,6 +47,52 @@ function safePagInt(v: unknown, fallback: number): number {
   return Math.max(0, Math.trunc(v));
 }
 
+/**
+ * WAL-replay corruption signatures, confirmed against lbug 0.14.3. lbug
+ * replays the WAL lazily on the first query against a connection — not on
+ * `new Database()` — so an unclean shutdown can leave a WAL that replays
+ * into an unresolved (`ANY`) vector type and poisons *every* query on the
+ * connection (`LOAD vector` and `CALL show_tables()` crash too, not just
+ * vector search). Substring match on lbug's error text is the only signal
+ * lbug exposes; if a future version rewords these, recovery silently stops
+ * firing — `isWalReplayCorruption` is pinned by tests in provider.test.ts.
+ */
+const WAL_REPLAY_CORRUPTION = [
+  "create a vector with ANY type",
+  "expected to be resolved during binding",
+];
+
+/** True if an error message matches a known lbug WAL-replay corruption signature. */
+export function isWalReplayCorruption(message: string): boolean {
+  return WAL_REPLAY_CORRUPTION.some((sig) => message.includes(sig));
+}
+
+/**
+ * Quarantine a corrupt WAL so the next open replays cleanly from the last
+ * checkpoint. Renamed (not deleted) — kept for forensics, and any writes
+ * that lived only in the WAL are recoverable via `db:reindex` since the
+ * filesystem is the source of truth (Decision #11). Both WAL-recovery
+ * seams — the constructor's open-time guard and `init()`'s first-query
+ * probe — route disposal through here: corrupt derived artifacts are
+ * quarantined, never deleted. Returns the quarantine path, or null if
+ * there was no WAL to move.
+ */
+export function quarantineCorruptWal(walPath: string): string | null {
+  if (!existsSync(walPath)) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dest = `${walPath}.corrupt-${stamp}`;
+  try {
+    renameSync(walPath, dest);
+  } catch (err) {
+    // A concurrent kb process recovering the same DB may have moved the WAL
+    // between the existsSync check and here — it is already quarantined, so
+    // treat the race as a no-op rather than failing recovery.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  return dest;
+}
+
 export class LadybugProvider implements GraphProvider {
   private db: Database;
   private conn!: Connection;
@@ -56,14 +102,20 @@ export class LadybugProvider implements GraphProvider {
     this.dataPath = dataPath ?? process.env.LADYBUG_DATA_PATH ?? join(homedir(), ".kb", "ladybug");
     mkdirSync(dirname(this.dataPath), { recursive: true });
 
-    // Auto-recover from corrupted WAL (LadybugDB crashes on unclean shutdown)
+    // Auto-recover from a corrupt WAL that fails at *open* time — lbug throws
+    // from `new Database()`. A WAL that instead survives open but fails on the
+    // first *query* is caught by recoverIfWalReplayCorrupt() in init(). Both
+    // seams quarantine the WAL via quarantineCorruptWal (never delete).
     const walPath = this.dataPath + ".wal";
     try {
       this.db = new Database(this.dataPath);
     } catch (err) {
       if (String(err).includes("wal_record") || String(err).includes("KU_UNREACHABLE")) {
-        console.error(`[kb] Corrupted WAL detected, removing ${walPath} and retrying...`);
-        this.removeWalFile(walPath);
+        const quarantined = quarantineCorruptWal(walPath);
+        console.error(
+          `[kb] Corrupt WAL detected at open — quarantined → ${quarantined ?? "(no WAL file)"}; retrying. ` +
+          "Run `bun run db:reindex` to rebuild the index from the filesystem.",
+        );
         this.db = new Database(this.dataPath);
       } else {
         throw err;
@@ -110,13 +162,41 @@ export class LadybugProvider implements GraphProvider {
     return `[${new Array(dim).fill(0).join(",")}]`;
   }
 
-  private removeWalFile(walPath: string): void {
+  /**
+   * Probe the connection with a trivial query to force WAL replay. lbug
+   * defers replay to the first query against a connection, so this probe
+   * runs first in `init()`, before any extension load or schema work — the
+   * poison is connection-wide, so `RETURN 1` is enough to surface it.
+   *
+   * On a known corruption signature: quarantine the WAL and rebuild from the
+   * last checkpoint. A non-replay failure, or a second failure after the
+   * rebuild (the checkpoint itself is corrupt), is rethrown — `init()`
+   * rejects, `getProvider()` enters its failure cooldown, and every graph
+   * caller degrades to filesystem-only results.
+   */
+  private async recoverIfWalReplayCorrupt(): Promise<void> {
     try {
-      unlinkSync(walPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
+      await this.conn.query("RETURN 1");
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isWalReplayCorruption(msg)) {
+        throw err;
       }
+      const quarantined = quarantineCorruptWal(this.dataPath + ".wal");
+      console.error(
+        `[kb] LadybugDB WAL replay failed (${msg}). ` +
+        (quarantined
+          ? `Quarantined corrupt WAL → ${quarantined}. Graph restored to its last checkpoint — run \`bun run db:reindex\` to rebuild the full index from the filesystem.`
+          : "No WAL file found to quarantine — the checkpoint itself may be corrupt; run `bun run db:reindex`."),
+      );
+      // Drop the poisoned handles and rebuild from the checkpoint. The old
+      // Database/Connection are deliberately not closed: lbug segfaults on
+      // close() under Bun, and the constructor's open-time guard already
+      // abandons handles the same way. GC reclaims them.
+      this.db = new Database(this.dataPath);
+      this.conn = new Connection(this.db);
+      await this.conn.query("RETURN 1");
     }
   }
 
@@ -215,6 +295,7 @@ export class LadybugProvider implements GraphProvider {
 
   async init(): Promise<void> {
     this.conn = new Connection(this.db);
+    await this.recoverIfWalReplayCorrupt();
 
     await this.loadExtension("vector");
     await this.loadExtension("fts");

@@ -3,13 +3,21 @@ import {
   expect,
   describe,
   beforeAll,
+  beforeEach,
   afterAll,
   afterEach,
 } from "bun:test";
 import { randomUUID } from "crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { GraphProvider } from "../src/lib/graph-provider";
 import { Neo4jProvider } from "../src/lib/neo4j-provider";
-import { LadybugProvider } from "../src/lib/ladybug-provider";
+import {
+  LadybugProvider,
+  isWalReplayCorruption,
+  quarantineCorruptWal,
+} from "../src/lib/ladybug-provider";
 import type { Memory, Entity, ExtractedEdge, StoredEntity, EmbeddingMap } from "../src/types";
 
 function makeTestEmbedding(seed: number): number[] {
@@ -1241,6 +1249,63 @@ describe("GraphProvider", () => {
         expect(Array.isArray(spaces)).toBe(true);
         expect(Array.isArray(allStripped)).toBe(true);
       });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WAL-replay corruption recovery — pure helpers, no native addon required.
+// The corruption itself (a poisoned WAL) can't be synthesized deterministically;
+// these pin the two testable contracts so a lbug version bump that reworded the
+// error text, or a refactor that turned quarantine back into delete, fails CI.
+// ---------------------------------------------------------------------------
+
+describe("WAL-replay recovery helpers", () => {
+  describe("isWalReplayCorruption", () => {
+    test("matches the ANY-type vector replay signature", () => {
+      expect(
+        isWalReplayCorruption(
+          "Runtime exception: Trying to a create a vector with ANY type. " +
+            "This should not happen.",
+        ),
+      ).toBe(true);
+    });
+
+    test("matches the unresolved-binding signature", () => {
+      expect(
+        isWalReplayCorruption("Data type is expected to be resolved during binding."),
+      ).toBe(true);
+    });
+
+    test("does not match an unrelated error — recovery must not fire", () => {
+      expect(isWalReplayCorruption("Binder exception: Table M does not exist.")).toBe(false);
+      expect(isWalReplayCorruption("")).toBe(false);
+    });
+  });
+
+  describe("quarantineCorruptWal", () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "kb-wal-"));
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test("renames the WAL to a timestamped .corrupt sibling, leaving no original", () => {
+      const walPath = join(dir, "ladybug.wal");
+      writeFileSync(walPath, "corrupt-wal-bytes");
+
+      const dest = quarantineCorruptWal(walPath);
+
+      expect(dest).not.toBeNull();
+      expect(dest!).toMatch(/ladybug\.wal\.corrupt-/);
+      expect(existsSync(walPath)).toBe(false); // moved, not copied
+      expect(existsSync(dest!)).toBe(true); // preserved for forensics
+    });
+
+    test("returns null when there is no WAL to quarantine", () => {
+      expect(quarantineCorruptWal(join(dir, "absent.wal"))).toBeNull();
     });
   });
 });
