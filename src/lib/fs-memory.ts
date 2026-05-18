@@ -386,15 +386,22 @@ export function listNamespaceDirs(): string[] {
 /**
  * Normalizes tags to kebab-case lowercase.
  * "My Tag", "MY_TAG", "my tag" → "my-tag"
+ *
+ * Colons are preserved as the field/value separator for namespaced tags
+ * (`status:backlog`, `type:feature`). They are part of the documented tag
+ * model, so stripping them would collapse `status:backlog` into the
+ * boundary-less `statusbacklog` and break `--tag` filters. The same
+ * normalizer runs on store and on query, so both sides agree on the form.
  */
 export function normalizeTags(tags: string[]): string[] {
   return tags.map((tag) =>
     tag
       .toLowerCase()
-      .replace(/[\s_]+/g, "-")      // spaces and underscores → hyphens
-      .replace(/[^a-z0-9-]/g, "")  // strip non-alphanumeric (except hyphens)
-      .replace(/-+/g, "-")          // collapse multiple hyphens
-      .replace(/(?:^-)|(?:-$)/g, ""), // strip leading/trailing hyphens
+      .replace(/[\s_]+/g, "-")        // spaces and underscores → hyphens
+      .replace(/[^a-z0-9:-]/g, "")    // strip non-alphanumeric (keep hyphens, colons)
+      .replace(/-+/g, "-")            // collapse multiple hyphens
+      .replace(/-?:-?/g, ":")         // tidy hyphens hugging a colon ("status: backlog" → "status:backlog")
+      .replace(/(?:^[-:])|(?:[-:]$)/g, ""), // strip leading/trailing hyphens and colons
   ).filter(Boolean);
 }
 

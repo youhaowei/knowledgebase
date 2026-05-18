@@ -115,6 +115,34 @@ describe("normalizeTags", () => {
   test("handles empty array", () => {
     expect(normalizeTags([])).toEqual([]);
   });
+
+  test("preserves colons as the field/value separator", () => {
+    expect(normalizeTags(["status:backlog", "type:feature"])).toEqual([
+      "status:backlog",
+      "type:feature",
+    ]);
+  });
+
+  test("normalizes the value side of a namespaced tag", () => {
+    expect(normalizeTags(["status:In Progress", "Type:Feature"])).toEqual([
+      "status:in-progress",
+      "type:feature",
+    ]);
+  });
+
+  test("tidies hyphens hugging a colon", () => {
+    expect(normalizeTags(["status: backlog", "type :feature"])).toEqual([
+      "status:backlog",
+      "type:feature",
+    ]);
+  });
+
+  test("strips leading/trailing colons", () => {
+    expect(normalizeTags([":leading", "trailing:"])).toEqual([
+      "leading",
+      "trailing",
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

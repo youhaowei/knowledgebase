@@ -2,7 +2,7 @@ import { Database, Connection } from "lbug";
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { mkdirSync, unlinkSync } from "fs";
+import { mkdirSync, unlinkSync, renameSync, existsSync } from "fs";
 import type {
   Memory,
   Entity,
@@ -120,6 +120,62 @@ export class LadybugProvider implements GraphProvider {
     }
   }
 
+  /**
+   * WAL-replay corruption signatures. lbug replays the WAL lazily on the
+   * first query against a connection, not on `new Database()` — so these
+   * surface here, past the constructor's `new Database()` guard. An unclean
+   * shutdown can leave a WAL that replays into an unresolved (`ANY`) vector
+   * type and poisons every subsequent query on the connection.
+   */
+  private static readonly WAL_REPLAY_CORRUPTION = [
+    "create a vector with ANY type",
+    "expected to be resolved during binding",
+  ];
+
+  /**
+   * Quarantine a corrupt WAL so the next open replays cleanly from the last
+   * checkpoint. Renamed (not deleted) — the file is kept for forensics, and
+   * any writes that lived only in the WAL are recoverable via `db:reindex`
+   * since the filesystem is the source of truth (Decision #11).
+   * Returns the quarantine path, or null if there was no WAL to move.
+   */
+  private quarantineWal(walPath: string): string | null {
+    if (!existsSync(walPath)) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const dest = `${walPath}.corrupt-${stamp}`;
+    renameSync(walPath, dest);
+    return dest;
+  }
+
+  /**
+   * Probe the connection with a trivial query to force WAL replay. If replay
+   * fails with a known corruption signature, quarantine the WAL and rebuild
+   * the connection from the last checkpoint. A non-replay failure, or a
+   * second failure after recovery (corruption in the checkpoint itself), is
+   * rethrown — callers (`hybridSearch`) degrade to filesystem-only results.
+   */
+  private async recoverIfWalReplayCorrupt(): Promise<void> {
+    try {
+      await this.conn.query("RETURN 1");
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!LadybugProvider.WAL_REPLAY_CORRUPTION.some((sig) => msg.includes(sig))) {
+        throw err;
+      }
+      const quarantined = this.quarantineWal(this.dataPath + ".wal");
+      console.error(
+        `[kb] LadybugDB WAL replay failed (${msg}). ` +
+        (quarantined
+          ? `Quarantined corrupt WAL → ${quarantined}. Graph restored to its last checkpoint — run \`bun run db:reindex\` to rebuild the full index from the filesystem.`
+          : "No WAL file found to quarantine — the checkpoint itself may be corrupt; run `bun run db:reindex`."),
+      );
+      this.db = new Database(this.dataPath);
+      this.conn = new Connection(this.db);
+      await this.conn.query("RETURN 1");
+    }
+  }
+
   /** Get dimension info from registry, throw if unknown */
   private getDimInfo(dim: number) {
     const info = this.dimensionRegistry.get(dim);
@@ -215,6 +271,7 @@ export class LadybugProvider implements GraphProvider {
 
   async init(): Promise<void> {
     this.conn = new Connection(this.db);
+    await this.recoverIfWalReplayCorrupt();
 
     await this.loadExtension("vector");
     await this.loadExtension("fts");
