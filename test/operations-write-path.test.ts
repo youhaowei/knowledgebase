@@ -580,6 +580,7 @@ describe("operations write-path invariants", () => {
     expect(existsSync(jsonlPath)).toBe(false);
   });
 
+
   test("Decision #11: drainTombstones preserves failed edge replays for the next sweep", async () => {
     createTempEnvironment();
 
