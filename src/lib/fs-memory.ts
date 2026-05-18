@@ -572,7 +572,15 @@ export function ensureMemoryFileTombstoned(namespace: string, id: string): boole
   assertValidMemoryId(id);
   const livePath = join(resolveNamespacePath(namespace), `${id}.md`);
   if (!existsSync(livePath)) return false;
-  renameSync(livePath, `${livePath}.deleted`);
+  try {
+    renameSync(livePath, `${livePath}.deleted`);
+  } catch (err) {
+    // Check-then-act race: a concurrent drainer or `forget` may have moved the
+    // file between existsSync and here. It is already tombstoned — a no-op,
+    // per this function's documented idempotency.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
   return true;
 }
 
