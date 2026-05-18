@@ -565,6 +565,11 @@ export function tombstoneMemoryFile(
  * or already-removed memory.
  */
 export function ensureMemoryFileTombstoned(namespace: string, id: string): boolean {
+  // `id` comes from a `_tombstones.jsonl` record, which can be hand-edited.
+  // Reject anything that isn't a plain memory id before interpolating it into
+  // a path — a value with separators would escape the namespace root and
+  // rename unrelated files.
+  assertValidMemoryId(id);
   const livePath = join(resolveNamespacePath(namespace), `${id}.md`);
   if (!existsSync(livePath)) return false;
   renameSync(livePath, `${livePath}.deleted`);

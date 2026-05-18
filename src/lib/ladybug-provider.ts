@@ -81,7 +81,15 @@ export function quarantineCorruptWal(walPath: string): string | null {
   if (!existsSync(walPath)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dest = `${walPath}.corrupt-${stamp}`;
-  renameSync(walPath, dest);
+  try {
+    renameSync(walPath, dest);
+  } catch (err) {
+    // A concurrent kb process recovering the same DB may have moved the WAL
+    // between the existsSync check and here — it is already quarantined, so
+    // treat the race as a no-op rather than failing recovery.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
   return dest;
 }
 

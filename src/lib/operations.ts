@@ -536,6 +536,14 @@ async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Prom
     // replacement row reusing the same name is not deleted on the next sweep.
     // Old logs may only carry `name`, so keep the legacy fallback for them.
     if (rec.id) {
+      // A hand-edited log line could carry a malformed id; drop it rather than
+      // re-trying forever (and never let it reach a filesystem path build).
+      try {
+        assertValidMemoryId(rec.id);
+      } catch {
+        console.error(`[kb] Tombstone record has invalid id, skipping:`, trimmed);
+        return false;
+      }
       // The intent record is written before the file rename, so a crash in
       // that window leaves the file live. Complete the tombstone here before
       // forgetting the graph row — otherwise the file ghosts (graph row gone,

@@ -547,6 +547,39 @@ describe("operations write-path invariants", () => {
     expect(existsSync(`${livePath}.deleted`)).toBe(true);
   });
 
+  test("Decision #11: drainTombstones skips a tombstone record with a path-traversal id", async () => {
+    createTempEnvironment();
+
+    const namespace = "default";
+    // A bystander memory creates the namespace directory and must survive.
+    const bystanderId = randomUUID();
+    writeMemoryFile(bystanderId, "body", makeFrontmatter({
+      id: bystanderId,
+      name: "Bystander",
+      namespace,
+    }));
+
+    const forgotten: string[] = [];
+    provider = makeProvider({
+      forgetMemoryById: async (mid: string) => {
+        forgotten.push(mid);
+        return true;
+      },
+    });
+
+    const jsonlPath = join(process.env.KB_MEMORY_PATH!, namespace, "_tombstones.jsonl");
+    writeFileSync(jsonlPath, JSON.stringify({ id: "../../../etc/passwd", name: "evil", reason: "x" }) + "\n");
+
+    const ops = await loadOperations();
+    const result = await ops.drainTombstones();
+
+    // The malformed id is rejected before any filesystem path is built or the
+    // graph row is touched, and the garbage record is dropped (not retried).
+    expect(result.memoriesForgotten).toBe(0);
+    expect(forgotten).toEqual([]);
+    expect(existsSync(jsonlPath)).toBe(false);
+  });
+
   test("Decision #11: drainTombstones preserves failed edge replays for the next sweep", async () => {
     createTempEnvironment();
 
