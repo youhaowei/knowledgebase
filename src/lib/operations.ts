@@ -23,7 +23,7 @@ import { tracked } from "./analytics.js";
 import {
   writeMemoryFile, readMemoryFile, appendToIndex, updateIndexEntry, generateIndex,
   assertValidMemoryId, ensureNamespacePath, resolveNamespacePath, listMemoryFiles, listNamespaceDirs, normalizeTags, normalizeNameForLookup, withNamespaceLock,
-  tombstoneMemoryFile, recordForgetEdge,
+  tombstoneMemoryFile, ensureMemoryFileTombstoned, recordForgetEdge,
 } from "./fs-memory.js";
 import type { MemoryFrontmatter, Origin } from "./fs-memory.js";
 
@@ -529,12 +529,18 @@ async function drainJsonlLog(
 
 async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Promise<number> {
   const logPath = join(resolveNamespacePath(namespace), "_tombstones.jsonl");
-  return drainJsonlLog(logPath, async (trimmed) => {
+  let recovered = false;
+  const applied = await drainJsonlLog(logPath, async (trimmed) => {
     const rec = JSON.parse(trimmed) as { id?: string; name?: string; reason?: string };
     // New tombstones include `id`; replay must target that exact memory so a
     // replacement row reusing the same name is not deleted on the next sweep.
     // Old logs may only carry `name`, so keep the legacy fallback for them.
     if (rec.id) {
+      // The intent record is written before the file rename, so a crash in
+      // that window leaves the file live. Complete the tombstone here before
+      // forgetting the graph row — otherwise the file ghosts (graph row gone,
+      // file still `indexedAt`, never re-indexed).
+      if (ensureMemoryFileTombstoned(namespace, rec.id)) recovered = true;
       return gp.forgetMemoryById(rec.id, namespace);
     }
     if (rec.name) {
@@ -544,6 +550,10 @@ async function drainMemoryTombstones(gp: GraphProvider, namespace: string): Prom
     console.error(`[kb] Tombstone record missing 'name', skipping:`, trimmed);
     return false;
   });
+  // A crash-recovery rename above leaves `_index.md` listing the now-tombstoned
+  // file; regenerate it once so degraded-mode search agrees with the graph.
+  if (recovered) generateIndex(resolveNamespacePath(namespace));
+  return applied;
 }
 
 async function drainEdgeTombstones(gp: GraphProvider, namespace: string): Promise<number> {

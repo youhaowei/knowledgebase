@@ -551,6 +551,26 @@ export function tombstoneMemoryFile(
   return { id: match.id, path: match.path, tombstonePath };
 }
 
+/**
+ * Idempotently completes a tombstone: if `{id}.md` is still live, rename it to
+ * `{id}.md.deleted`. Returns true if it performed the rename, false if the
+ * file was already tombstoned or gone.
+ *
+ * `tombstoneMemoryFile` persists the `_tombstones.jsonl` intent record *before*
+ * renaming the file. A crash in that window leaves the intent recorded but the
+ * file live and still `indexedAt` — the tombstone drain would then delete the
+ * graph row while the file ghosts (never re-indexed by the unindexed sweep).
+ * The drain calls this so the file is brought in line with the intent before
+ * the graph row is forgotten. Idempotent: safe to call on an already-tombstoned
+ * or already-removed memory.
+ */
+export function ensureMemoryFileTombstoned(namespace: string, id: string): boolean {
+  const livePath = join(resolveNamespacePath(namespace), `${id}.md`);
+  if (!existsSync(livePath)) return false;
+  renameSync(livePath, `${livePath}.deleted`);
+  return true;
+}
+
 function appendDurableJsonlRecord(jsonlPath: string, record: string): void {
   const fd = openSync(jsonlPath, "a");
   try {
