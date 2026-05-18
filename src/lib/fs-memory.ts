@@ -348,6 +348,9 @@ export function configureFsMemoryTimingForTests(overrides: Partial<typeof defaul
   if (overrides.staleLockAgeMs !== undefined) lockTimings.staleLockAgeMs = overrides.staleLockAgeMs;
 }
 
+// Test-only injection seam: a hook fired after the tombstone intent is
+// persisted but before the file rename, so tests can assert the ordering by
+// simulating a crash in that window. Undefined (no-op) in production.
 const tombstoneTimings: { afterIntentPersisted?: () => void } = {};
 
 export function configureFsMemoryTombstoneTimingForTests(
@@ -537,6 +540,10 @@ export function tombstoneMemoryFile(
   try {
     renameSync(match.path, tombstonePath);
   } catch (err) {
+    // Concurrent deletion between listMemoryFiles and rename: the intent
+    // record is already durable, so the reconciler still cleans up the graph
+    // row (idempotent). Returning null reports "not found" to the caller —
+    // an acceptable asymmetry; the intent is not lost.
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
@@ -558,6 +565,9 @@ function appendDurableJsonlRecord(jsonlPath: string, record: string): void {
   syncDirectoryEntry(dirname(jsonlPath));
 }
 
+// Fsync a directory so a newly-appended file's entry survives a crash.
+// POSIX-only: opening a directory for fsync works on macOS/Linux but throws
+// EISDIR on Windows. The project targets Bun on macOS/Linux, so this is fine.
 function syncDirectoryEntry(path: string): void {
   const fd = openSync(path, "r");
   try {
@@ -588,6 +598,11 @@ export function recordForgetEdge(
   // O_APPEND is atomic for single writes under PIPE_BUF on POSIX. Prior
   // read-concat-write silently lost concurrent records when called outside a
   // namespace lock — appendFileSync is both correct and lock-free-safe.
+  //
+  // Unlike tombstoneMemoryFile, this is best-effort (no fsync): edge-forget
+  // has no paired file rename, so there is no torn-state window where a lost
+  // record would leave the filesystem inconsistent. A crash simply drops the
+  // intent; the user re-runs forgetEdge.
   appendFileSync(jsonlPath, record);
 }
 
@@ -909,10 +924,6 @@ function readIndexCounts(lines: string[]): { total: number; unindexed: number } 
   };
 }
 
-/**
- * O(1) append: adds one table row to an existing _index.md without regenerating.
- * Creates _index.md with a minimal header if it doesn't exist yet.
- */
 /**
  * Updates a single existing row in `_index.md` by memory id. Falls back to a
  * full `generateIndex` regeneration if the row isn't found (e.g., on first
