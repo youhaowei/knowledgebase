@@ -36,11 +36,22 @@ function makeTestEdgeEmbeddingMaps(seeds: number[], dim = 2560): EmbeddingMap[] 
   return seeds.map((s) => makeTestEmbeddingMap(s, dim));
 }
 
+// Fixed test DB path, wiped before the suite runs (see beforeAll). The path is
+// fixed (not a temp dir) on purpose: the LadybugDB native addon segfaults on
+// teardown under Bun (CLAUDE.md "Bun-Specific"), so afterAll cleanup is
+// unreliable — a temp-dir-per-run approach would leak dirs into /tmp on every
+// crash. Wiping a fixed path in beforeAll runs *before* any crash and never
+// accumulates. This matters: afterEach cleanup is a soft delete (sets
+// `deletedAt`, doesn't remove nodes), so without the wipe, FTS-indexed zombie
+// duplicates from prior runs crowd live results out of the pre-filter top-N,
+// making fullTextSearchEdges/RRF/vectorSearch intermittently return empty.
+const TEST_DB_PATH = "./.test-ladybug";
+
 function createTestProvider(): GraphProvider {
   if (process.env.NEO4J_URI) {
     return new Neo4jProvider();
   }
-  return new LadybugProvider("./.test-ladybug");
+  return new LadybugProvider(TEST_DB_PATH);
 }
 
 describe("GraphProvider", () => {
@@ -48,6 +59,12 @@ describe("GraphProvider", () => {
   let testNamespace: string;
 
   beforeAll(async () => {
+    // Start from a clean DB so soft-deleted rows from prior runs can't poison
+    // the FTS index. Safe before init — no addon handle is open yet.
+    if (!process.env.NEO4J_URI) {
+      rmSync(TEST_DB_PATH, { recursive: true, force: true });
+      rmSync(`${TEST_DB_PATH}.wal`, { force: true });
+    }
     provider = createTestProvider();
     await provider.init();
   });
