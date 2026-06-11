@@ -24,6 +24,8 @@ interface SearchResult {
   subtitle?: string;
   name?: string;
   edgeId?: string;
+  /** Namespace of the source item — present on federated hits, absent for single-namespace searches. */
+  namespace?: string;
 }
 
 /**
@@ -70,6 +72,9 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
         const s = (data as { signals?: SearchSignals }).signals;
         setSignals(s ?? null);
 
+        // The search was federated when no namespace was passed — all results
+        // may span multiple namespaces and the namespace field is needed for
+        // correct lookup when selecting a hit from a non-default namespace.
         for (const m of data.memories) {
           mapped.push({
             id: `mem-${m.id}`,
@@ -77,6 +82,7 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
             title: m.name,
             subtitle: m.summary,
             name: m.name,
+            namespace: (m as { namespace?: string }).namespace,
           });
         }
 
@@ -87,6 +93,7 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
             title: e.name,
             subtitle: e.description ?? `${e.type} entity`,
             name: e.name,
+            namespace: (e as { namespace?: string }).namespace,
           });
         }
 
@@ -98,6 +105,7 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
             subtitle: e.fact,
             name: e.fact,
             edgeId: e.id,
+            namespace: (e as { namespace?: string }).namespace,
           });
         }
 
@@ -132,6 +140,7 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
         type: result.type as SelectedItem["type"],
         name: result.name ?? result.title,
         edgeId: result.edgeId,
+        namespace: result.namespace,
       });
     }
     onClose?.();
@@ -243,9 +252,16 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps) {
                     </div>
                   )}
                 </div>
-                <span className="text-[10px] text-text-tertiary shrink-0 mt-0.5">
-                  {result.type}
-                </span>
+                <div className="flex flex-col items-end gap-0.5 shrink-0 mt-0.5">
+                  <span className="text-[10px] text-text-tertiary">
+                    {result.type}
+                  </span>
+                  {result.namespace && (
+                    <span className="text-[10px] text-text-tertiary/70 font-mono">
+                      ({result.namespace})
+                    </span>
+                  )}
+                </div>
               </button>
             ))}
           </div>

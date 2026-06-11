@@ -84,6 +84,7 @@ export const searchMemories = createServerFn()
         name: m.name,
         summary: m.summary,
         category: m.category,
+        namespace: m.namespace,
         createdAt: m.createdAt,
       })),
       edges: result.edges.map((e) => ({
@@ -96,6 +97,7 @@ export const searchMemories = createServerFn()
         confidence: e.confidence,
         confidenceReason: e.confidenceReason,
         validAt: e.validAt,
+        namespace: e.namespace,
         createdAt: e.createdAt,
       })),
       entities: result.entities.map((e) => ({
@@ -103,6 +105,8 @@ export const searchMemories = createServerFn()
         type: e.type,
         description: e.description,
         summary: e.summary,
+        // Entities are cross-namespace by design — namespace may be null for global scope.
+        namespace: e.namespace ?? undefined,
       })),
       files: result.files,
       // Spec Decision #8: `signals` is the public health contract — UI badges
