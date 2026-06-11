@@ -42,3 +42,7 @@ memories.json
 .ladybug-*
 .lbug/
 .claude/worktrees/
+
+# wystack-agent-kit workspace (gitignored; .wystack.json pointer is tracked)
+.wystack/
+.wystack.*-bak/
