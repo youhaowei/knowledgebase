@@ -99,7 +99,7 @@ const lockTimings = { ...defaultLockTimings };
 // ---------------------------------------------------------------------------
 
 /** Lazy getter — reads env at call time so tests can set KB_MEMORY_PATH before first use. */
-function getKbRoot(): string {
+export function getKbRoot(): string {
   const envPath = process.env.KB_MEMORY_PATH?.trim();
   return envPath && envPath.length > 0 ? envPath : join(homedir(), ".kb", "memories");
 }

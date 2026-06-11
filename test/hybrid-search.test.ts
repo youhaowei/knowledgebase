@@ -427,3 +427,34 @@ describe("hybridSearch file results", () => {
     expect(result.signals.contradictionsDetected).toBe(false);
   });
 });
+
+describe("hybridSearch federated mode (namespace === undefined)", () => {
+  test("passes undefined namespace through to graphSearch and spans file namespaces", async () => {
+    const nsA = `hybrid-fed-a-${randomUUID().slice(0, 8)}`;
+    const nsB = `hybrid-fed-b-${randomUUID().slice(0, 8)}`;
+    const idA = randomUUID();
+    const idB = randomUUID();
+    writeMemoryFile(idA, "federated probe body", makeFrontmatter({ id: idA, namespace: nsA, name: "federated probe a" }));
+    writeMemoryFile(idB, "federated probe body", makeFrontmatter({ id: idB, namespace: nsB, name: "federated probe b" }));
+
+    let receivedNamespace: string | undefined = "sentinel";
+    configureHybridSearchDependenciesForTests({
+      graphSearch: async (_query, namespace) => {
+        receivedNamespace = namespace;
+        return { memories: [], edges: [], entities: [], intent: "general", guidance: "" };
+      },
+    });
+
+    const result = await hybridSearch("federated probe", undefined, 10);
+
+    // Graph layer must receive undefined — providers drop the namespace
+    // filter and rank globally; per-namespace fan-out would distort RRF.
+    expect(receivedNamespace).toBeUndefined();
+    const ids = result.files.map((f) => f.id);
+    expect(ids).toContain(idA);
+    expect(ids).toContain(idB);
+    const byId = new Map(result.files.map((f) => [f.id, f.namespace]));
+    expect(byId.get(idA)).toBe(nsA);
+    expect(byId.get(idB)).toBe(nsB);
+  });
+});

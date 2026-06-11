@@ -20,7 +20,7 @@ import * as ops from "@/lib/operations.js";
 import { hybridSearch } from "@/lib/hybrid-search.js";
 import { analyticsContext } from "@/lib/analytics.js";
 import type { Memory, StoredEdge, StoredEntity, DetailLevel } from "@/types.js";
-import { namespaceSchema } from "@/types.js";
+import { namespaceSchema, optionalNamespaceSchema } from "@/types.js";
 
 function formatMemory(m: Memory, detail: DetailLevel) {
   if (detail === "summary") return { id: m.id, name: m.name, abstract: m.abstract };
@@ -104,8 +104,8 @@ export function createKbMcpServer() {
     "Search the knowledge graph. Returns edges (facts as relationships), memories, entities, and files. Response includes `signals` (degraded, unindexedCount, staleCount, contradictionsDetected) for health-aware rendering — prefer this over the deprecated `guidance` string. Use detail parameter to control response granularity: 'summary' (cheapest, abstracts only), 'full' (default, summaries + facts), 'source' (everything including full text).",
     {
       query: z.string().describe("Search query"),
-      namespace: namespaceSchema
-        .describe("Namespace to search within"),
+      namespace: optionalNamespaceSchema
+        .describe("Optional namespace filter. Omit to search across all namespaces (the default)"),
       limit: z.number().default(10).describe("Max results"),
       detail: z.enum(["summary", "full", "source"]).default("full").describe("Response detail level: summary (L0 abstracts), full (L1 summaries, default), source (L2 full text)"),
       tags: z.array(z.string()).optional().describe("Filter by tags (e.g., ['bug', 'worktree'])"),

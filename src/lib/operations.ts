@@ -615,10 +615,13 @@ export async function addMemory(
   }));
 }
 
-/** Graph-only search. For combined file + graph results, use hybridSearch. */
+/**
+ * Graph-only search. For combined file + graph results, use hybridSearch.
+ * `namespace === undefined` = federated — providers drop the namespace filter.
+ */
 export async function graphSearch(
   query: string,
-  namespace = "default",
+  namespace?: string,
   limit = 10,
 ): Promise<{
   memories: Memory[];
