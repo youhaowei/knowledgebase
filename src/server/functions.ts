@@ -914,7 +914,8 @@ export const getEntity = createServerFn()
 const streamingSearchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().default(10),
-  namespace: namespaceSchema,
+  // Optional: omitted = federated search across all namespaces.
+  namespace: optionalNamespaceSchema,
 });
 
 export const streamingSearch = createServerFn()
@@ -938,6 +939,7 @@ export const streamingSearch = createServerFn()
         data: {
           id: file.id,
           name: file.name,
+          namespace: file.namespace,
           source: file.source,
           path: file.path,
           indexed: file.indexed,
@@ -957,6 +959,7 @@ export const streamingSearch = createServerFn()
           name: memory.name,
           summary: memory.summary,
           category: memory.category,
+          namespace: memory.namespace,
           createdAt: memory.createdAt,
         },
       };
@@ -975,6 +978,7 @@ export const streamingSearch = createServerFn()
           confidence: edge.confidence,
           confidenceReason: edge.confidenceReason,
           validAt: edge.validAt,
+          namespace: edge.namespace,
           createdAt: edge.createdAt,
         },
       };
@@ -988,6 +992,8 @@ export const streamingSearch = createServerFn()
           type: entity.type,
           description: entity.description,
           summary: entity.summary,
+          // Entities are cross-namespace by design — namespace may be null for global scope.
+          namespace: entity.namespace ?? undefined,
         },
       };
     }
