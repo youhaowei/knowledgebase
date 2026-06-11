@@ -90,7 +90,7 @@ import neo4j from "neo4j-driver";
 
 // Internal imports with @/ alias
 import { Entity, Memory } from "@/types";
-import { createKnowledgebaseMcpServer } from "@/mcp-server";
+import { createKbMcpServer } from "@/mcp-server";
 ```
 
 ### Formatting

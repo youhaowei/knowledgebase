@@ -8,7 +8,7 @@
 
 import { createFileRoute } from "@tanstack/react-router";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { createKnowledgebaseMcpServer } from "@/mcp-server";
+import { createKbMcpServer } from "@/mcp-server";
 import { ensureServerIndexerStarted } from "@/server/indexer";
 
 // Ensure the background indexer runs whenever the MCP endpoint is active.
@@ -20,7 +20,7 @@ if (process.env.KB_DISABLE_SERVER_INDEXER !== "true") {
 
 type Session = {
   transport: WebStandardStreamableHTTPServerTransport;
-  server: ReturnType<typeof createKnowledgebaseMcpServer>;
+  server: ReturnType<typeof createKbMcpServer>;
   lastActivityMs: number;
   // Number of requests currently being handled by this transport. The idle
   // pruner must skip sessions with in-flight work, otherwise a long-running
@@ -124,7 +124,7 @@ async function handleMcpRequest(request: Request): Promise<Response> {
   // New session — register via callback since sessionId is set during handleRequest.
   // Take this opportunity to prune sessions that a client silently abandoned.
   pruneIdleSessions();
-  const mcpServer = createKnowledgebaseMcpServer();
+  const mcpServer = createKbMcpServer();
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),

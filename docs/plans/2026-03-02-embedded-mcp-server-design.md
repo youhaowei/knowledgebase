@@ -18,23 +18,23 @@ Workforce (desktop agentic orchestrator) needs knowledgebase as a built-in conte
 ## Package Exports
 
 ```
-"knowledgebase/operations" → addMemory, search, getByName, forget, forgetEdge, stats
-"knowledgebase/mcp"        → createKnowledgebaseMcpServer()
-"knowledgebase/types"      → Entity, Memory, StoredEdge, etc.
+"@wystack/kb/operations" → addMemory, search, getByName, forget, forgetEdge, stats
+"@wystack/kb/mcp"        → createKbMcpServer()
+"@wystack/kb/types"      → Entity, Memory, StoredEdge, etc.
 ```
 
 ## Consumer Patterns
 
 **Agent tools (MCP):**
 ```typescript
-import { createKnowledgebaseMcpServer } from "knowledgebase/mcp"
-const server = createKnowledgebaseMcpServer()
+import { createKbMcpServer } from "@wystack/kb/mcp"
+const server = createKbMcpServer()
 await server.connect(transport)
 ```
 
 **Server-side hooks (direct):**
 ```typescript
-import { addMemory, search } from "knowledgebase/operations"
+import { addMemory, search } from "@wystack/kb/operations"
 await addMemory(text, name, namespace)
 ```
 

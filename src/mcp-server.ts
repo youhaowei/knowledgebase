@@ -1,16 +1,16 @@
 /**
  * Embeddable MCP Server Factory
  *
- * Creates an MCP server with knowledgebase tools using the official SDK.
+ * Creates an MCP server with KB tools using the official SDK.
  * Two consumption patterns:
  *
  * 1. HTTP endpoint (standalone KB app):
- *    const server = createKnowledgebaseMcpServer()
+ *    const server = createKbMcpServer()
  *    server.connect(new WebStandardStreamableHTTPServerTransport())
  *
  * 2. Embedded in Workforce (or any consumer):
- *    import { createKnowledgebaseMcpServer } from "knowledgebase/mcp"
- *    const server = createKnowledgebaseMcpServer()
+ *    import { createKbMcpServer } from "@wystack/kb/mcp"
+ *    const server = createKbMcpServer()
  *    server.connect(new StdioServerTransport())
  */
 
@@ -57,9 +57,9 @@ function withMcpSource<A, R>(fn: (args: A) => Promise<R>) {
   return (args: A) => analyticsContext.run({ source: "mcp" }, () => fn(args));
 }
 
-export function createKnowledgebaseMcpServer() {
+export function createKbMcpServer() {
   const server = new McpServer(
-    { name: "knowledgebase", version: "1.0.0" },
+    { name: "kb", version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
 
