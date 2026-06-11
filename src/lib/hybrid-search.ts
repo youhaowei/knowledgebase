@@ -8,7 +8,7 @@
 
 import * as ops from "./operations.js";
 import { fileSearch, type FileSearchResult } from "./file-search.js";
-import { listMemoryFiles, normalizeTags } from "./fs-memory.js";
+import { listMemoryFiles, listNamespaceDirs, normalizeTags } from "./fs-memory.js";
 import type { Memory, StoredEdge, StoredEntity, Intent } from "../types.js";
 
 export type { FileSearchResult };
@@ -56,7 +56,7 @@ const hybridSearchDependencies = {
 
 async function runGraphSearch(
   query: string,
-  namespace: string,
+  namespace: string | undefined,
   limit: number,
 ): Promise<GraphSearchPayload | null> {
   try {
@@ -95,9 +95,16 @@ export function filterGraphResultsByTaggedFileIds(
   return { memories, edges, entities };
 }
 
+/**
+ * `namespace === undefined` = federated search (the default for read paths):
+ * graph queries drop their namespace filter (vector/FTS indexes are global,
+ * so ranking stays correct without per-namespace fusion) and file search
+ * spans every namespace directory. Pass an explicit namespace to scope —
+ * namespaces are write-ownership boundaries, not read walls.
+ */
 export async function hybridSearch(
   query: string,
-  namespace = "default",
+  namespace?: string,
   limit = 10,
   tags?: string[],
 ): Promise<HybridSearchResult> {
@@ -118,8 +125,11 @@ export async function hybridSearch(
   // results would otherwise be incorrectly dropped from graph results even
   // when graph ranks it highly (US-8 breaks at scale).
   if (normalizedTags && normalizedTags.length > 0) {
+    const allowlistEntries = namespace !== undefined
+      ? listMemoryFiles(namespace)
+      : listNamespaceDirs().flatMap((ns) => listMemoryFiles(ns));
     const taggedFileIds = new Set(
-      listMemoryFiles(namespace)
+      allowlistEntries
         .filter((entry) => normalizedTags.every((tag) => entry.tags.includes(tag)))
         .map((entry) => entry.id),
     );

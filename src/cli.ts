@@ -160,16 +160,18 @@ async function handleAdd(ctx: CmdContext) {
   out(ctx, ctx.json ? result : msg);
 }
 
-function formatFileResult(f: { id: string; name: string; indexed: boolean; tags: string[]; matchContext?: string }): string {
+function formatFileResult(f: { id: string; name: string; namespace?: string; indexed: boolean; tags: string[]; matchContext?: string }, showNamespace = false): string {
   const label = f.name || `(unnamed: ${f.id.slice(0, 7)})`;
+  const ns = showNamespace && f.namespace ? ` (${f.namespace})` : "";
   const status = f.indexed ? "" : " [unindexed]";
   const tags = f.tags.length ? ` [${f.tags.join(", ")}]` : "";
   const context = f.matchContext ? `\n    ...${f.matchContext.slice(0, 80)}...` : "";
-  return `  ${label}${status}${tags}${context}`;
+  return `  ${label}${ns}${status}${tags}${context}`;
 }
 
-function formatMemory(m: { id: string; name: string; summary: string; text: string }): string {
-  return `  [${m.id}] ${m.name || "(unnamed)"} — ${m.summary || m.text.slice(0, 80)}`;
+function formatMemory(m: { id: string; name: string; namespace?: string; summary: string; text: string }, showNamespace = false): string {
+  const ns = showNamespace && m.namespace ? ` (${m.namespace})` : "";
+  return `  [${m.id}] ${m.name || "(unnamed)"}${ns} — ${m.summary || m.text.slice(0, 80)}`;
 }
 
 function printSection<T>(label: string, items: T[], fmt: (item: T) => string) {
@@ -178,9 +180,9 @@ function printSection<T>(label: string, items: T[], fmt: (item: T) => string) {
   for (const item of items) console.log(fmt(item));
 }
 
-function printSearchResults(result: Awaited<ReturnType<typeof hybridSearch>>) {
-  printSection("Files", result.files, formatFileResult);
-  printSection("Memories", result.memories, formatMemory);
+function printSearchResults(result: Awaited<ReturnType<typeof hybridSearch>>, showNamespace = false) {
+  printSection("Files", result.files, (f) => formatFileResult(f, showNamespace));
+  printSection("Memories", result.memories, (m) => formatMemory(m, showNamespace));
   printSection("Edges", result.edges, formatEdge);
   printSection("Entities", result.entities, formatEntity);
 
@@ -207,13 +209,19 @@ async function handleSearch(ctx: CmdContext) {
   const parsed = parseInt(ctx.flags["--limit"] ?? "", 10);
   const limit = Number.isNaN(parsed) ? 10 : parsed;
   const tags = ctx.flags["--tag"]?.split(",").filter(Boolean);
-  const result = await hybridSearch(query, ctx.namespace, limit, tags);
+  // Search federates across all namespaces unless --ns is passed explicitly.
+  // ctx.namespace can't distinguish "absent" from "default", so read the raw
+  // flag: namespaces are write-ownership boundaries, not read walls — only an
+  // explicit --ns narrows the read.
+  const explicitNs = ctx.flags["--namespace"]?.trim();
+  const namespace = explicitNs ? ctx.namespace : undefined;
+  const result = await hybridSearch(query, namespace, limit, tags);
 
   if (ctx.json) {
     out(ctx, result);
     return;
   }
-  printSearchResults(result);
+  printSearchResults(result, namespace === undefined);
 }
 
 async function handleGet(ctx: CmdContext) {
@@ -397,7 +405,7 @@ Usage: kb <command> [args] [flags]
 
 Commands:
   add <text>                    Save a memory to disk (background indexing)
-  search <query>                Hybrid search (file + semantic)
+  search <query>                Hybrid search (file + semantic) across all namespaces
   get <name>                    Look up entity by name
   forget <name>                 Tombstone a memory by name (recoverable via mv)
   forget-edge <id> <reason>     Invalidate an edge with reason
@@ -406,7 +414,7 @@ Commands:
   migrate                       Export memories to ~/.kb/memories/ (filesystem)
 
 Flags:
-  --ns, --namespace <name>      Namespace (default: "default")
+  --ns, --namespace <name>      Namespace (writes default to "default"; search spans all unless set)
   --env <name>                  Environment (data isolation, e.g. "test")
   --name <name>                 Name for add command
   --origin <type>               Origin type (manual|retro|mcp|import)

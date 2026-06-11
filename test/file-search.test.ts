@@ -16,6 +16,8 @@ import { fileSearch } from "../src/lib/file-search";
 // ---------------------------------------------------------------------------
 
 const TEST_NS = `file-search-test-${randomUUID().slice(0, 8)}`;
+// Second namespace for federated-search tests (namespace === undefined spans all)
+const TEST_NS_2 = `file-search-fed-${randomUUID().slice(0, 8)}`;
 
 function makeFrontmatter(overrides: Partial<MemoryFrontmatter> & { id: string; name: string }): MemoryFrontmatter {
   return {
@@ -33,6 +35,7 @@ let idBeta: string;
 let idGamma: string;
 let idTagged: string;
 let idIndexedNotes: string;
+let idSatellite: string;
 
 beforeAll(async () => {
   idAlpha = randomUUID();
@@ -40,6 +43,14 @@ beforeAll(async () => {
   idGamma = randomUUID();
   idTagged = randomUUID();
   idIndexedNotes = randomUUID();
+  idSatellite = randomUUID();
+
+  // Lives in TEST_NS_2 — visible only to federated (namespace-less) searches
+  await writeMemoryFile(
+    idSatellite,
+    "Satellite body with a cross-ns-body-phrase inside.",
+    makeFrontmatter({ id: idSatellite, name: "alpha satellite", namespace: TEST_NS_2 }),
+  );
 
   // "alpha memory" — name matches "alpha"
   await writeMemoryFile(
@@ -413,5 +424,30 @@ describe("fileSearch — edge cases", () => {
     const results = await fileSearch("alpha", TEST_NS);
     // Should still get index scan results even if rg returned nothing useful
     expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("fileSearch — federated (namespace === undefined)", () => {
+  test("spans all namespaces and labels each result with its namespace", async () => {
+    const results = await fileSearch("alpha", undefined);
+    const local = results.find((r) => r.id === idAlpha);
+    const satellite = results.find((r) => r.id === idSatellite);
+    expect(local).toBeDefined();
+    expect(satellite).toBeDefined();
+    expect(local!.namespace).toBe(TEST_NS);
+    expect(satellite!.namespace).toBe(TEST_NS_2);
+  });
+
+  test("explicit namespace still excludes other namespaces", async () => {
+    const results = await fileSearch("alpha", TEST_NS);
+    expect(results.find((r) => r.id === idAlpha)).toBeDefined();
+    expect(results.find((r) => r.id === idSatellite)).toBeUndefined();
+  });
+
+  test("ripgrep body matches surface across namespaces", async () => {
+    const results = await fileSearch("cross-ns-body-phrase", undefined);
+    const satellite = results.find((r) => r.id === idSatellite);
+    expect(satellite).toBeDefined();
+    expect(satellite!.matchContext).toContain("cross-ns-body-phrase");
   });
 });

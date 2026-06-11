@@ -9,12 +9,14 @@
  */
 
 import { statSync, readFileSync } from "fs";
+import { basename, dirname } from "path";
 import matter from "gray-matter";
-import { listMemoryFiles, normalizeTags, resolveNamespacePath, type MemoryFileEntry } from "./fs-memory.js";
+import { getKbRoot, listMemoryFiles, listNamespaceDirs, normalizeTags, resolveNamespacePath, type MemoryFileEntry } from "./fs-memory.js";
 
 export interface FileSearchResult {
   id: string;
   name: string;
+  namespace: string;             // which namespace the file lives in (federated search spans all)
   path: string;                  // absolute file path (Spec Decision #8 public contract)
   source: "file" | "index";      // "index" = matched via _index.md fast path, "file" = ripgrep body match
   indexed: boolean;              // whether the graph has extracted entities/edges for this file (false = pending)
@@ -60,6 +62,16 @@ function resolveIndexedAt(entry: MemoryFileEntry): string | undefined {
 export interface FileSearchOptions {
   tags?: string[];
   limit?: number;  // default 20
+}
+
+/**
+ * Memory files live directly inside their namespace directory
+ * (`{root}/{namespace}/{id}.md`), so the parent directory name IS the
+ * namespace. Derived here rather than threaded through MemoryFileEntry to
+ * keep the entry shape (and its `_index.md` fast path) untouched.
+ */
+function namespaceFromPath(filePath: string): string {
+  return basename(dirname(filePath));
 }
 
 function normalizeTagFilter(tags?: string[]): string[] | undefined {
@@ -115,6 +127,7 @@ function indexScanFromEntries(
     return {
       id: entry.id,
       name: entry.name,
+      namespace: namespaceFromPath(entry.path),
       path: entry.path,
       source: "index" as const,
       indexed: entry.indexed,
@@ -294,6 +307,7 @@ function mergeRgMatches(
       resultById.set(entry.id, {
         id: entry.id,
         name: entry.name,
+        namespace: namespaceFromPath(entry.path),
         path: entry.path,
         source: "file",
         indexed: entry.indexed,
@@ -310,17 +324,25 @@ function mergeRgMatches(
  * Main search function. Runs indexScan + rgSearch in parallel, merges and deduplicates.
  *
  * Sort order: indexed files first, then by name match relevance (exact before contains).
+ *
+ * `namespace === undefined` = federated mode: search every namespace in one
+ * pass. ripgrep runs over the kb root (one process covers all namespace
+ * subdirectories) and the entry list is the union of all namespaces. Stray
+ * rg hits outside known namespaces are dropped by the entry-path join in
+ * mergeRgMatches.
  */
 export async function fileSearch(
   query: string,
-  namespace: string,
+  namespace: string | undefined,
   options?: FileSearchOptions,
 ): Promise<FileSearchResult[]> {
   const limit = options?.limit ?? 20;
-  const namespacePath = resolveNamespacePath(namespace);
+  const searchPath = namespace !== undefined ? resolveNamespacePath(namespace) : getKbRoot();
 
   // Load entries once, share between indexScan and mergeRgMatches
-  const allEntries = listMemoryFiles(namespace);
+  const allEntries = namespace !== undefined
+    ? listMemoryFiles(namespace)
+    : listNamespaceDirs().flatMap((ns) => listMemoryFiles(ns));
   const normalizedTags = normalizeTagFilter(options?.tags);
 
   const [indexResults, rgMatches] = await Promise.all([
@@ -328,7 +350,7 @@ export async function fileSearch(
     // entries that would never be returned. rgSearch adds body matches on
     // top, but the resultById map keeps the total bounded.
     Promise.resolve(indexScanFromEntries(query, allEntries, normalizedTags, limit)),
-    rgSearch(query, namespacePath),
+    rgSearch(query, searchPath),
   ]);
 
   const resultById = new Map<string, FileSearchResult>();

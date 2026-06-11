@@ -68,7 +68,8 @@ export const listNamespaces = createServerFn().handler(async () => {
 const searchSchema = z.object({
   query: z.string().min(1, "Query is required"),
   limit: z.number().int().positive().max(100).default(10),
-  namespace: namespaceSchema,
+  // Optional: omitted = federated search across all namespaces.
+  namespace: optionalNamespaceSchema,
 });
 
 export const searchMemories = createServerFn()
