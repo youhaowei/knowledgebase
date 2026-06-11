@@ -1,6 +1,6 @@
 /**
- * Load memories from memories.json into the knowledgebase
- * Useful for initializing the knowledgebase with its own documentation
+ * Load memories from memories.json into the KB
+ * Useful for initializing the KB with its own documentation
  *
  * Usage: bun run src/lib/load-memories.ts
  */

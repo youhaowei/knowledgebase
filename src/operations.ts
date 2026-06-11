@@ -1,7 +1,7 @@
 /**
  * Public Operations API
  *
- * Entry point for "knowledgebase/operations" package export.
+ * Entry point for "@wystack/kb/operations" package export.
  * Re-exports business logic functions for direct consumption
  * by external packages (e.g., Workforce server-side hooks).
  */
